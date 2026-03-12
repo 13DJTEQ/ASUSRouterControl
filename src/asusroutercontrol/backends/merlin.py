@@ -83,29 +83,46 @@ class MerlinBackend(FirmwareBackend):
             return []
 
         devices: list[Device] = []
-        if not data:
+        if not data or not isinstance(data, dict):
             return devices
 
-        # asusrouter returns client data as a dict keyed by MAC
-        clients = data if isinstance(data, dict) else {}
-        for mac, info in clients.items():
-            if not isinstance(info, dict):
-                continue
-            conn = self._parse_connection_type(info)
-            devices.append(
-                Device(
-                    mac=str(mac),
-                    ip=info.get("ip"),
-                    hostname=info.get("name") or info.get("hostname"),
-                    connection=conn,
-                    band=info.get("band"),
-                    rssi=info.get("rssi"),
-                    tx_rate_mbps=info.get("tx_rate"),
-                    rx_rate_mbps=info.get("rx_rate"),
-                    is_online=info.get("online", True),
-                    last_seen=now,
+        # asusrouter returns dict[MAC, AsusClient] with rich objects
+        for mac, client in data.items():
+            try:
+                desc = getattr(client, "description", None)
+                conn_obj = getattr(client, "connection", None)
+                state = getattr(client, "state", None)
+
+                hostname = getattr(desc, "name", None) if desc else None
+                # Library uses MAC as name when hostname is unknown
+                if hostname and hostname.upper() == str(mac).upper():
+                    hostname = None
+
+                conn_type = self._parse_connection_obj(conn_obj)
+                ip_addr = getattr(conn_obj, "ip_address", None)
+                rssi = getattr(conn_obj, "rssi", None)
+                tx_rate = getattr(conn_obj, "tx_rate", None)
+                rx_rate = getattr(conn_obj, "rx_rate", None)
+
+                # Determine online from state enum
+                is_online = "CONNECTED" in str(state) if state else True
+
+                devices.append(
+                    Device(
+                        mac=str(mac),
+                        ip=str(ip_addr) if ip_addr else None,
+                        hostname=hostname,
+                        connection=conn_type,
+                        band=str(conn_type.value) if conn_type != ConnectionType.WIRED else None,
+                        rssi=int(rssi) if rssi is not None else None,
+                        tx_rate_mbps=float(tx_rate) if tx_rate is not None else None,
+                        rx_rate_mbps=float(rx_rate) if rx_rate is not None else None,
+                        is_online=is_online,
+                        last_seen=now,
+                    )
                 )
-            )
+            except Exception:
+                log.debug("Failed to parse client %s", mac)
         return devices
 
     async def get_traffic_stats(self) -> TrafficSnapshot:
@@ -119,12 +136,14 @@ class MerlinBackend(FirmwareBackend):
         if not data or not isinstance(data, dict):
             return TrafficSnapshot()
 
+        # Network data is nested: data["wan"] has rx/tx/rx_speed/tx_speed
+        wan_net = data.get("wan", {})
         return TrafficSnapshot(
             timestamp=datetime.utcnow(),
-            rx_bytes=data.get("rx", 0),
-            tx_bytes=data.get("tx", 0),
-            rx_rate_bps=data.get("rx_speed"),
-            tx_rate_bps=data.get("tx_speed"),
+            rx_bytes=wan_net.get("rx", 0),
+            tx_bytes=wan_net.get("tx", 0),
+            rx_rate_bps=wan_net.get("rx_speed"),
+            tx_rate_bps=wan_net.get("tx_speed"),
         )
 
     async def get_system_info(self) -> SystemInfo:
@@ -134,7 +153,11 @@ class MerlinBackend(FirmwareBackend):
         try:
             cpu_data = await router.async_get_data(AsusData.CPU)
             if cpu_data and isinstance(cpu_data, dict):
-                info.cpu_usage_percent = cpu_data.get("total", {}).get("usage")
+                total_cpu = cpu_data.get("total", {})
+                cpu_total = total_cpu.get("total", 0)
+                cpu_used = total_cpu.get("used", 0)
+                if cpu_total:
+                    info.cpu_usage_percent = round((cpu_used / cpu_total) * 100, 1)
         except Exception:
             log.debug("CPU data unavailable")
 
@@ -145,18 +168,43 @@ class MerlinBackend(FirmwareBackend):
                 used = ram_data.get("used", 0)
                 info.ram_total_mb = total / 1024 if total else None
                 info.ram_used_mb = used / 1024 if used else None
-                if total:
-                    info.ram_usage_percent = round((used / total) * 100, 1)
+                info.ram_usage_percent = ram_data.get("usage")
         except Exception:
             log.debug("RAM data unavailable")
 
         try:
             fw_data = await router.async_get_data(AsusData.FIRMWARE)
             if fw_data and isinstance(fw_data, dict):
-                info.firmware_version = fw_data.get("current")
-                info.model = fw_data.get("model")
+                raw_fw = fw_data.get("current")
+                info.firmware_version = str(raw_fw) if raw_fw is not None else None
         except Exception:
             log.debug("Firmware data unavailable")
+
+        # Uptime + model from SYSINFO
+        try:
+            sys_data = await router.async_get_data(AsusData.SYSINFO)
+            if sys_data and isinstance(sys_data, dict):
+                sys_info = sys_data.get("sys", {})
+                uptime_str = sys_info.get("uptimeStr", "")
+                # Parse "...(<N> secs since boot)" pattern
+                import re
+                m = re.search(r"\((\d+)\s+secs? since boot\)", uptime_str)
+                if m:
+                    info.uptime_seconds = int(m.group(1))
+        except Exception:
+            log.debug("SYSINFO data unavailable")
+
+        # Temperature
+        try:
+            temp_data = await router.async_get_data(AsusData.TEMPERATURE)
+            if temp_data and isinstance(temp_data, dict):
+                # Keys may be enum or string; find CPU temp
+                for k, v in temp_data.items():
+                    if "cpu" in str(k).lower():
+                        info.temperature_c = float(v)
+                        break
+        except Exception:
+            log.debug("Temperature data unavailable")
 
         return info
 
@@ -171,11 +219,36 @@ class MerlinBackend(FirmwareBackend):
         if not data or not isinstance(data, dict):
             return WANStatus()
 
+        # Parse nested WAN structure:
+        # data["internet"] has link status + ip_address
+        # data["0"] is primary WAN with real_ip, gateway, dns, state
+        internet = data.get("internet", {})
+        primary = data.get("0", data.get(0, {}))
+
+        # Resolve link status from enum — str() gives value ("2"), .name gives "CONNECTED"
+        link = internet.get("link", None)
+        link_name = getattr(link, "name", str(link)).upper() if link else ""
+        status = "connected" if "CONNECTED" in link_name else "disconnected"
+
+        ip_addr = internet.get("ip_address") or primary.get("real_ip")
+
+        # Gateway and DNS may be in primary or from DEVICEMAP; handle None gracefully
+        gateway = primary.get("gateway")
+        dns_raw = primary.get("dns")
+        if dns_raw is None:
+            dns_list = []
+        elif isinstance(dns_raw, str):
+            dns_list = [d.strip() for d in dns_raw.split(",") if d.strip()]
+        elif isinstance(dns_raw, list):
+            dns_list = [str(d) for d in dns_raw]
+        else:
+            dns_list = []
+
         return WANStatus(
-            status=data.get("status", "unknown"),
-            ip_address=data.get("ip"),
-            gateway=data.get("gateway"),
-            dns=data.get("dns", []) if isinstance(data.get("dns"), list) else [],
+            status=status,
+            ip_address=str(ip_addr) if ip_addr else None,
+            gateway=str(gateway) if gateway else None,
+            dns=dns_list,
         )
 
     async def get_wifi_clients(self) -> list[WiFiClient]:
@@ -251,17 +324,22 @@ class MerlinBackend(FirmwareBackend):
     # --- Helpers ---
 
     @staticmethod
-    def _parse_connection_type(info: dict) -> ConnectionType:
-        conn = info.get("connection_type", "").lower()
-        if "wired" in conn or info.get("isWL") == 0:
+    def _parse_connection_obj(conn_obj) -> ConnectionType:
+        """Map asusrouter connection object to our ConnectionType."""
+        if conn_obj is None:
+            return ConnectionType.UNKNOWN
+        conn_type = getattr(conn_obj, "type", None)
+        type_str = getattr(conn_type, "name", str(conn_type)).upper() if conn_type else ""
+        if "WIRED" in type_str:
             return ConnectionType.WIRED
-        band = str(info.get("band", "")).lower()
-        if "5" in band:
+        if "5G" in type_str:
             return ConnectionType.WIFI_5G
-        if "6" in band:
+        if "6G" in type_str:
             return ConnectionType.WIFI_6G
-        if "2" in band:
+        if "2G" in type_str or "WLAN" in type_str:
             return ConnectionType.WIFI_2G
-        if info.get("isWL"):
-            return ConnectionType.WIFI_2G  # Default wireless to 2.4
+        # Fallback: if object is a WLAN subclass, it's wireless
+        cls_name = type(conn_obj).__name__
+        if "Wlan" in cls_name:
+            return ConnectionType.WIFI_2G
         return ConnectionType.UNKNOWN

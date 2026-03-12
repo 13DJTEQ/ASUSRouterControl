@@ -1,0 +1,45 @@
+{
+  "speed_tests": [
+    {"timestamp": "2026-01-01T00:00:00", "download_bps": 304000000, "upload_bps": 36000000, "ping_ms": 10.9, "jitter_ms": 2.5, "quality": "ok"},
+    {"timestamp": "2026-01-01T06:00:00", "download_bps": 305000000, "upload_bps": 35900000, "ping_ms": 10.8, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-01T12:00:00", "download_bps": 304000000, "upload_bps": 36000000, "ping_ms": 10.9, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-01T18:00:00", "download_bps": 303000000, "upload_bps": 36000000, "ping_ms": 11.0, "jitter_ms": 2.5, "quality": "ok"},
+    {"timestamp": "2026-01-02T00:00:00", "download_bps": 304000000, "upload_bps": 35900000, "ping_ms": 10.9, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-02T06:00:00", "download_bps": 305000000, "upload_bps": 36000000, "ping_ms": 10.8, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-02T12:00:00", "download_bps": 304000000, "upload_bps": 36100000, "ping_ms": 10.9, "jitter_ms": 2.5, "quality": "ok"},
+    {"timestamp": "2026-01-02T18:00:00", "download_bps": 303000000, "upload_bps": 35900000, "ping_ms": 11.0, "jitter_ms": 2.5, "quality": "ok"},
+    {"timestamp": "2026-01-03T00:00:00", "download_bps": 304000000, "upload_bps": 36000000, "ping_ms": 10.9, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-03T06:00:00", "download_bps": 305000000, "upload_bps": 36000000, "ping_ms": 10.8, "jitter_ms": 2.4, "quality": "ok"},
+    {"timestamp": "2026-01-03T12:00:00", "download_bps": 304000000, "upload_bps": 36100000, "ping_ms": 10.9, "jitter_ms": 2.5, "quality": "ok"},
+    {"timestamp": "2026-01-03T18:00:00", "download_bps": 303000000, "upload_bps": 35900000, "ping_ms": 11.0, "jitter_ms": 2.5, "quality": "ok"}
+  ],
+  "latency_probes": [
+    {"timestamp": "2026-01-01T00:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-01T06:00:00", "target": "gateway", "avg_ms": 10.8, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-01T12:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-01T18:00:00", "target": "gateway", "avg_ms": 11.0, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-02T00:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-02T06:00:00", "target": "gateway", "avg_ms": 10.8, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-02T12:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-02T18:00:00", "target": "gateway", "avg_ms": 11.0, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-03T00:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-03T06:00:00", "target": "gateway", "avg_ms": 10.8, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-03T12:00:00", "target": "gateway", "avg_ms": 10.9, "loss_pct": 0, "quality": "ok"},
+    {"timestamp": "2026-01-03T18:00:00", "target": "gateway", "avg_ms": 11.0, "loss_pct": 0, "quality": "ok"}
+  ],
+  "system_snapshots": [
+    {"timestamp": "2026-01-01T00:00:00", "ram_pct": 57.0, "temp_c": 74.0, "conntrack_count": 35000, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T06:00:00", "ram_pct": 57.1, "temp_c": 75.1, "conntrack_count": 35100, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T12:00:00", "ram_pct": 57.0, "temp_c": 76.2, "conntrack_count": 35200, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T18:00:00", "ram_pct": 57.1, "temp_c": 77.3, "conntrack_count": 35300, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T00:00:00", "ram_pct": 57.2, "temp_c": 78.4, "conntrack_count": 35400, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T06:00:00", "ram_pct": 57.1, "temp_c": 79.5, "conntrack_count": 35500, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T12:00:00", "ram_pct": 57.2, "temp_c": 80.6, "conntrack_count": 35600, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T18:00:00", "ram_pct": 57.3, "temp_c": 81.7, "conntrack_count": 35700, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T00:00:00", "ram_pct": 57.2, "temp_c": 82.8, "conntrack_count": 35800, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T06:00:00", "ram_pct": 57.3, "temp_c": 83.9, "conntrack_count": 35900, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T12:00:00", "ram_pct": 57.4, "temp_c": 85.0, "conntrack_count": 36000, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T18:00:00", "ram_pct": 57.5, "temp_c": 86.1, "conntrack_count": 36100, "conntrack_max": 100000}
+  ],
+  "wifi_snapshots": []
+}

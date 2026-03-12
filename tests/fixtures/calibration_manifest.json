@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "thresholds": {
+    "MIN_TREND_SAMPLES": 10,
+    "R2_MEDIUM": 0.5,
+    "R2_HIGH": 0.7,
+    "DOWNLOAD_DELTA_VERDICT_THRESHOLD_PCT": 5.0,
+    "LATENCY_DELTA_VERDICT_THRESHOLD_MS": 1.0,
+    "DOWNLOAD_TREND_DOWN_MBPS_PER_WEEK": 3.0,
+    "LATENCY_TREND_UP_MS_PER_WEEK": 1.0,
+    "RAM_TREND_UP_PCT_PER_WEEK": 1.0,
+    "RAM_STABLE_EPSILON_PCT_PER_WEEK": 0.3,
+    "PEAK_DEGRADATION_PCT": -10.0,
+    "PEAK_DEGRADATION_MIN_SAMPLES": 3,
+    "SLA_MIN_COMPLIANCE_PCT": 80.0,
+    "PACKET_LOSS_EVENTS_PER_WEEK": 5.0,
+    "JITTER_TREND_UP_MS_PER_WEEK": 0.8,
+    "TEMP_P95_RISK_C": 82.0,
+    "TEMP_TREND_UP_C_PER_WEEK": 1.0,
+    "CONNTRACK_PEAK_RISK_PCT": 80.0,
+    "CONNTRACK_PEAK_HIGH_CONFIDENCE_PCT": 85.0,
+    "CONNTRACK_TREND_UP_PCT_PER_WEEK": 2.0,
+    "WIFI_SIGNAL_DOWN_DB_PER_WEEK": 1.0,
+    "NOISE_FLOOR_UP_DB_PER_WEEK": 1.0,
+    "WIFI_SUPPORTING_SLOPE_DB_PER_WEEK": -0.5,
+    "WIFI_WEAK_RSSI_DBM": -67.0
+  },
+  "profiles": {
+    "healthy_baseline": {
+      "fixture": "healthy_baseline.json",
+      "expected_recommendations": [
+        {
+          "category": "general",
+          "priority": "info"
+        }
+      ],
+      "forbid_actionable": true
+    },
+    "isp_congestion": {
+      "fixture": "isp_congestion.json",
+      "expected_recommendations": [
+        {
+          "category": "isp",
+          "priority": "high"
+        },
+        {
+          "category": "isp",
+          "priority": "medium"
+        }
+      ]
+    },
+    "thermal_drift": {
+      "fixture": "thermal_drift.json",
+      "expected_recommendations": [
+        {
+          "category": "system",
+          "priority": "medium"
+        }
+      ]
+    },
+    "wifi_noise_degradation": {
+      "fixture": "wifi_noise_degradation.json",
+      "expected_recommendations": [
+        {
+          "category": "wifi",
+          "priority": "medium"
+        }
+      ]
+    },
+    "conntrack_pressure": {
+      "fixture": "conntrack_pressure.json",
+      "expected_recommendations": [
+        {
+          "category": "reliability",
+          "priority": "medium"
+        }
+      ]
+    }
+  }
+}

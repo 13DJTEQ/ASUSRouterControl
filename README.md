@@ -11,6 +11,16 @@ asusrouter setup
 
 The `setup` command stores router credentials securely in macOS Keychain.
 
+## Developer validation
+
+```bash
+pip install -e ".[dev]"
+bash scripts/validate.sh
+```
+
+The validation script runs lint (`ruff`), tests (`pytest`), and syntax checks (`compileall`).
+If required dev tools are missing, it exits with an actionable install command.
+
 ## Usage
 
 ```bash
