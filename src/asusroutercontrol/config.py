@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+_DEFAULT_SPEEDTEST_TIMES = tuple(range(24))
+
 
 @dataclass(frozen=True)
 class Config:
@@ -25,11 +27,12 @@ class Config:
     )
 
     # Scheduler settings
-    speedtest_times: tuple[int, ...] = (6, 14, 22)  # local-hour triggers
+    speedtest_times: tuple[int, ...] = _DEFAULT_SPEEDTEST_TIMES  # local-hour triggers
     peak_start: int = 18  # 6 PM
     peak_end: int = 23    # 11 PM
     probe_interval: int = 1800   # 30 min
     poll_interval: int = 300     # 5 min
+    notify_on_speedtest: bool = True  # notify when scheduled speed test completes
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -67,9 +70,15 @@ def load_config() -> Config:
         soundshield_export_path=Path(
             os.environ.get("SOUNDSHIELD_EXPORT_PATH", str(data_dir / "soundshield_network.json"))
         ).expanduser(),
-        speedtest_times=_parse_int_tuple(os.environ.get("SPEEDTEST_TIMES", ""), (6, 14, 22)),
+        speedtest_times=_parse_int_tuple(
+            os.environ.get("SPEEDTEST_TIMES", ""),
+            _DEFAULT_SPEEDTEST_TIMES,
+        ),
         peak_start=int(os.environ.get("PEAK_START", "18")),
         peak_end=int(os.environ.get("PEAK_END", "23")),
         probe_interval=int(os.environ.get("PROBE_INTERVAL", "1800")),
         poll_interval=int(os.environ.get("POLL_INTERVAL", "300")),
+        notify_on_speedtest=os.environ.get(
+            "NOTIFY_ON_SPEEDTEST", "true"
+        ).lower() in ("true", "1", "yes"),
     )
