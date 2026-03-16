@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -113,9 +114,6 @@ async def test_probe_loop_batches_writes(monkeypatch: pytest.MonkeyPatch) -> Non
     async def _fake_probe_wifi(_ssh):
         return [SimpleNamespace(band="2.4")]
 
-    async def _fake_sleep(_seconds: float):
-        scheduler._running = False
-
     monkeypatch.setattr("asusroutercontrol.scheduler.RouterSSH", _FakeSSH)
     monkeypatch.setattr("asusroutercontrol.scheduler.probe_latency", _fake_probe_latency)
     monkeypatch.setattr("asusroutercontrol.scheduler.probe_system", _fake_probe_system)
@@ -124,9 +122,9 @@ async def test_probe_loop_batches_writes(monkeypatch: pytest.MonkeyPatch) -> Non
     store = _ProbeBatchStore()
     scheduler = MonitorScheduler(store=store, cfg=Config())
     scheduler._running = True
-    monkeypatch.setattr(scheduler, "_interruptible_sleep", _fake_sleep)
 
-    await scheduler._probe_loop()
+    # Test the extracted cycle method directly (avoids needing to mock sleep)
+    await scheduler._run_probes_cycle()
     assert ("latency", False) in store.calls
     assert ("system", False) in store.calls
     assert ("wifi", False) in store.calls
@@ -167,15 +165,17 @@ async def test_speedtest_callback_fires_on_completion(
     )
     scheduler._running = True
 
-    call_count = 0
+    sleep_call_count = 0
+    _real_sleep = asyncio.sleep
 
-    async def _fake_sleep(_seconds: float):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
+    async def _counting_sleep(seconds, *args, **kwargs):
+        nonlocal sleep_call_count
+        sleep_call_count += 1
+        if sleep_call_count >= 2:
             scheduler._running = False
+        # Don't actually sleep in tests
 
-    monkeypatch.setattr(scheduler, "_interruptible_sleep", _fake_sleep)
+    monkeypatch.setattr("asyncio.sleep", _counting_sleep)
 
     await scheduler._speedtest_loop()
 
@@ -206,15 +206,15 @@ async def test_speedtest_callback_not_set(
     scheduler = MonitorScheduler(store=store, cfg=cfg)  # no callback
     scheduler._running = True
 
-    call_count = 0
+    sleep_call_count = 0
 
-    async def _fake_sleep(_seconds: float):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
+    async def _counting_sleep(seconds, *args, **kwargs):
+        nonlocal sleep_call_count
+        sleep_call_count += 1
+        if sleep_call_count >= 2:
             scheduler._running = False
 
-    monkeypatch.setattr(scheduler, "_interruptible_sleep", _fake_sleep)
+    monkeypatch.setattr("asyncio.sleep", _counting_sleep)
 
     await scheduler._speedtest_loop()
 
@@ -246,15 +246,15 @@ async def test_scheduled_speedtest_uses_unfiltered_runner(
     scheduler = MonitorScheduler(store=store, cfg=cfg)
     scheduler._running = True
 
-    call_count = 0
+    sleep_call_count = 0
 
-    async def _fake_sleep(_seconds: float):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
+    async def _counting_sleep(seconds, *args, **kwargs):
+        nonlocal sleep_call_count
+        sleep_call_count += 1
+        if sleep_call_count >= 2:
             scheduler._running = False
 
-    monkeypatch.setattr(scheduler, "_interruptible_sleep", _fake_sleep)
+    monkeypatch.setattr("asyncio.sleep", _counting_sleep)
 
     await scheduler._speedtest_loop()
 
@@ -266,3 +266,17 @@ def test_notify_on_speedtest_config_toggle() -> None:
     """Config toggle defaults to True and can be disabled."""
     assert Config().notify_on_speedtest is True
     assert Config(notify_on_speedtest=False).notify_on_speedtest is False
+
+
+def test_scheduler_perf_sample_emits_periodic_baseline_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    scheduler = MonitorScheduler(store=_Store(), cfg=Config())
+    for _ in range(scheduler._perf_log_every):
+        scheduler._record_perf_sample(
+            "unit.test.metric",
+            0.010,
+            context="loop=test",
+        )
+    assert any("baseline[unit.test.metric]" in rec.getMessage() for rec in caplog.records)

@@ -26,7 +26,8 @@ dev = [
     "ruff>=0.3",
 ]
 menubar = [
-    "rumps>=0.4.0",
+    "pyobjc-core>=12.1",
+    "pyobjc-framework-cocoa>=12.1",
 ]
 
 [project.scripts]
@@ -46,3 +47,4 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]

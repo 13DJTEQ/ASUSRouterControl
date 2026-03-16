@@ -128,6 +128,10 @@ class WiFiSnapshot(BaseModel):
     min_rssi: float | None = None
     channel: str | None = None
     noise_floor: float | None = None
+    rx_bytes: int | None = None
+    tx_bytes: int | None = None
+    rx_rate_bps: float | None = None
+    tx_rate_bps: float | None = None
 
 
 class ConfigSnapshot(BaseModel):
@@ -147,6 +151,82 @@ class ConfigEvent(BaseModel):
     description: str = ""
     nvram_changes_json: str = "{}"  # JSON of changed keys {key: [old, new]}
     triggered_by: str = "user"  # user / scheduler / auto
+
+
+class ServiceEntry(BaseModel):
+    """Single running service/daemon on the router."""
+
+    pid: int
+    name: str
+    rss_kb: int = 0
+    threads: int = 1
+    is_bloat: bool = False
+    bloat_reason: str = ""
+
+
+class ServiceAudit(BaseModel):
+    """Snapshot of running services and resource usage."""
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    services: list[ServiceEntry] = Field(default_factory=list)
+    total_rss_kb: int = 0
+    bloat_rss_kb: int = 0
+    bloat_count: int = 0
+
+
+class SysctlEntry(BaseModel):
+    """Single sysctl key with current and recommended values."""
+
+    key: str
+    current: str
+    recommended: str
+    is_optimal: bool = False
+    note: str = ""
+
+
+class SysctlSnapshot(BaseModel):
+    """Snapshot of TCP/network sysctl tuning state."""
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    entries: list[SysctlEntry] = Field(default_factory=list)
+    optimal_count: int = 0
+    total_count: int = 0
+
+
+class ChannelSurveyEntry(BaseModel):
+    """Per-channel interference/utilization data."""
+
+    channel: int
+    utilization_pct: float = 0.0
+    interference_pct: float = 0.0
+    noise_dbm: float = 0.0
+    is_current: bool = False
+
+
+class ChannelSurvey(BaseModel):
+    """WiFi channel survey for a single band."""
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    band: str = ""  # "2.4" or "5"
+    interface: str = ""  # e.g. "eth1", "eth2"
+    current_channel: int = 0
+    entries: list[ChannelSurveyEntry] = Field(default_factory=list)
+    best_channel: int | None = None
+    best_reason: str = ""
+
+
+class ClientLoad(BaseModel):
+    """Per-client traffic load snapshot."""
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    mac: str
+    hostname: str | None = None
+    band: str | None = None
+    rssi: int | None = None
+    tx_rate_mbps: float | None = None
+    rx_rate_mbps: float | None = None
+    load_pct: float = 0.0  # max(tx, rx) / link_rate * 100
+    health: str = "🟢"  # 🟢 <50%, 🟡 50-80%, 🔴 >80% or weak signal
 
 
 class RouterSnapshot(BaseModel):

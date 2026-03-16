@@ -69,9 +69,15 @@ class _CorrelationStore:
         self.event_ts = (datetime.utcnow() - timedelta(hours=12)).isoformat()
 
     async def get_config_events(self, *, days: int = 90) -> list[dict]:
-        return [{"timestamp": self.event_ts, "event_type": "config_change", "description": "qos update"}]
+        return [{
+            "timestamp": self.event_ts,
+            "event_type": "config_change",
+            "description": "qos update",
+        }]
 
-    async def get_avg_download_between(self, *, start_ts: str, end_ts: str) -> tuple[float | None, int]:
+    async def get_avg_download_between(
+        self, *, start_ts: str, end_ts: str
+    ) -> tuple[float | None, int]:
         if end_ts <= self.event_ts:
             return 250_000_000.0, 4
         return 300_000_000.0, 5
@@ -144,7 +150,11 @@ async def test_analyze_patterns_uses_dynamic_peak_hours() -> None:
             dl = 220_000_000
             if hour in (14, 15, 16):
                 dl = 110_000_000
-            speed_rows.append({"timestamp": ts, "download_bps": dl, "upload_bps": 35_000_000})
+            speed_rows.append({
+                "timestamp": ts,
+                "download_bps": dl,
+                "upload_bps": 35_000_000,
+            })
 
     store = _TrendStore(speed_rows=speed_rows, latency_rows=[])
     patterns = await analyze_patterns(store, days=30)
@@ -155,10 +165,16 @@ async def test_analyze_patterns_uses_dynamic_peak_hours() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_recommendations_requires_min_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_generate_recommendations_requires_min_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _fake_trends(_store, *, days: int = 30):
         return {
-            "download": {"slope_mbps_per_week": -5.0, "r_squared": 0.9, "samples": 9},
+            "download": {
+                "slope_mbps_per_week": -5.0,
+                "r_squared": 0.9,
+                "samples": 9,
+            },
             "packet_loss": {"events": 0, "per_week": 0, "total_probes": 0},
         }
 
@@ -177,10 +193,16 @@ async def test_generate_recommendations_requires_min_samples(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_generate_recommendations_sets_high_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_generate_recommendations_sets_high_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _fake_trends(_store, *, days: int = 30):
         return {
-            "download": {"slope_mbps_per_week": -6.0, "r_squared": 0.75, "samples": 12},
+            "download": {
+                "slope_mbps_per_week": -6.0,
+                "r_squared": 0.75,
+                "samples": 12,
+            },
             "packet_loss": {"events": 0, "per_week": 0, "total_probes": 0},
         }
 
@@ -263,10 +285,16 @@ async def test_analyze_trends_reports_jitter_temperature_and_conntrack() -> None
 
 
 @pytest.mark.asyncio
-async def test_generate_recommendations_flags_noise_floor_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_generate_recommendations_flags_noise_floor_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _fake_trends(_store, *, days: int = 30):
         return {
-            "noise_2.4": {"slope_db_per_week": 1.5, "r_squared": 0.75, "samples": 12},
+            "noise_2.4": {
+                "slope_db_per_week": 1.5,
+                "r_squared": 0.75,
+                "samples": 12,
+            },
             "wifi_2.4": {"slope_db_per_week": -1.0, "avg_rssi": -68.0, "samples": 12},
             "packet_loss": {"events": 0, "per_week": 0, "total_probes": 0},
         }

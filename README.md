@@ -26,7 +26,12 @@ If required dev tools are missing, it exits with an actionable install command.
 ```bash
 asusrouter status     # Router system info
 asusrouter devices    # Connected devices
+asusrouter dhcp show  # Current DHCP reservations
+asusrouter dhcp health  # Assert required reservation mappings
+asusrouter dhcp reserve-macpro --dry-run
+asusrouter dhcp reserve-denon-second-port --dry-run
 asusrouter monitor    # Continuous monitoring (Phase 2)
+asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnect diagnosis
 ```
 
 ## Architecture

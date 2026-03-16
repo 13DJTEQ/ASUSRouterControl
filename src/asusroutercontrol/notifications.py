@@ -1,38 +1,66 @@
 """macOS notification delivery for ASUSRouterControl.
 
-Uses native NSUserNotificationCenter when available (routes through the
-running app, not Script Editor).  Falls back to osascript if the native
-API is unavailable.
+Uses the modern UserNotifications framework (UNUserNotificationCenter) when
+available.  Falls back to osascript if the native API cannot be loaded (e.g.
+missing PyObjC bindings or running outside an app bundle).
 """
 
 from __future__ import annotations
 
 import logging
 import subprocess
+import uuid
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Native notification centre (lazy-init)
+# Modern notification centre (lazy-init)
 # ---------------------------------------------------------------------------
 
-_native_center = None
-_native_checked = False
+_un_center = None
+_un_checked = False
+_un_authorized = False
 
 
-def _ensure_native() -> bool:
-    """Try to initialise the native notification centre once."""
-    global _native_center, _native_checked
-    if _native_checked:
-        return _native_center is not None
-    _native_checked = True
+def _ensure_un() -> bool:
+    """Try to initialise UNUserNotificationCenter once."""
+    global _un_center, _un_checked, _un_authorized
+    if _un_checked:
+        return _un_center is not None
+    _un_checked = True
     try:
-        from Foundation import NSUserNotificationCenter
+        from UserNotifications import UNUserNotificationCenter
 
-        _native_center = NSUserNotificationCenter.defaultUserNotificationCenter()
+        _un_center = UNUserNotificationCenter.currentNotificationCenter()
+        _request_authorization()
         return True
     except Exception:
+        log.debug("UNUserNotificationCenter unavailable, will use osascript")
         return False
+
+
+def _request_authorization() -> None:
+    """Request notification permission (alert + sound).  Non-blocking."""
+    global _un_authorized
+    try:
+        from UserNotifications import (
+            UNAuthorizationOptionAlert,
+            UNAuthorizationOptionSound,
+        )
+
+        options = UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+
+        def _callback(granted, error):
+            global _un_authorized
+            _un_authorized = bool(granted)
+            if error:
+                log.debug("Notification auth error: %s", error)
+
+        _un_center.requestAuthorizationWithOptions_completionHandler_(
+            options, _callback
+        )
+    except Exception:
+        log.debug("Failed to request notification authorization")
 
 
 # ---------------------------------------------------------------------------
@@ -43,15 +71,17 @@ def _ensure_native() -> bool:
 def notify(title: str, subtitle: str = "", message: str = "") -> None:
     """Post a macOS notification.
 
-    Tries the native PyObjC path first (attributed to the running app),
-    then falls back to osascript.
+    Tries UNUserNotificationCenter first, then falls back to osascript.
     """
-    if _ensure_native():
+    if _ensure_un():
         try:
-            _deliver_native(title, subtitle, message)
+            _deliver_un(title, subtitle, message)
             return
         except Exception:
-            log.debug("Native notification failed, falling back to osascript")
+            log.debug(
+                "UNUserNotificationCenter delivery failed, "
+                "falling back to osascript"
+            )
 
     _deliver_osascript(title, subtitle, message)
 
@@ -61,14 +91,24 @@ def notify(title: str, subtitle: str = "", message: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _deliver_native(title: str, subtitle: str, message: str) -> None:
-    from Foundation import NSUserNotification
+def _deliver_un(title: str, subtitle: str, message: str) -> None:
+    from UserNotifications import (
+        UNMutableNotificationContent,
+        UNNotificationRequest,
+    )
 
-    n = NSUserNotification.alloc().init()
-    n.setTitle_(title)
-    n.setSubtitle_(subtitle)
-    n.setInformativeText_(message)
-    _native_center.deliverNotification_(n)  # type: ignore[union-attr]
+    content = UNMutableNotificationContent.alloc().init()
+    content.setTitle_(title)
+    content.setSubtitle_(subtitle)
+    content.setBody_(message)
+
+    request_id = uuid.uuid4().hex[:12]
+    request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+        request_id, content, None
+    )
+    _un_center.addNotificationRequest_withCompletionHandler_(
+        request, None
+    )
 
 
 def _deliver_osascript(title: str, subtitle: str, message: str) -> None:

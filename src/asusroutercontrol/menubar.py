@@ -11,7 +11,7 @@ import asyncio
 import logging
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import mean
 
 import objc
@@ -20,11 +20,16 @@ from AppKit import (
     NSAlertFirstButtonReturn,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
+    NSAttributedString,
+    NSFont,
+    NSFontAttributeName,
     NSMenu,
     NSMenuItem,
     NSObject,
     NSStatusBar,
     NSTimer,
+    NSUnderlineStyleAttributeName,
+    NSUnderlineStyleSingle,
     NSVariableStatusItemLength,
 )
 from PyObjCTools import AppHelper
@@ -41,10 +46,106 @@ PLAN_SPEED_DOWN = 300_000_000  # 300 Mbps
 TEMP_WARN_C = 85.0
 LOSS_WARN_PCT = 5.0
 SPEED_DROP_RATIO = 0.70  # notify if < 70% of plan
+LATENCY_WARN_MS = 50.0  # yellow if gateway latency exceeds this
 
 REFRESH_INTERVAL = 60.0  # seconds between menu data refreshes
 
 
+def _traffic_dot(current_bps: float | None, plan_bps: float | None = None) -> str:
+    """Colored dot reflecting current speed vs. plan speed.
+
+    🔴  stopped / no data
+    🟡  below 70% of plan speed
+    🟢  within normal range
+    """
+    if not current_bps:        # zero or missing — traffic has stopped
+        return "🔴"
+    if not plan_bps:           # no plan baseline — can't judge
+        return "🟢"
+    if current_bps / plan_bps < SPEED_DROP_RATIO:  # below 70% of plan
+        return "🟡"
+    return "🟢"
+
+
+_DOT_RANK = {"🟢": 0, "🟡": 1, "🔴": 2}
+
+
+def _format_band_bw(wifi_row: dict) -> str:
+    """Format per-band rx/tx rates for display.  Returns '' if no data."""
+    rx = wifi_row.get("rx_rate_bps")
+    tx = wifi_row.get("tx_rate_bps")
+    if rx is None and tx is None:
+        return ""
+    rx_m = f"{rx / 1_000_000:.1f}" if rx else "—"
+    tx_m = f"{tx / 1_000_000:.1f}" if tx else "—"
+    return f"  ↓{rx_m} ↑{tx_m} Mbps"
+
+
+# Friendly labels for latency probe targets
+_TARGET_LABELS: dict[str, str] = {
+    "gateway": "Gateway",
+    "cloudflare": "Cloudflare DNS",
+    "google": "Google DNS",
+}
+
+
+def _friendly_target(name: str) -> str:
+    return _TARGET_LABELS.get(name, name)
+
+
+def _connection_status(
+    dl_bps: float | None,
+    ul_bps: float | None,
+    gw_loss_pct: float | None = None,
+    gw_latency_ms: float | None = None,
+) -> str:
+    """Single color-coded dot reflecting overall connection health.
+
+    Uses plan speed as baseline (not 24h average), gateway-only
+    latency/loss, and relaxed thresholds.
+
+    🔴  no data / below plan threshold / high packet loss
+    🟡  degraded vs plan speed / moderate loss / elevated latency
+    🟢  healthy
+    """
+    worst = "🟢"
+
+    def _elevate(dot: str) -> None:
+        nonlocal worst
+        if _DOT_RANK.get(dot, 0) > _DOT_RANK.get(worst, 0):
+            worst = dot
+
+    # --- per-direction speed vs plan ---
+    _elevate(_traffic_dot(dl_bps, PLAN_SPEED_DOWN))
+    _elevate(_traffic_dot(ul_bps))
+
+    # --- gateway packet loss (only gateway, ignore external targets) ---
+    if gw_loss_pct is not None:
+        if gw_loss_pct >= LOSS_WARN_PCT:
+            _elevate("🔴")
+        elif gw_loss_pct >= 1.0:
+            _elevate("🟡")
+
+    # --- gateway latency ---
+    if gw_latency_ms is not None and gw_latency_ms > LATENCY_WARN_MS:
+        _elevate("🟡")
+
+    return worst
+
+
+def _add_section_header(menu, title: str):
+    """Add a bold/underline section header menu item."""
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
+    attrs = {
+        NSFontAttributeName: NSFont.boldSystemFontOfSize_(13.0),
+        NSUnderlineStyleAttributeName: NSUnderlineStyleSingle,
+    }
+    item.setAttributedTitle_(
+        NSAttributedString.alloc().initWithString_attributes_(title, attrs)
+    )
+    item.setEnabled_(False)
+    menu.addItem_(item)
+    return item
 
 
 def _add_info(menu, title: str):
@@ -83,10 +184,13 @@ class AppDelegate(NSObject):
         self._log_path = self._cfg.data_dir / "scheduler.log"
 
         self._sched = None
+        self._sched_store = None
         self._sched_thread = None
         self._sched_loop = None
         self._last_speedtest_id = None
         self._last_device_count = None
+        self._last_saturation_notify = None
+        self._degraded = False
 
         self.statusbar = NSStatusBar.systemStatusBar()
         self.statusitem = self.statusbar.statusItemWithLength_(
@@ -95,34 +199,99 @@ class AppDelegate(NSObject):
         self.statusitem.button().setTitle_("📡 —")
 
         self._build_menu()
-        self._start_scheduler()
 
+        # Phase 4: Health check before starting scheduler
+        threading.Thread(
+            target=self._startup_health_check, name="health-check", daemon=True
+        ).start()
+
+        log.info("AsusRouterMonitor starting (health check in progress)")
+
+    def _startup_health_check(self):
+        """Attempt SSH connect before starting scheduler; enter degraded mode on failure."""
+        from asusroutercontrol.ssh import RouterSSH
+
+        try:
+            async def _check():
+                ssh = RouterSSH(connect_timeout=10.0)
+                await ssh.connect()
+                await ssh.disconnect()
+
+            asyncio.run(_check())
+            log.info("Router reachable — starting scheduler")
+            self._degraded = False
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "startAfterHealthCheck:", None, False
+            )
+        except Exception as exc:
+            log.warning("Router unreachable: %s — entering degraded mode", exc)
+            self._degraded = True
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "enterDegradedMode:", None, False
+            )
+
+    @objc.typedSelector(b"v@:@")
+    def startAfterHealthCheck_(self, _):
+        """Called on main thread after successful health check."""
+        self.statusitem.button().setTitle_("📡 —")
+        self._start_scheduler()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             REFRESH_INTERVAL, self, "refreshData:", None, True
         )
         threading.Thread(
             target=self._do_refresh, name="initial-refresh", daemon=True
         ).start()
-
         log.info("AsusRouterMonitor ready")
+
+    @objc.typedSelector(b"v@:@")
+    def enterDegradedMode_(self, _):
+        """Router unreachable — show offline status and retry in 60s."""
+        self.statusitem.button().setTitle_("📡 ⚠️ Offline")
+        self._mi_sched_status.setTitle_("Scheduler: ○ Offline (retrying in 60s)")
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            60.0, self, "retryHealthCheck:", None, False
+        )
+
+    @objc.typedSelector(b"v@:@")
+    def retryHealthCheck_(self, _):
+        """Retry the health check."""
+        threading.Thread(
+            target=self._startup_health_check, name="health-retry", daemon=True
+        ).start()
+
+    def applicationWillTerminate_(self, notification):
+        """Safety net: ensure scheduler is stopped on app termination."""
+        self._stop_scheduler()
 
     def _build_menu(self):
         menu = NSMenu.new()
         menu.setAutoenablesItems_(False)
 
+        _add_section_header(menu, "Router")
         self._mi_model = _add_info(menu, "Router: connecting...")
         self._mi_uptime = _add_info(menu, "Uptime: —")
         self._mi_hw = _add_info(menu, "CPU: —  RAM: —  Temp: —")
         menu.addItem_(NSMenuItem.separatorItem())
 
+        _add_section_header(menu, "SpeedHealth")
         self._mi_speed = _add_info(menu, "↓ — Mbps  ↑ — Mbps")
         self._mi_avg_24h = _add_info(menu, "  24h avg: ↓ — Mbps  ↑ — Mbps")
         self._mi_latency = _add_info(menu, "Ping: — ms  Loss: —%")
         menu.addItem_(NSMenuItem.separatorItem())
 
+        _add_section_header(menu, "Network Devices")
         self._mi_devices = _add_info(menu, "Devices: —")
+        self._mi_lan_total = _add_info(menu, "LAN Wired: ↓— ↑— Mbps")
         self._mi_wifi24 = _add_info(menu, "WiFi 2.4G: —")
         self._mi_wifi5 = _add_info(menu, "WiFi 5G: —")
+        menu.addItem_(NSMenuItem.separatorItem())
+
+        # LAN Clients submenu
+        self._mi_clients_header = _add_info(menu, "👥 LAN Clients")
+        self._clients_submenu = NSMenu.new()
+        self._clients_submenu.setAutoenablesItems_(False)
+        self._mi_clients_header.setSubmenu_(self._clients_submenu)
+        self._mi_clients_header.setEnabled_(True)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self._mi_speedtest = _add_action(menu, "▶ Run Speed Test", "runSpeedTest:", self)
@@ -134,8 +303,8 @@ class AppDelegate(NSObject):
         _add_action(menu, "Open Log File", "openLog:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
-        _add_action(menu, "⛔ Kill (No Restart)", "killApp:", self)
-        _add_action(menu, "Quit AsusRouterMonitor", "quitApp:", self)
+        _add_action(menu, "⛔ Shutdown", "killApp:", self)
+        _add_action(menu, "🔄 Restart AsusRouterMonitor", "quitApp:", self)
         self.statusitem.setMenu_(menu)
 
 
@@ -151,7 +320,12 @@ class AppDelegate(NSObject):
             try:
                 store = DataStore(self._db_path)
                 loop.run_until_complete(store.open())
-                self._sched = MonitorScheduler(store, self._cfg)
+                self._sched_store = store
+                self._sched = MonitorScheduler(
+                    store,
+                    self._cfg,
+                    on_speedtest_complete=self._on_scheduled_speedtest,
+                )
                 log.info("Scheduler started from menubar app")
                 loop.run_until_complete(self._sched.run())
             except Exception:
@@ -164,11 +338,49 @@ class AppDelegate(NSObject):
         )
         self._sched_thread.start()
 
+    def _on_scheduled_speedtest(self, result):
+        """Called from the scheduler thread when a speed test finishes."""
+        if not self._cfg.notify_on_speedtest:
+            return
+        if result.error:
+            _notify(
+                "Scheduled Speed Test Failed",
+                "",
+                result.error or "Unknown error",
+            )
+        else:
+            dl = (result.download_bps or 0) / 1_000_000
+            ul = (result.upload_bps or 0) / 1_000_000
+            ping = result.ping_ms or 0
+            _notify(
+                "\U0001f4ca Scheduled Speed Test",
+                f"\u2193 {dl:.1f} Mbps  \u2191 {ul:.1f} Mbps",
+                f"Ping: {ping:.1f} ms",
+            )
+        # Trigger a UI refresh on the main thread
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "refreshData:", None, False
+        )
+
     def _stop_scheduler(self):
-        if self._sched:
-            self._sched.stop()
-        if self._sched_loop:
-            self._sched_loop.call_soon_threadsafe(self._sched_loop.stop)
+        if self._sched and self._sched_loop:
+            # Schedule async stop on the scheduler's event loop
+            future = asyncio.run_coroutine_threadsafe(
+                self._sched.stop(), self._sched_loop
+            )
+            try:
+                future.result(timeout=10.0)  # hard deadline
+            except Exception:
+                log.warning("Scheduler stop timed out or errored; forcing loop stop")
+                self._sched_loop.call_soon_threadsafe(self._sched_loop.stop)
+        elif self._sched:
+            # Fallback: no loop available, just set the flag
+            self._sched._running = False
+        # Join thread with timeout — daemon flag ensures it dies with process
+        if self._sched_thread and self._sched_thread.is_alive():
+            self._sched_thread.join(timeout=10.0)
+            if self._sched_thread.is_alive():
+                log.error("Scheduler thread did not stop within 10s")
 
     # ------------------------------------------------------------------
     # Periodic refresh
@@ -180,11 +392,17 @@ class AppDelegate(NSObject):
             target=self._do_refresh, name="refresh", daemon=True
         ).start()
 
+    def _submit_to_sched(self, coro, timeout=30.0):
+        """Submit a coroutine to the scheduler event loop; fallback to asyncio.run()."""
+        loop = self._sched_loop
+        if loop and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=timeout)
+        return asyncio.run(coro)
+
     def _do_refresh(self):
         try:
-            data = asyncio.run(self._fetch_latest())
-            # Store data on self to avoid PyObjC NSDictionary bridging
-            # issues with None values in nested dicts.
+            data = self._submit_to_sched(self._fetch_latest())
             self._pending_data = data
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "applyData:", None, False
@@ -204,6 +422,19 @@ class AppDelegate(NSObject):
             speed_rows = await store.get_speed_tests(days=1)
             result["speed"] = speed_rows[0] if speed_rows else None
             result["speed_id"] = speed_rows[0].get("id") if speed_rows else None
+            one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+            result["speed_tests_last_hour"] = 0
+            for row in speed_rows:
+                if not row.get("download_bps"):
+                    continue
+                ts = row.get("timestamp")
+                if not ts:
+                    continue
+                try:
+                    if datetime.fromisoformat(ts) >= one_hour_ago:
+                        result["speed_tests_last_hour"] += 1
+                except ValueError:
+                    continue
             # Compute single rolling 24h average across timestamped speed tests.
             window = [s for s in speed_rows if s.get("download_bps")]
             if window:
@@ -217,8 +448,25 @@ class AppDelegate(NSObject):
                 result["avg_24h"] = None
 
             lat_rows = await store.get_latency_probes(days=1)
-            gw = [r for r in lat_rows if r.get("target") == "gateway"]
-            result["latency"] = gw[0] if gw else None
+            latest_by_target: dict[str, dict] = {}
+            for row in lat_rows:
+                target = row.get("target")
+                if target and target not in latest_by_target:
+                    latest_by_target[target] = row
+            result["latency_by_target"] = latest_by_target
+            result["latency"] = latest_by_target.get("gateway")
+            loss_items = [
+                (t, r.get("loss_pct"))
+                for t, r in latest_by_target.items()
+                if r.get("loss_pct") is not None and r.get("loss_pct", 0) > 0
+            ]
+            if loss_items:
+                target, value = max(loss_items, key=lambda item: item[1] or 0.0)
+                result["loss_max_target"] = target
+                result["loss_max_pct"] = value
+            else:
+                result["loss_max_target"] = None
+                result["loss_max_pct"] = None
 
             devs = await store.get_all_devices()
             result["device_count"] = len(devs)
@@ -232,6 +480,19 @@ class AppDelegate(NSObject):
             result["wifi"] = by_band
 
             result["health"] = self._calc_health(sys_rows, speed_rows, lat_rows)
+
+            # Client loads
+            try:
+                from asusroutercontrol.analysis.clients import get_client_load_summary
+                result["client_loads"] = await get_client_load_summary(store)
+            except Exception:
+                result["client_loads"] = []
+
+            # Per-client load trends (1h avg from device_perf_history)
+            try:
+                result["client_trends"] = await store.get_client_load_trends(hours=1)
+            except Exception:
+                result["client_trends"] = {}
 
             # Trend arrows (best-effort, skip if not enough data)
             try:
@@ -296,9 +557,21 @@ class AppDelegate(NSObject):
         data = self._pending_data
         if not data:
             return
-        self._mi_model.setTitle_("Router: RT-AC68U")
+
+        # --- menubar title: traffic dot meters ---
         health = data.get("health", 0)
-        self.statusitem.button().setTitle_(f"📡 {health:.0f}")
+        _spd = data.get("speed")
+        _dl_bps = _spd.get("download_bps") if _spd else None
+        _ul_bps = _spd.get("upload_bps") if _spd else None
+        _lat = data.get("latency")  # gateway latency probe
+        _gw_loss = _lat.get("loss_pct") if _lat else None
+        _gw_lat_ms = _lat.get("avg_ms") if _lat else None
+        status_dot = _connection_status(
+            _dl_bps, _ul_bps,
+            gw_loss_pct=_gw_loss, gw_latency_ms=_gw_lat_ms,
+        )
+        self.statusitem.button().setTitle_(f"📡 {status_dot}")
+        self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
         if sys_snap:
@@ -360,8 +633,10 @@ class AppDelegate(NSObject):
             dl_avg = f"{avg_24h['dl'] / 1_000_000:.1f}"
             ul_val = avg_24h.get("ul")
             ul_avg = f"{ul_val / 1_000_000:.1f}" if ul_val is not None else "—"
+            one_hour_tests = int(data.get("speed_tests_last_hour") or 0)
             self._mi_avg_24h.setTitle_(
-                f"  24h avg: ↓ {dl_avg} Mbps  ↑ {ul_avg} Mbps ({avg_24h['count']} tests)"
+                f"  24h avg: ↓ {dl_avg} Mbps  ↑ {ul_avg} Mbps "
+                f"({avg_24h['count']} tests, 1h: {one_hour_tests})"
             )
         else:
             self._mi_avg_24h.setTitle_("  24h avg: no data")
@@ -382,9 +657,18 @@ class AppDelegate(NSObject):
         if lat:
             avg_ms = lat.get("avg_ms")
             loss = lat.get("loss_pct", 0)
+            max_loss = data.get("loss_max_pct")
+            max_target = data.get("loss_max_target")
             avg_s = f"{avg_ms:.1f}" if avg_ms else "—"
             loss_s = f"{loss:.1f}" if loss is not None else "—"
-            self._mi_latency.setTitle_(f"Ping: {avg_s} ms  Loss: {loss_s}%")
+            if max_loss is not None and max_loss > 0:
+                max_loss_s = f"{max_loss:.1f}"
+                target_s = _friendly_target(max_target) if max_target else "any"
+                self._mi_latency.setTitle_(
+                    f"Ping: {avg_s} ms  Loss: {loss_s}% (max {max_loss_s}% {target_s})"
+                )
+            else:
+                self._mi_latency.setTitle_(f"Ping: {avg_s} ms  Loss: {loss_s}%")
 
             if loss is not None and loss > LOSS_WARN_PCT:
                 _notify(
@@ -408,14 +692,89 @@ class AppDelegate(NSObject):
         wifi = data.get("wifi", {})
         w24 = wifi.get("2.4")
         w5 = wifi.get("5")
+        w_wired = wifi.get("wired")
+
+        # --- Wired LAN bandwidth (vlan1) ---
+        if w_wired:
+            wrx = w_wired.get("rx_rate_bps") or 0
+            wtx = w_wired.get("tx_rate_bps") or 0
+            if wrx or wtx:
+                self._mi_lan_total.setTitle_(
+                    f"LAN Wired: ↓{wrx / 1_000_000:.1f} ↑{wtx / 1_000_000:.1f} Mbps"
+                )
+            else:
+                self._mi_lan_total.setTitle_("LAN Wired: awaiting data")
+        else:
+            self._mi_lan_total.setTitle_("LAN Wired: no data")
         if w24:
             ch = w24.get("channel", "?")
             clients = w24.get("client_count", 0)
-            self._mi_wifi24.setTitle_(f"WiFi 2.4G: {clients} clients (ch {ch})")
+            bw = _format_band_bw(w24)
+            self._mi_wifi24.setTitle_(f"WiFi 2.4G: {clients} clients (ch {ch}){bw}")
         if w5:
             ch = w5.get("channel", "?")
             clients = w5.get("client_count", 0)
-            self._mi_wifi5.setTitle_(f"WiFi 5G: {clients} clients (ch {ch})")
+            bw = _format_band_bw(w5)
+            self._mi_wifi5.setTitle_(f"WiFi 5G: {clients} clients (ch {ch}){bw}")
+
+        # --- LAN Clients submenu ---
+        self._clients_submenu.removeAllItems()
+        client_loads = data.get("client_loads", [])
+        client_trends = data.get("client_trends", {})
+        if client_loads:
+            saturated = []
+            for cl in client_loads:
+                name = cl.get("hostname") or cl.get("mac", "?")
+                mac = cl.get("mac", "")
+                band = cl.get("band") or "?"
+                tx = cl.get("tx_rate_mbps")
+                rx = cl.get("rx_rate_mbps")
+                load = cl.get("load_pct", 0)
+                rssi = cl.get("rssi")
+                health = "🟢"
+                if rssi is not None and rssi < -75:
+                    health = "🔴"
+                elif load >= 80:
+                    health = "🔴"
+                elif load >= 50:
+                    health = "🟡"
+                tx_s = f"{tx:.0f}" if tx else "—"
+                rx_s = f"{rx:.0f}" if rx else "—"
+                # Trend arrow based on current load vs 1h average
+                trend_avg = client_trends.get(mac)
+                if trend_avg is not None and load > 0:
+                    diff = load - trend_avg
+                    trend = "↑" if diff > 5 else "↓" if diff < -5 else "—"
+                else:
+                    trend = ""
+                trend_s = f" {trend}" if trend else ""
+                title = f"{health} {name} — {band}  ↓{rx_s} ↑{tx_s} Mbps  ({load:.0f}%{trend_s})"
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    title, None, ""
+                )
+                item.setEnabled_(False)
+                self._clients_submenu.addItem_(item)
+                if load >= 80:
+                    saturated.append(name)
+            self._mi_clients_header.setTitle_(
+                f"👥 LAN Clients ({len(client_loads)})"
+            )
+            # Saturation notification (cooldown: max once per 10 min)
+            if saturated:
+                now_ts = datetime.now()
+                if (
+                    self._last_saturation_notify is None
+                    or (now_ts - self._last_saturation_notify).total_seconds() > 600
+                ):
+                    self._last_saturation_notify = now_ts
+                    _notify(
+                        "🔴 Client Saturation",
+                        f"{len(saturated)} client(s) above 80% load",
+                        ", ".join(saturated[:3]),
+                    )
+        else:
+            _add_info(self._clients_submenu, "No client data")
+            self._mi_clients_header.setTitle_("👥 LAN Clients")
 
         alive = self._sched_thread and self._sched_thread.is_alive()
         dot = "●" if alive else "○"
@@ -437,7 +796,7 @@ class AppDelegate(NSObject):
         try:
             from asusroutercontrol.speedtest import run_speed_test
 
-            result = asyncio.run(run_speed_test())
+            result = self._submit_to_sched(run_speed_test(), timeout=300.0)
 
             if result.error:
                 _notify("Speed Test Failed", "", result.error or "Unknown error")
@@ -445,7 +804,7 @@ class AppDelegate(NSObject):
                 dl = (result.download_bps or 0) / 1_000_000
                 ul = (result.upload_bps or 0) / 1_000_000
                 ping = result.ping_ms or 0
-                asyncio.run(self._store_speedtest(result))
+                self._submit_to_sched(self._store_speedtest(result))
                 _notify(
                     "✅ Speed Test Complete",
                     f"↓ {dl:.1f} Mbps  ↑ {ul:.1f} Mbps",
@@ -571,6 +930,7 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def killApp_(self, sender):
         """Stop scheduler, unload launchd agent, then terminate — no restart."""
+        log.info("killApp_ invoked — shutting down")
         self._stop_scheduler()
         from pathlib import Path
 
@@ -583,6 +943,7 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def quitApp_(self, sender):
         """Stop scheduler and terminate — launchd KeepAlive will restart."""
+        log.info("quitApp_ invoked — restarting")
         self._stop_scheduler()
         from pathlib import Path
 

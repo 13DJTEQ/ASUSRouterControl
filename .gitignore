@@ -5,6 +5,8 @@ dist/
 build/
 .eggs/
 *.egg
+.DS_Store
+Screenshot*.png
 .env
 *.db
 *.sqlite

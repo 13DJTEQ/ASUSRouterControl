@@ -88,6 +88,11 @@ def _fingerprints_from_key_blob(key_blob: str) -> tuple[str, str]:
     return sha, md5
 
 
+# Default timeouts (seconds)
+SSH_CONNECT_TIMEOUT = 15.0
+SSH_COMMAND_TIMEOUT = 30.0
+
+
 class RouterSSH:
     """Async SSH connection to the router."""
 
@@ -97,6 +102,9 @@ class RouterSSH:
         username: str | None = None,
         password: str | None = None,
         port: int | None = None,
+        *,
+        connect_timeout: float = SSH_CONNECT_TIMEOUT,
+        command_timeout: float = SSH_COMMAND_TIMEOUT,
     ) -> None:
         cfg = load_config()
         stored_user, stored_pass = get_router_credentials()
@@ -104,6 +112,8 @@ class RouterSSH:
         self._username = username or stored_user
         self._password = password or stored_pass
         self._port = port or cfg.ssh_port
+        self._connect_timeout = connect_timeout
+        self._command_timeout = command_timeout
         self._trust_mode = (
             cfg.ssh_trust_mode if cfg.ssh_trust_mode in _TRUST_MODES else "tofu_confirm"
         )
@@ -173,12 +183,17 @@ class RouterSSH:
         return self._known_hosts_path
 
     async def _probe_server_key(self) -> tuple[asyncssh.SSHClientConnection, HostKeyDetails]:
-        conn = await asyncssh.connect(
-            self._hostname,
-            port=self._port,
-            username=self._username,
-            password=self._password,
-            known_hosts=None,
+        import asyncio as _aio
+
+        conn = await _aio.wait_for(
+            asyncssh.connect(
+                self._hostname,
+                port=self._port,
+                username=self._username,
+                password=self._password,
+                known_hosts=None,
+            ),
+            timeout=self._connect_timeout,
         )
         host_key = conn.get_server_host_key()
         key_blob = host_key.export_public_key().decode().strip()
@@ -324,11 +339,23 @@ class RouterSSH:
             self._conn = None
             log.info("SSH disconnected")
 
-    async def run(self, command: str, *, check: bool = False) -> CommandResult:
+    async def run(
+        self,
+        command: str,
+        *,
+        check: bool = False,
+        timeout: float | None = None,
+    ) -> CommandResult:
         """Execute a command and return structured result."""
         if not self._conn:
             raise RuntimeError("Not connected. Call connect() first.")
-        result = await self._conn.run(command)
+        import asyncio as _aio
+
+        effective_timeout = timeout if timeout is not None else self._command_timeout
+        result = await _aio.wait_for(
+            self._conn.run(command),
+            timeout=effective_timeout,
+        )
         cmd_result = CommandResult(
             stdout=(result.stdout or "").strip(),
             stderr=(result.stderr or "").strip(),

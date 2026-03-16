@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
+import time
 
 import click
 from rich.console import Console
@@ -14,6 +16,16 @@ from asusroutercontrol.credentials import get_router_credentials, store_credenti
 from asusroutercontrol.datastore import DataStore
 
 console = Console()
+_DHCP_EVENT_RE = re.compile(
+    r"dnsmasq-dhcp\[\d+\]: "
+    r"(DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK|DHCPNAK)\(br0\)\s*"
+    r"(?:(\d+\.\d+\.\d+\.\d+)\s+)?([0-9A-Fa-f:]{17})(?:\s+(.+))?"
+)
+_AUTH_EVENT_RE = re.compile(
+    r"wlceventd_proc_event\(\d+\):\s+"
+    r"(eth\d):\s+(Auth|Assoc|Disassoc|Deauth)\s+([0-9A-F:]{17}),\s+"
+    r"status:\s+([^,]+)(?:,\s+reason:\s+(.+?))?(?:,\s+rssi:.*)?$"
+)
 
 
 def _get_backend():
@@ -36,6 +48,1004 @@ def _get_backend():
     )
 
 
+def _normalize_mac(mac: str | None) -> str | None:
+    if not mac:
+        return None
+    m = mac.strip().replace("-", ":").lower()
+    parts = m.split(":")
+    if len(parts) != 6 or any(len(p) != 2 for p in parts):
+        raise click.BadParameter("MAC must look like AA:BB:CC:DD:EE:FF")
+    try:
+        int("".join(parts), 16)
+    except ValueError as e:
+        raise click.BadParameter("MAC must contain only hex bytes") from e
+    return m
+
+
+def _parse_live_event(line: str) -> dict | None:
+    ts = " ".join(line.split()[:3]) if len(line.split()) >= 3 else ""
+
+    m = _DHCP_EVENT_RE.search(line)
+    if m:
+        event, ip, mac, rest = m.groups()
+        host = None
+        if rest:
+            host_token = rest.strip().split()[0]
+            if host_token and host_token != "*":
+                host = host_token
+        return {
+            "kind": "dhcp",
+            "ts": ts,
+            "event": event,
+            "ip": ip,
+            "mac": mac.lower(),
+            "host": host,
+        }
+
+    m = _AUTH_EVENT_RE.search(line)
+    if m:
+        iface, event, mac, status, reason = m.groups()
+        return {
+            "kind": "auth",
+            "ts": ts,
+            "event": event,
+            "iface": iface,
+            "mac": mac.lower(),
+            "status": status.strip(),
+            "reason": (reason or "").strip(),
+        }
+    return None
+
+
+async def _read_new_syslog_lines(ssh, last_line: int) -> tuple[list[str], int]:
+    count_result = await ssh.run("wc -l < /tmp/syslog.log")
+    try:
+        current_line = int((count_result.stdout or "0").strip() or "0")
+    except ValueError:
+        return [], last_line
+
+    if current_line < last_line:
+        last_line = 0  # log rotated/truncated
+    if current_line == last_line:
+        return [], current_line
+
+    start = last_line + 1
+    chunk = await ssh.run(f"sed -n '{start},{current_line}p' /tmp/syslog.log")
+    lines = [ln for ln in (chunk.stdout or "").splitlines() if ln.strip()]
+    return lines, current_line
+
+
+def _diagnose_capture(state: dict) -> tuple[str, str]:
+    if state.get("ack"):
+        ip = state.get("ip", "?")
+        return "ok", f"DHCPACK seen; lease established ({ip})."
+    if state.get("nak"):
+        return "fail", "DHCPNAK seen; lease negotiation failed."
+    if state.get("discover") and not state.get("offer"):
+        return "fail", "DISCOVER seen without OFFER."
+    if state.get("offer") and not state.get("request"):
+        return "fail", "OFFER seen but no REQUEST from client."
+    if state.get("request") and not state.get("ack"):
+        return "fail", "REQUEST seen without ACK."
+    if state.get("assoc") and not (
+        state.get("discover") or state.get("request") or state.get("ack")
+    ):
+        return "warn", "Wi-Fi association occurred but no DHCP traffic followed."
+    if state.get("disassoc_reason"):
+        return "warn", f"Disassociation observed: {state['disassoc_reason']}"
+    return "warn", "No decisive failure signature captured."
+
+_DHCP_RESERVATION_PROFILES: dict[str, dict[str, str]] = {
+    "macpro_primary": {
+        "label": "MacPro12Core primary",
+        "mac": "74:1b:b2:f1:c4:31",
+        "hostname": "MacPro12Core",
+        "default_ip": "192.168.1.240",
+        "triggered_by_reserve": "dhcp:reserve-macpro-primary",
+        "triggered_by_unreserve": "dhcp:unreserve-macpro-primary",
+    },
+    "denon_second_port": {
+        "label": "Denon second ethernet port",
+        "mac": "00:05:cd:d4:a5:3c",
+        "hostname": "Denon150",
+        "default_ip": "192.168.1.241",
+        "triggered_by_reserve": "dhcp:reserve-denon-second-port",
+        "triggered_by_unreserve": "dhcp:unreserve-denon-second-port",
+    },
+    "macpro_lan2": {
+        "label": "MacPro Ethernet 2",
+        "mac": "00:3e:e1:c9:2c:0b",
+        "hostname": "MacPro12Core-LAN2",
+        "default_ip": "192.168.1.242",
+        "triggered_by_reserve": "dhcp:reserve-macpro-lan2",
+        "triggered_by_unreserve": "dhcp:unreserve-macpro-lan2",
+    },
+    "macpro_lan1": {
+        "label": "MacPro Ethernet 1",
+        "mac": "00:3e:e1:c9:2c:0c",
+        "hostname": "MacPro12Core-LAN1",
+        "default_ip": "192.168.1.243",
+        "triggered_by_reserve": "dhcp:reserve-macpro-lan1",
+        "triggered_by_unreserve": "dhcp:unreserve-macpro-lan1",
+    },
+}
+
+
+def _render_dhcp_apply_result(result) -> None:
+    target = result.reservation
+    target_text = (
+        f"{target.mac} -> {target.ip}"
+        f"{f' ({target.hostname})' if target and target.hostname else ''}"
+        if target
+        else "(none)"
+    )
+    status = "[green]DRY-RUN[/green]" if result.dry_run else "[green]APPLIED[/green]"
+    if not result.success:
+        status = "[red]FAILED[/red]"
+
+    console.print(f"Result: {status}  action={result.action}  target={target_text}")
+    if result.message:
+        msg_color = "green" if result.success else "red"
+        console.print(f"[{msg_color}]{result.message}[/{msg_color}]")
+    if result.changed:
+        table = Table(title="DHCP NVRAM Changes", show_header=True)
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Old")
+        table.add_column("New")
+        for key in ("dhcp_static_x", "dhcp_staticlist", "dhcp_hostnames"):
+            table.add_row(key, result.old_values.get(key, ""), result.new_values.get(key, ""))
+        console.print(table)
+    else:
+        console.print("[dim]No NVRAM changes required.[/dim]")
+
+
+def _profile_field(profile_key: str, field: str) -> str:
+    profile = _DHCP_RESERVATION_PROFILES.get(profile_key)
+    if not profile:
+        raise click.ClickException(f"Unknown DHCP reservation profile: {profile_key}")
+    value = profile.get(field)
+    if value is None:
+        raise click.ClickException(f"Missing profile field: {profile_key}.{field}")
+    return value
+
+
+def _profile_target(
+    profile_key: str,
+    *,
+    mac: str | None,
+    hostname: str | None,
+) -> tuple[str, str]:
+    target_mac = _normalize_mac(mac or _profile_field(profile_key, "mac"))
+    target_hostname = hostname or _profile_field(profile_key, "hostname")
+    return target_mac, target_hostname
+
+
+def _render_device_row(device) -> str:
+    return (
+        f"{device.mac} ip={device.ip or '-'} host={device.hostname or '-'} "
+        f"conn={device.connection.value} online={device.is_online}"
+    )
+
+
+async def _collect_device_match_rows(
+    target_mac: str,
+    target_hostname: str | None,
+) -> tuple[list[str], list[str]]:
+    target_mac = target_mac.lower()
+    hostname_lower = (target_hostname or "").strip().lower()
+
+    async def _collect(backend):
+        devices = await backend.get_connected_devices()
+        exact_rows: list[str] = []
+        related_rows: list[str] = []
+        for device in devices:
+            mac = (device.mac or "").lower()
+            host = (device.hostname or "").lower()
+            is_exact = mac == target_mac
+            is_related = (
+                device.connection.value == "wired"
+                and (
+                    (hostname_lower and hostname_lower in host)
+                    or ("denon" in host)
+                    or ("d m holdings" in host)
+                )
+            )
+            if is_exact:
+                exact_rows.append(_render_device_row(device))
+            elif is_related:
+                related_rows.append(_render_device_row(device))
+        return exact_rows, related_rows
+
+    return await _run_with_backend(_collect)
+
+
+def _print_profile_device_match_summary(
+    profile_label: str,
+    target_mac: str,
+    target_hostname: str | None,
+) -> None:
+    console.print(f"[bold]Device match check[/bold] ({profile_label})")
+    try:
+        exact_rows, related_rows = asyncio.run(
+            _collect_device_match_rows(target_mac, target_hostname)
+        )
+    except Exception as exc:
+        console.print(
+            f"[yellow]Could not fetch live device match summary: {exc}[/yellow]"
+        )
+        return
+
+    if exact_rows:
+        console.print("[green]Exact MAC match:[/green]")
+        for row in exact_rows:
+            console.print(f"  - {row}")
+    else:
+        console.print("[yellow]No exact MAC match currently visible.[/yellow]")
+
+    if related_rows:
+        console.print("[dim]Related wired candidates:[/dim]")
+        for row in related_rows:
+            console.print(f"  - {row}")
+
+
+def _run_profile_reservation(
+    *,
+    profile_key: str,
+    ip: str,
+    mac: str | None,
+    hostname: str | None,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    from asusroutercontrol.dhcp_reservations import upsert_reservation
+    from asusroutercontrol.ssh import RouterSSH
+
+    target_mac, target_hostname = _profile_target(
+        profile_key,
+        mac=mac,
+        hostname=hostname,
+    )
+    profile_label = _profile_field(profile_key, "label")
+    if not dry_run:
+        _print_profile_device_match_summary(profile_label, target_mac, target_hostname)
+        if not yes and not click.confirm(
+            f"Apply {profile_label} reservation {target_mac} -> {ip}?"
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    cfg = load_config()
+
+    async def _reserve():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            async with RouterSSH() as ssh:
+                return await upsert_reservation(
+                    ssh=ssh,
+                    store=store,
+                    mac=target_mac,
+                    ip=ip,
+                    hostname=target_hostname,
+                    dry_run=dry_run,
+                    triggered_by=_profile_field(profile_key, "triggered_by_reserve"),
+                )
+        finally:
+            await store.close()
+
+    result = asyncio.run(_reserve())
+    _render_dhcp_apply_result(result)
+    if not result.success:
+        raise click.ClickException(result.message)
+
+
+def _run_profile_unreserve(
+    *,
+    profile_key: str,
+    mac: str | None,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    from asusroutercontrol.dhcp_reservations import remove_reservation
+    from asusroutercontrol.ssh import RouterSSH
+
+    target_mac, target_hostname = _profile_target(
+        profile_key,
+        mac=mac,
+        hostname=None,
+    )
+    profile_label = _profile_field(profile_key, "label")
+    if not dry_run:
+        _print_profile_device_match_summary(profile_label, target_mac, target_hostname)
+        if not yes and not click.confirm(
+            f"Remove {profile_label} reservation for {target_mac}?"
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    cfg = load_config()
+
+    async def _remove():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            async with RouterSSH() as ssh:
+                return await remove_reservation(
+                    ssh=ssh,
+                    store=store,
+                    mac=target_mac,
+                    dry_run=dry_run,
+                    triggered_by=_profile_field(profile_key, "triggered_by_unreserve"),
+                )
+        finally:
+            await store.close()
+
+    result = asyncio.run(_remove())
+    _render_dhcp_apply_result(result)
+    if not result.success:
+        raise click.ClickException(result.message)
+
+@click.group()
+@click.version_option(package_name="asusroutercontrol")
+def cli():
+    """ASUSRouterControl — manage your ASUS router."""
+
+
+@cli.group("dhcp")
+def dhcp_group():
+    """Manage DHCP reservations."""
+
+
+@dhcp_group.command("show")
+def dhcp_show():
+    """Show parsed DHCP reservations and raw NVRAM keys."""
+    from asusroutercontrol.dhcp_reservations import get_reservations, read_dhcp_nvram
+    from asusroutercontrol.ssh import RouterSSH
+
+    async def _show():
+        async with RouterSSH() as ssh:
+            values = await read_dhcp_nvram(ssh)
+            reservations = await get_reservations(ssh)
+
+        console.print(
+            f"dhcp_static_x={values.get('dhcp_static_x', '')}  "
+            f"reservations={len(reservations)}"
+        )
+        if not reservations:
+            console.print("[dim]No DHCP reservations parsed.[/dim]")
+            return
+
+        table = Table(title="DHCP Reservations")
+        table.add_column("MAC", style="bold")
+        table.add_column("IP")
+        table.add_column("Hostname")
+        for row in sorted(reservations, key=lambda r: (r.ip, r.mac)):
+            table.add_row(row.mac, row.ip, row.hostname or "-")
+        console.print(table)
+
+    asyncio.run(_show())
+
+
+@dhcp_group.command("health")
+def dhcp_health():
+    """Assert required MAC→IP reservation mappings in one check."""
+    from asusroutercontrol.dhcp_reservations import get_reservations
+    from asusroutercontrol.ssh import RouterSSH
+
+    required_profiles = (
+        "macpro_primary",
+        "denon_second_port",
+        "macpro_lan2",
+        "macpro_lan1",
+    )
+
+    async def _health():
+        async with RouterSSH() as ssh:
+            rows = await get_reservations(ssh)
+        by_mac = {row.mac.lower(): row for row in rows}
+
+        table = Table(title="DHCP Reservation Health")
+        table.add_column("Profile", style="bold")
+        table.add_column("MAC")
+        table.add_column("Expected IP")
+        table.add_column("Actual IP")
+        table.add_column("Status")
+
+        failures: list[str] = []
+        for profile_key in required_profiles:
+            label = _profile_field(profile_key, "label")
+            mac = _profile_field(profile_key, "mac").lower()
+            expected_ip = _profile_field(profile_key, "default_ip")
+            actual = by_mac.get(mac)
+            actual_ip = actual.ip if actual else "-"
+            ok = actual is not None and actual_ip == expected_ip
+            status = "[green]PASS[/green]" if ok else "[red]FAIL[/red]"
+            table.add_row(label, mac, expected_ip, actual_ip, status)
+            if not ok:
+                failures.append(f"{label} expected {expected_ip}, got {actual_ip}")
+
+        console.print(table)
+        if failures:
+            raise click.ClickException(
+                "Reservation health check failed: " + "; ".join(failures)
+            )
+        console.print("[green]All required DHCP reservation mappings are healthy.[/green]")
+
+    asyncio.run(_health())
+
+
+@dhcp_group.command("set")
+@click.option("--mac", required=True, help="Target client MAC.")
+@click.option("--ip", required=True, help="Reserved IPv4 address.")
+@click.option("--hostname", default=None, help="Optional hostname mapping.")
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Preview by default. Use --apply to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt for --apply.")
+def dhcp_set(mac: str, ip: str, hostname: str | None, dry_run: bool, yes: bool):
+    """Create or update a DHCP reservation."""
+    from asusroutercontrol.dhcp_reservations import upsert_reservation
+    from asusroutercontrol.ssh import RouterSSH
+
+    target_mac = _normalize_mac(mac)
+    if not dry_run and not yes:
+        if not click.confirm(f"Apply DHCP reservation {target_mac} -> {ip}?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    cfg = load_config()
+
+    async def _set():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            async with RouterSSH() as ssh:
+                return await upsert_reservation(
+                    ssh=ssh,
+                    store=store,
+                    mac=target_mac,
+                    ip=ip,
+                    hostname=hostname,
+                    dry_run=dry_run,
+                    triggered_by="dhcp:set",
+                )
+        finally:
+            await store.close()
+
+    result = asyncio.run(_set())
+    _render_dhcp_apply_result(result)
+    if not result.success:
+        raise click.ClickException(result.message)
+
+
+@dhcp_group.command("remove")
+@click.option("--mac", required=True, help="Target client MAC.")
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Preview by default. Use --apply to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt for --apply.")
+def dhcp_remove(mac: str, dry_run: bool, yes: bool):
+    """Remove a DHCP reservation by MAC."""
+    from asusroutercontrol.dhcp_reservations import remove_reservation
+    from asusroutercontrol.ssh import RouterSSH
+
+    target_mac = _normalize_mac(mac)
+    if not dry_run and not yes:
+        if not click.confirm(f"Remove DHCP reservation for {target_mac}?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    cfg = load_config()
+
+    async def _remove():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            async with RouterSSH() as ssh:
+                return await remove_reservation(
+                    ssh=ssh,
+                    store=store,
+                    mac=target_mac,
+                    dry_run=dry_run,
+                    triggered_by="dhcp:remove",
+                )
+        finally:
+            await store.close()
+
+    result = asyncio.run(_remove())
+    _render_dhcp_apply_result(result)
+    if not result.success:
+        raise click.ClickException(result.message)
+
+
+@dhcp_group.command("reserve-macpro")
+@click.option(
+    "--ip",
+    default=_DHCP_RESERVATION_PROFILES["macpro_primary"]["default_ip"],
+    show_default=True,
+    help="Reserved IP for MacPro12Core.",
+)
+@click.option(
+    "--mac",
+    default=_DHCP_RESERVATION_PROFILES["macpro_primary"]["mac"],
+    show_default=True,
+    help="MAC override for Mac Pro profile.",
+)
+@click.option(
+    "--hostname",
+    default=_DHCP_RESERVATION_PROFILES["macpro_primary"]["hostname"],
+    show_default=True,
+    help="Hostname override for Mac Pro profile.",
+)
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Preview by default. Use --apply to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt for --apply.")
+def dhcp_reserve_macpro(
+    ip: str,
+    mac: str,
+    hostname: str,
+    dry_run: bool,
+    yes: bool,
+):
+    """Set DHCP reservation for MacPro12Core."""
+    _run_profile_reservation(
+        profile_key="macpro_primary",
+        ip=ip,
+        mac=mac,
+        hostname=hostname,
+        dry_run=dry_run,
+        yes=yes,
+    )
+
+
+@dhcp_group.command("reserve-denon-second-port")
+@click.option(
+    "--ip",
+    default=_DHCP_RESERVATION_PROFILES["denon_second_port"]["default_ip"],
+    show_default=True,
+    help="Reserved IP for Denon second ethernet endpoint.",
+)
+@click.option(
+    "--mac",
+    default=_DHCP_RESERVATION_PROFILES["denon_second_port"]["mac"],
+    show_default=True,
+    help="MAC override for Denon second-port profile.",
+)
+@click.option(
+    "--hostname",
+    default=_DHCP_RESERVATION_PROFILES["denon_second_port"]["hostname"],
+    show_default=True,
+    help="Hostname override for Denon second-port profile.",
+)
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Preview by default. Use --apply to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt for --apply.")
+def dhcp_reserve_denon_second_port(
+    ip: str,
+    mac: str,
+    hostname: str,
+    dry_run: bool,
+    yes: bool,
+):
+    """Optionally reserve DHCP IP for second ethernet port (Denon150)."""
+    _run_profile_reservation(
+        profile_key="denon_second_port",
+        ip=ip,
+        mac=mac,
+        hostname=hostname,
+        dry_run=dry_run,
+        yes=yes,
+    )
+
+
+@dhcp_group.command("unreserve-denon-second-port")
+@click.option(
+    "--mac",
+    default=_DHCP_RESERVATION_PROFILES["denon_second_port"]["mac"],
+    show_default=True,
+    help="MAC override for Denon second-port profile.",
+)
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Preview by default. Use --apply to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt for --apply.")
+def dhcp_unreserve_denon_second_port(
+    mac: str,
+    dry_run: bool,
+    yes: bool,
+):
+    """Optionally remove DHCP reservation for second ethernet port."""
+    _run_profile_unreserve(
+        profile_key="denon_second_port",
+        mac=mac,
+        dry_run=dry_run,
+        yes=yes,
+    )
+
+
+@cli.group()
+def incident():
+    """Incident triage and recovery workflows."""
+
+def _collect_incident_snapshot():
+    from asusroutercontrol.incident import (
+        attach_router_observations,
+        collect_local_snapshot,
+        collect_router_observations,
+    )
+    from asusroutercontrol.ssh import RouterSSH
+
+    snapshot = collect_local_snapshot()
+
+    async def _router():
+        async def _collect(backend):
+            async with RouterSSH() as ssh:
+                return await collect_router_observations(backend, ssh)
+
+        return await _run_with_backend(_collect)
+
+    try:
+        static_enabled, static_count, router_paths = asyncio.run(_router())
+        attach_router_observations(
+            snapshot,
+            static_enabled=static_enabled,
+            static_count=static_count,
+            router_paths=router_paths,
+        )
+    except Exception as exc:
+        snapshot.ui_conflicts.append(f"router observation failed: {exc}")
+    return snapshot
+
+
+def _render_incident_snapshot(snapshot, classification) -> None:
+    from asusroutercontrol.incident import PATHS
+
+    table = Table(title="Incident Snapshot")
+    table.add_column("Path", style="bold")
+    table.add_column("Service")
+    table.add_column("Device")
+    table.add_column("Enabled")
+    table.add_column("IP")
+    table.add_column("Link")
+    table.add_column("Gateway Probe")
+    table.add_column("Health")
+
+    for path_key in sorted(PATHS, key=lambda key: PATHS[key].priority):
+        state = snapshot.paths[path_key]
+        if state.service_enabled is True:
+            enabled = "yes"
+        elif state.service_enabled is False:
+            enabled = "no"
+        else:
+            enabled = "?"
+        source_probe = (
+            "ok"
+            if state.source_ping_ok is True
+            else "fail"
+            if state.source_ping_ok is False
+            else "-"
+        )
+        health = "[green]healthy[/green]" if state.healthy else "[red]degraded[/red]"
+        link = "active" if state.status_active else "down"
+        table.add_row(
+            PATHS[path_key].label,
+            state.service,
+            state.device,
+            enabled,
+            state.ip or "-",
+            link,
+            source_probe,
+            health,
+        )
+    console.print(table)
+
+    route_summary = (
+        f"default route: {snapshot.default_interface or '-'} via {snapshot.default_gateway or '-'}"
+    )
+    console.print(route_summary)
+    if snapshot.router_dhcp_static_enabled is not None:
+        console.print(
+            "router dhcp_static_x="
+            f"{1 if snapshot.router_dhcp_static_enabled else 0} "
+            f"(reservations={snapshot.router_static_reservation_count})"
+        )
+
+    if snapshot.router_paths:
+        rt = Table(title="Router View (Tracked MACs)")
+        rt.add_column("Path", style="bold")
+        rt.add_column("MAC")
+        rt.add_column("Router IP")
+        rt.add_column("Connection")
+        rt.add_column("Online")
+        for path_key in sorted(PATHS, key=lambda key: PATHS[key].priority):
+            row = snapshot.router_paths.get(path_key)
+            if not row:
+                continue
+            rt.add_row(
+                PATHS[path_key].label,
+                row.mac,
+                row.ip or "-",
+                row.connection,
+                "yes" if row.online else "no",
+            )
+        console.print(rt)
+
+    status_color = {
+        "healthy": "green",
+        "reporting-only": "yellow",
+        "path-isolated": "yellow",
+        "global-outage": "red",
+    }.get(classification.category, "white")
+    console.print(
+        f"classification: [{status_color}]{classification.category}[/{status_color}]"
+    )
+    for reason in classification.reasons:
+        console.print(f"  - {reason}")
+
+
+@incident.command("snapshot")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON snapshot/classification.")
+def incident_snapshot(as_json: bool):
+    """Capture local+router connectivity baseline and classify incident state."""
+    import json as json_mod
+
+    from asusroutercontrol.incident import classify_snapshot
+
+    snapshot = _collect_incident_snapshot()
+    classification = classify_snapshot(snapshot)
+
+    if as_json:
+        console.print(
+            json_mod.dumps(
+                {
+                    "snapshot": snapshot.to_dict(),
+                    "classification": classification.to_dict(),
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    _render_incident_snapshot(snapshot, classification)
+
+
+@incident.command("classify")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON classification.")
+def incident_classify(as_json: bool):
+    """Classify current incident state: healthy/reporting-only/path-isolated/global-outage."""
+    import json as json_mod
+
+    from asusroutercontrol.incident import classify_snapshot
+
+    snapshot = _collect_incident_snapshot()
+    classification = classify_snapshot(snapshot)
+    if as_json:
+        console.print(json_mod.dumps(classification.to_dict(), indent=2, default=str))
+        return
+
+    status_color = {
+        "healthy": "green",
+        "reporting-only": "yellow",
+        "path-isolated": "yellow",
+        "global-outage": "red",
+    }.get(classification.category, "white")
+    console.print(
+        f"incident classification: [{status_color}]{classification.category}[/{status_color}]"
+    )
+    for reason in classification.reasons:
+        console.print(f"  - {reason}")
+
+@incident.command("repair-macos")
+@click.option(
+    "--stage",
+    required=True,
+    type=click.Choice(["A", "B", "C"], case_sensitive=False),
+    help="Repair stage to execute.",
+)
+@click.option(
+    "--path",
+    "path_key",
+    default="ethernet-primary",
+    show_default=True,
+    type=click.Choice(["ethernet-primary", "wifi-secondary", "ethernet-secondary"]),
+    help="Operate on one path only (Ethernet primary first, Wi-Fi second).",
+)
+@click.option(
+    "--allow-global-reset",
+    is_flag=True,
+    help="Stage C only: allow global configd restart (disruptive).",
+)
+@click.option("--dry-run", is_flag=True, help="Print commands without executing.")
+def incident_repair_macos(
+    stage: str,
+    path_key: str,
+    allow_global_reset: bool,
+    dry_run: bool,
+):
+    """Run one macOS repair stage on a single connectivity path."""
+    from asusroutercontrol.incident import (
+        PATHS,
+        build_repair_stage_commands,
+        classify_snapshot,
+        collect_local_snapshot,
+        execute_repair_commands,
+        is_sudo_auth_failure,
+    )
+
+    stage_key = stage.upper()
+    commands = build_repair_stage_commands(
+        stage=stage_key,
+        path_key=path_key,
+        allow_global_reset=allow_global_reset,
+    )
+
+    if dry_run:
+        console.print(
+            f"[bold]Dry run[/bold] stage={stage_key} path={PATHS[path_key].label}"
+        )
+        for step in commands:
+            prefix = "sudo -n " if step.sudo else ""
+            console.print(f"  - {prefix}{' '.join(step.argv)}")
+        return
+
+    before = collect_local_snapshot()
+    before_class = classify_snapshot(before)
+    console.print(
+        f"before: {before_class.category}  healthy={before_class.healthy_paths} "
+        f"degraded={before_class.degraded_paths}"
+    )
+
+    results = execute_repair_commands(commands, stop_on_error=True)
+    table = Table(title=f"Repair Stage {stage_key} — {PATHS[path_key].label}")
+    table.add_column("Command", style="bold")
+    table.add_column("Exit", justify="right")
+    table.add_column("Status")
+    for result in results:
+        status = "[green]ok[/green]" if result.ok else "[red]fail[/red]"
+        table.add_row(result.command, str(result.exit_code), status)
+    console.print(table)
+
+    first_failure = next((result for result in results if not result.ok), None)
+    if first_failure:
+        if is_sudo_auth_failure(first_failure):
+            raise click.ClickException(
+                "Local sudo authentication failed. Router keychain credentials do not control "
+                "local sudo; authenticate with local macOS admin sudo first."
+            )
+        details = first_failure.stderr.strip() or first_failure.stdout.strip() or "unknown"
+        raise click.ClickException(
+            f"Repair command failed (exit {first_failure.exit_code}): "
+            f"{first_failure.command} :: {details}"
+        )
+
+    after = collect_local_snapshot()
+    after_class = classify_snapshot(after)
+    console.print(
+        f"after: {after_class.category}  healthy={after_class.healthy_paths} "
+        f"degraded={after_class.degraded_paths}"
+    )
+    if path_key not in after_class.healthy_paths:
+        raise click.ClickException(
+            f"Path {PATHS[path_key].label} remains degraded after stage {stage_key}."
+        )
+    console.print("[green]Stage completed and target path is healthy.[/green]")
+
+
+@incident.command("rollback")
+@click.option("--profile", default="last-rollback", show_default=True)
+@click.option("--watch-mac", default=None, help="Optional target client MAC.")
+@click.option(
+    "--max-loss",
+    default=5.0,
+    show_default=True,
+    type=click.FloatRange(0.0, 100.0),
+)
+@click.option(
+    "--hold-seconds",
+    default=90,
+    show_default=True,
+    type=click.IntRange(10, 1800),
+)
+@click.option(
+    "--poll-seconds",
+    default=3.0,
+    show_default=True,
+    type=click.FloatRange(0.5, 30.0),
+)
+@click.option("--force", is_flag=True, help="Bypass rollback guardrails.")
+@click.option("--dry-run", is_flag=True, help="Evaluate rollback flow without writes.")
+def incident_rollback(
+    profile: str,
+    watch_mac: str | None,
+    max_loss: float,
+    hold_seconds: int,
+    poll_seconds: float,
+    force: bool,
+    dry_run: bool,
+):
+    """Run guarded rollback profile after incident classification checks."""
+    from asusroutercontrol.incident import classify_snapshot
+    from asusroutercontrol.rollout import run_rollout_profile
+
+    snapshot = _collect_incident_snapshot()
+    classification = classify_snapshot(snapshot)
+
+    if classification.has_healthy_wired and classification.has_healthy_wifi and not force:
+        raise click.ClickException(
+            "Rollback blocked: wired and Wi-Fi paths are currently healthy. "
+            "Use --force to override."
+        )
+    if classification.category == "path-isolated" and not force:
+        raise click.ClickException(
+            "Rollback blocked: fault classified as path-isolated. "
+            "Fix the isolated path first or pass --force."
+        )
+
+    cfg = load_config()
+
+    async def _run():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            return await run_rollout_profile(
+                store,
+                profile=profile,
+                max_loss_pct=max_loss,
+                hold_seconds=hold_seconds,
+                poll_seconds=poll_seconds,
+                watch_mac=watch_mac,
+                no_disconnect=True,
+                allow_disruptive=False,
+                dry_run=dry_run,
+            )
+        finally:
+            await store.close()
+
+    result = asyncio.run(_run())
+    table = Table(title=f"Incident Rollback: {profile}")
+    table.add_column("Key", style="bold cyan")
+    table.add_column("Target")
+    table.add_column("Status")
+    table.add_column("Reason")
+    for step in result.step_results:
+        color = {
+            "pass": "green",
+            "skipped": "yellow",
+            "rolled_back": "yellow",
+            "fail": "red",
+            "dry_run_pass": "green",
+        }.get(step.status, "white")
+        table.add_row(
+            step.key,
+            step.target,
+            f"[{color}]{step.status}[/{color}]",
+            step.reason[:140],
+        )
+    console.print(table)
+    if result.completed:
+        console.print("[green]Incident rollback profile completed.[/green]")
+        return
+    raise click.ClickException(f"Incident rollback stopped: {result.aborted_reason or 'unknown'}")
+
+
 async def _run_with_backend(coro_factory):
     """Connect, run coroutine, disconnect."""
     backend = _get_backend()
@@ -44,12 +1054,6 @@ async def _run_with_backend(coro_factory):
         return await coro_factory(backend)
     finally:
         await backend.disconnect()
-
-
-@click.group()
-@click.version_option(package_name="asusroutercontrol")
-def cli():
-    """ASUSRouterControl — manage your ASUS router."""
 
 
 @cli.command()
@@ -387,6 +1391,129 @@ def security():
     asyncio.run(_run_with_backend(_security))
 
 
+@cli.command("live-dhcp-auth")
+@click.option("--mac", default=None, help="Target phone MAC (recommended).")
+@click.option("--seconds", "-s", default=120, show_default=True, type=click.IntRange(10, 1800))
+@click.option(
+    "--poll",
+    "poll_seconds",
+    default=1.5,
+    show_default=True,
+    type=click.FloatRange(0.5, 10.0),
+    help="Polling interval in seconds.",
+)
+def live_dhcp_auth(mac: str | None, seconds: int, poll_seconds: float):
+    """Tail DHCP/Wi-Fi auth logs live and diagnose phone reconnect failures."""
+    from asusroutercontrol.ssh import RouterSSH
+
+    target_mac = _normalize_mac(mac)
+
+    async def _watch():
+        async with RouterSSH() as ssh:
+            initial_count = await ssh.run("wc -l < /tmp/syslog.log")
+            try:
+                last_line = int((initial_count.stdout or "0").strip() or "0")
+            except ValueError:
+                last_line = 0
+
+            console.print(
+                "[bold]Watching live DHCP/auth logs[/bold] "
+                f"for {seconds}s. Reconnect one phone now."
+            )
+            if target_mac:
+                console.print(f"[dim]Filter MAC:[/dim] {target_mac}")
+            else:
+                console.print(
+                    "[dim]Tip:[/dim] pass --mac AA:BB:CC:DD:EE:FF for a cleaner trace."
+                )
+
+            start = time.monotonic()
+            state_by_mac: dict[str, dict] = {}
+            while time.monotonic() - start < seconds:
+                lines, last_line = await _read_new_syslog_lines(ssh, last_line)
+                for line in lines:
+                    ev = _parse_live_event(line)
+                    if not ev:
+                        continue
+                    ev_mac = ev["mac"]
+                    if target_mac and ev_mac != target_mac:
+                        continue
+
+                    if not target_mac:
+                        low = line.lower()
+                        is_mobile_hint = any(
+                            hint in low for hint in ("iphone", "ipad", "watch", "android")
+                        )
+                        if not is_mobile_hint and ev_mac not in state_by_mac:
+                            continue
+
+                    st = state_by_mac.setdefault(
+                        ev_mac,
+                        {
+                            "discover": False,
+                            "offer": False,
+                            "request": False,
+                            "ack": False,
+                            "nak": False,
+                            "assoc": False,
+                            "disassoc_reason": "",
+                            "ip": "",
+                        },
+                    )
+
+                    if ev["kind"] == "dhcp":
+                        event = ev["event"]
+                        if event == "DHCPDISCOVER":
+                            st["discover"] = True
+                        elif event == "DHCPOFFER":
+                            st["offer"] = True
+                        elif event == "DHCPREQUEST":
+                            st["request"] = True
+                        elif event == "DHCPACK":
+                            st["ack"] = True
+                            st["ip"] = ev.get("ip") or ""
+                        elif event == "DHCPNAK":
+                            st["nak"] = True
+                        host = f" host={ev['host']}" if ev.get("host") else ""
+                        ip = ev.get("ip") or "-"
+                        console.print(
+                            f"[green]{ev['ts']}[/green] {ev_mac} {event} ip={ip}{host}"
+                        )
+                    else:
+                        event = ev["event"]
+                        if event == "Assoc" and "Successful" in ev.get("status", ""):
+                            st["assoc"] = True
+                        if event in ("Disassoc", "Deauth"):
+                            reason = ev.get("reason") or ev.get("status") or "unknown"
+                            st["disassoc_reason"] = reason
+                        reason_txt = (
+                            f", reason={ev['reason']}"
+                            if ev.get("reason")
+                            else f", status={ev.get('status', '-')}"
+                        )
+                        console.print(
+                            f"[cyan]{ev['ts']}[/cyan] {ev_mac} "
+                            f"{event} on {ev['iface']}{reason_txt}"
+                        )
+
+                await asyncio.sleep(poll_seconds)
+
+            if not state_by_mac:
+                console.print(
+                    "[yellow]No matching DHCP/auth events captured. "
+                    "Retry with --mac and a longer --seconds window.[/yellow]"
+                )
+                return
+
+            console.print("\n[bold]Diagnosis Summary[/bold]")
+            for ev_mac, state in sorted(state_by_mac.items()):
+                level, msg = _diagnose_capture(state)
+                color = {"ok": "green", "warn": "yellow", "fail": "red"}.get(level, "white")
+                console.print(f"[{color}]{ev_mac}[/{color}] {msg}")
+
+    asyncio.run(_watch())
+
+
 # --- Merlin: JFFS Scripts ---
 
 
@@ -691,7 +1818,8 @@ def menubar_launch():
         from asusroutercontrol.menubar import main as menubar_main
     except ImportError:
         console.print(
-            "[red]rumps not installed.[/red] Run: pip install 'asusroutercontrol[menubar]'"
+            "[red]menubar dependencies not installed.[/red] "
+            "Run: pip install 'asusroutercontrol[menubar]'"
         )
         return
     menubar_main()
@@ -700,7 +1828,6 @@ def menubar_launch():
 @menubar.command("install")
 def menubar_install():
     """Install launchd plist — auto-start on login, restart on crash."""
-    import shutil
     import subprocess
     from pathlib import Path
 
@@ -710,22 +1837,11 @@ def menubar_install():
     plist_dir.mkdir(parents=True, exist_ok=True)
     plist_path = plist_dir / "com.asusroutermonitor.plist"
 
-    exe = shutil.which("asusroutermonitor")
-    if not exe:
-        # Fall back to running via the asusrouter CLI
-        exe = shutil.which("asusrouter")
-        if not exe:
-            console.print("[red]Cannot find 'asusroutermonitor' or 'asusrouter' on PATH.[/red]")
-            return
-        program_args = f"""    <array>
-        <string>{exe}</string>
-        <string>menubar</string>
-        <string>launch</string>
-    </array>"""
-    else:
-        program_args = f"""    <array>
-        <string>{exe}</string>
-    </array>"""
+    project_root = Path(__file__).resolve().parents[2]
+    venv_python = project_root / ".venv" / "bin" / "python"
+    # PYTHONPATH bypasses the uv UF_HIDDEN flag issue on Homebrew Python 3.11+
+    # which silently skips .pth files that carry the hidden filesystem flag.
+    src_path = project_root / "src"
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -734,7 +1850,17 @@ def menubar_install():
     <key>Label</key>
     <string>com.asusroutermonitor</string>
     <key>ProgramArguments</key>
-{program_args}
+    <array>
+        <string>{venv_python}</string>
+        <string>-u</string>
+        <string>-c</string>
+        <string>from asusroutercontrol.menubar import main; main()</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>{src_path}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -774,12 +1900,13 @@ def menubar_uninstall():
 @menubar.command("build")
 def menubar_build():
     """Rebuild package and restart the menubar app with latest code."""
+    import shutil
     import subprocess
     import sys
     from pathlib import Path
 
     project_root = Path(__file__).resolve().parents[2]
-    venv_pip = project_root / ".venv" / "bin" / "pip"
+    venv_python = project_root / ".venv" / "bin" / "python"
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / "com.asusroutermonitor.plist"
     was_loaded = plist_path.exists() and subprocess.run(
@@ -792,16 +1919,22 @@ def menubar_build():
         console.print("[dim]Stopping menubar app...[/dim]")
         subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
 
-    # 2. Reinstall package (picks up new deps / entry points)
+    # 2. Reinstall package — prefer uv (no pip in uv venvs), fall back to pip
     console.print(f"[dim]Reinstalling from {project_root}...[/dim]")
-    result = subprocess.run(
-        [str(venv_pip) if venv_pip.exists() else sys.executable, "-m", "pip",
-         "install", "-e", str(project_root)],
-        capture_output=True, text=True,
-    )
+    uv = shutil.which("uv")
+    if uv:
+        cmd = [uv, "pip", "install", "-e", f"{project_root}[menubar]"]
+    else:
+        python = str(venv_python) if venv_python.exists() else sys.executable
+        cmd = [python, "-m", "pip", "install", "-e", f"{project_root}[menubar]"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        console.print(f"[red]pip install failed:[/red]\n{result.stderr.strip()}")
+        console.print(f"[red]install failed:[/red]\n{result.stderr.strip()}")
         return
+    # uv sets UF_HIDDEN on venv files; Homebrew Python 3.11 skips hidden .pth files.
+    sp = project_root / ".venv" / "lib" / "python3.11" / "site-packages"
+    if sp.exists():
+        subprocess.run(["chflags", "-R", "nohidden", str(sp)], check=False)
     console.print("[green]Package rebuilt.[/green]")
 
     # 3. Reload launchd agent (starts fresh app)
@@ -812,7 +1945,10 @@ def menubar_build():
         console.print("[yellow]Plist exists but was not loaded. Load with:[/yellow]")
         console.print(f"  launchctl load {plist_path}")
     else:
-        console.print("[yellow]No launchd plist installed. Run:[/yellow] asusrouter menubar install")
+        console.print(
+            "[yellow]No launchd plist installed. Run:[/yellow]"
+            " asusrouter menubar install"
+        )
 
 
 @menubar.command("status")
@@ -1497,6 +2633,575 @@ def report(days: int, as_json: bool, export_path: str | None):
             await store.close()
 
     asyncio.run(_report())
+
+
+# --- Optimization ---
+
+
+@cli.group()
+def optimize():
+    """Router optimization: audit, suggest, apply, verify."""
+
+
+@optimize.command("audit")
+def optimize_audit():
+    """Run service, sysctl, and WiFi channel audit."""
+    from asusroutercontrol.probes import probe_services, probe_sysctl, probe_wifi_channels
+    from asusroutercontrol.ssh import RouterSSH
+
+    async def _audit():
+        async with RouterSSH() as ssh:
+            with console.status("Running service audit..."):
+                svc = await probe_services(ssh)
+            with console.status("Running sysctl audit..."):
+                sysctl = await probe_sysctl(ssh)
+            with console.status("Running WiFi channel survey..."):
+                channels = await probe_wifi_channels(ssh)
+
+        # Services
+        bloat = [s for s in svc.services if s.is_bloat]
+        if bloat:
+            t = Table(title=f"Bloat Services ({len(bloat)} found, ~{svc.bloat_rss_kb}KB)")
+            t.add_column("Name", style="bold")
+            t.add_column("PID")
+            t.add_column("Threads", justify="right")
+            t.add_column("VSZ KB", justify="right")
+            t.add_column("Reason")
+            for s in sorted(bloat, key=lambda x: x.rss_kb, reverse=True):
+                t.add_row(s.name, str(s.pid), str(s.threads), str(s.rss_kb), s.bloat_reason)
+            console.print(t)
+        else:
+            console.print("[green]No bloat services detected.[/green]")
+
+        # Sysctl
+        suboptimal = [e for e in sysctl.entries if not e.is_optimal]
+        if suboptimal:
+            t = Table(title=f"Sysctl Tuning ({sysctl.optimal_count}/{sysctl.total_count} optimal)")
+            t.add_column("Key", style="bold cyan")
+            t.add_column("Current")
+            t.add_column("Recommended")
+            t.add_column("Note")
+            for e in suboptimal:
+                t.add_row(e.key, e.current, f"[green]{e.recommended}[/green]", e.note)
+            console.print(t)
+        else:
+            console.print(
+                f"[green]All {sysctl.total_count} sysctl values optimal.[/green]"
+            )
+
+        # WiFi channels
+        for survey in channels:
+            if survey.best_channel:
+                console.print(
+                    f"[yellow]{survey.band}GHz:[/yellow] {survey.best_reason}"
+                )
+            elif survey.entries:
+                console.print(
+                    f"[green]{survey.band}GHz:[/green] Current channel "
+                    f"{survey.current_channel} looks optimal"
+                )
+            else:
+                console.print(
+                    f"[dim]{survey.band}GHz:[/dim] No channel survey data available"
+                )
+
+    asyncio.run(_audit())
+
+
+@optimize.command("suggest")
+@click.option("--days", "-d", default=30, help="Analysis window in days")
+def optimize_suggest(days: int):
+    """Show all optimization suggestions (NVRAM + probes)."""
+    from asusroutercontrol.optimizer import generate_recommendations, suggest_settings
+
+    cfg = load_config()
+
+    async def _suggest():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            recs = await generate_recommendations(store, days=days)
+            settings = await suggest_settings(store)
+
+            # Recommendations
+            actionable = [r for r in recs if r.get("priority") in ("high", "medium")]
+            if actionable:
+                console.print(f"[bold]Recommendations ({len(actionable)} actionable)[/bold]")
+                for r in actionable:
+                    pri = r["priority"]
+                    color = "red" if pri == "high" else "yellow"
+                    console.print(f"  [{color}][{pri.upper()}][/{color}] {r['description']}")
+                    if r.get("action") and r["action"] != "No action needed.":
+                        console.print(f"    → {r['action']}")
+            else:
+                console.print("[green]No actionable recommendations.[/green]")
+
+            # Settings
+            if settings and not settings[0].get("message"):
+                console.print(f"\n[bold]NVRAM Suggestions ({len(settings)})[/bold]")
+                t = Table()
+                t.add_column("Key", style="bold cyan")
+                t.add_column("Current")
+                t.add_column("Proposed")
+                t.add_column("Risk")
+                for s in settings:
+                    risk_color = {"low": "green", "medium": "yellow", "high": "red"}
+                    rc = risk_color.get(s.get("risk", "low"), "white")
+                    t.add_row(
+                        s["key"], s["current"],
+                        f"[green]{s['proposed']}[/green]",
+                        f"[{rc}]{s.get('risk', 'low')}[/{rc}]",
+                    )
+                console.print(t)
+                for s in settings:
+                    console.print(f"  [dim]{s['key']}:[/dim] {s['rationale']}")
+            else:
+                msg = settings[0].get("message", "") if settings else "No suggestions."
+                console.print(f"[dim]{msg}[/dim]")
+        finally:
+            await store.close()
+
+    asyncio.run(_suggest())
+
+
+@optimize.command("benchmark")
+@click.option(
+    "--iterations",
+    "-n",
+    default=25,
+    show_default=True,
+    help="Iterations per metric for runtime baselining.",
+)
+@click.option(
+    "--days",
+    "-d",
+    default=7,
+    show_default=True,
+    help="Lookback window (days) for query metrics.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output structured JSON metrics")
+def optimize_benchmark(iterations: int, days: int, as_json: bool):
+    """Run deterministic local benchmark for datastore query/write timings."""
+    from asusroutercontrol.benchmark import run_datastore_benchmark
+
+    cfg = load_config()
+
+    async def _benchmark():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            with console.status("Running optimize benchmark..."):
+                payload = await run_datastore_benchmark(
+                    store,
+                    iterations=iterations,
+                    days=days,
+                )
+        finally:
+            await store.close()
+
+        if as_json:
+            import json
+
+            console.print(json.dumps(payload, indent=2))
+            return
+
+        console.print("[bold]Optimize Benchmark[/bold]")
+        console.print(
+            f"[dim]Window: {payload['days']}d | Iterations: {payload['iterations']}[/dim]"
+        )
+
+        metric_order = [
+            "query_speed_tests_ms",
+            "query_latency_probes_ms",
+            "query_wifi_snapshots_ms",
+            "query_devices_ms",
+            "write_temp_insert_ms",
+            "write_commit_ms",
+        ]
+        metrics = payload.get("metrics", {})
+        t = Table(title="Datastore Runtime Baseline")
+        t.add_column("Metric", style="bold cyan")
+        t.add_column("Count", justify="right")
+        t.add_column("p50 ms", justify="right")
+        t.add_column("p95 ms", justify="right")
+        t.add_column("Mean ms", justify="right")
+        t.add_column("Ops/s", justify="right")
+        for metric in metric_order:
+            summary = metrics.get(metric, {})
+            count = int(summary.get("count", 0))
+            p50 = float(summary.get("p50_ms", 0.0))
+            p95 = float(summary.get("p95_ms", 0.0))
+            mean_ms = float(summary.get("mean_ms", 0.0))
+            ops_per_sec = float(summary.get("ops_per_sec", 0.0))
+            t.add_row(
+                metric,
+                str(count),
+                f"{p50:.3f}",
+                f"{p95:.3f}",
+                f"{mean_ms:.3f}",
+                f"{ops_per_sec:.3f}",
+            )
+        console.print(t)
+
+        sample_sizes = payload.get("sample_sizes", {})
+        if sample_sizes:
+            summary = ", ".join(
+                f"{name}={sample_sizes[name]}" for name in sorted(sample_sizes)
+            )
+            console.print(f"[dim]Sample sizes: {summary}[/dim]")
+
+    asyncio.run(_benchmark())
+
+
+@optimize.command("apply")
+@click.option("--key", "-k", help="Apply a single NVRAM key")
+@click.option("--value", "-v", help="Value for --key")
+@click.option("--clear", is_flag=True, help="Set --key to empty string.")
+@click.option("--all-suggestions", is_flag=True, help="Apply all suggest_settings() results")
+@click.option("--dry-run", is_flag=True, help="Show what would change without applying")
+def optimize_apply(
+    key: str | None,
+    value: str | None,
+    clear: bool,
+    all_suggestions: bool,
+    dry_run: bool,
+):
+    """Apply optimization settings to the router."""
+    from asusroutercontrol.executor import apply_nvram_setting, apply_optimization_batch
+    from asusroutercontrol.optimizer import suggest_settings
+    from asusroutercontrol.ssh import RouterSSH
+
+    cfg = load_config()
+
+    async def _apply():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            async with RouterSSH() as ssh:
+                has_single_target = key is not None and (value is not None or clear)
+                if has_single_target:
+                    if value is not None and clear:
+                        raise click.ClickException("Use either --value or --clear, not both.")
+                    target_value = "" if clear else (value or "")
+                    result = await apply_nvram_setting(
+                        ssh, store, key, target_value, dry_run=dry_run,
+                    )
+                    status = (
+                        "[green]OK[/green]"
+                        if result.success
+                        else f"[red]FAIL: {result.error}[/red]"
+                    )
+                    console.print(
+                        f"{result.key}: {result.old_value!r} → {result.new_value!r} {status}"
+                    )
+                    if result.service_restarted:
+                        console.print(f"  Service: {result.service_restarted}")
+
+                elif all_suggestions:
+                    suggestions = await suggest_settings(store)
+                    if not suggestions or suggestions[0].get("message"):
+                        console.print("[dim]No suggestions to apply.[/dim]")
+                        return
+
+                    if not dry_run:
+                        console.print(
+                            f"[yellow]Applying {len(suggestions)} changes...[/yellow]"
+                        )
+                    results = await apply_optimization_batch(
+                        ssh, store, suggestions, dry_run=dry_run,
+                    )
+                    for r in results:
+                        status = "[green]OK[/green]" if r.success else f"[red]{r.error}[/red]"
+                        label = "[DRY RUN] " if dry_run else ""
+                        console.print(
+                            f"  {label}{r.key}: {r.old_value!r} → {r.new_value!r} {status}"
+                        )
+                else:
+                    console.print(
+                        "Usage: --key KEY (--value VALUE | --clear), or --all-suggestions\n"
+                        "Add --dry-run to preview without applying."
+                    )
+        finally:
+            await store.close()
+
+    asyncio.run(_apply())
+
+
+@optimize.command("verify")
+def optimize_verify():
+    """Verify Deep Dive findings execution status."""
+    from asusroutercontrol.executor import verify_deep_dive_findings
+    from asusroutercontrol.ssh import RouterSSH
+
+    async def _verify():
+        async with RouterSSH() as ssh:
+            with console.status("Verifying optimization status..."):
+                findings = await verify_deep_dive_findings(ssh)
+
+        t = Table(title="Deep Dive Findings Status")
+        t.add_column("#", justify="right")
+        t.add_column("Finding")
+        t.add_column("Expected")
+        t.add_column("Actual")
+        t.add_column("Status")
+        for f in findings:
+            actual_style = "green" if f["passed"] else "red"
+            t.add_row(
+                str(f["finding"]), f["title"],
+                f["expected"], f"[{actual_style}]{f['actual']}[/{actual_style}]",
+                f["status"],
+            )
+        console.print(t)
+
+        passed = sum(1 for f in findings if f["passed"])
+        total = len(findings)
+        if passed == total:
+            console.print(f"[green]All {total} findings verified.[/green]")
+        else:
+            console.print(
+                f"[yellow]{passed}/{total} findings applied. "
+                f"Use 'asusrouter optimize apply' to fix remaining.[/yellow]"
+            )
+
+    asyncio.run(_verify())
+
+@optimize.group("rollout")
+def optimize_rollout():
+    """Safe staged rollout of optimization settings with connectivity gates."""
+
+
+@optimize_rollout.command("plan")
+@click.option("--profile", default="last-rollback", show_default=True)
+@click.option(
+    "--no-disconnect/--allow-disconnect",
+    default=True,
+    show_default=True,
+    help="Require strict no-drop policy (recommended).",
+)
+@click.option(
+    "--allow-disruptive",
+    is_flag=True,
+    help="Allow restart_wireless/reboot mapped steps even under strict policy.",
+)
+def optimize_rollout_plan(profile: str, no_disconnect: bool, allow_disruptive: bool):
+    """Preview step order, impact, and policy gates for a rollout profile."""
+    from asusroutercontrol.rollout import get_rollout_plan_rows
+
+    async def _plan():
+        try:
+            rows = await get_rollout_plan_rows(
+                profile,
+                no_disconnect=no_disconnect,
+                allow_disruptive=allow_disruptive,
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to build rollout plan: {e}[/red]")
+            return
+
+        table = Table(title=f"Rollout Plan: {profile}")
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Current")
+        table.add_column("Target")
+        table.add_column("Service")
+        table.add_column("Action")
+        table.add_column("Policy")
+        for row in rows:
+            action_color = "yellow" if row["action"] == "skip" else "green"
+            policy = "blocked" if row["blocked"] else "allowed"
+            table.add_row(
+                row["key"],
+                row["current"] if row["current"] != "" else "''",
+                row["target"],
+                row["service"],
+                f"[{action_color}]{row['action']}[/{action_color}]",
+                policy,
+            )
+        console.print(table)
+        if no_disconnect:
+            console.print("[dim]Strict mode: any Wi-Fi/LAN drop triggers rollback + stop.[/dim]")
+
+    asyncio.run(_plan())
+
+
+@optimize_rollout.command("run")
+@click.option("--profile", default="last-rollback", show_default=True)
+@click.option("--watch-mac", default=None, help="Optional target phone MAC.")
+@click.option(
+    "--max-loss",
+    default=5.0,
+    show_default=True,
+    type=click.FloatRange(0.0, 100.0),
+    help="Maximum allowed packet loss percentage during hold window.",
+)
+@click.option(
+    "--hold-seconds",
+    default=90,
+    show_default=True,
+    type=click.IntRange(10, 1800),
+    help="Post-step hold window for connectivity gate checks.",
+)
+@click.option(
+    "--poll-seconds",
+    default=3.0,
+    show_default=True,
+    type=click.FloatRange(0.5, 30.0),
+    help="Gate polling interval.",
+)
+@click.option(
+    "--no-disconnect/--allow-disconnect",
+    default=True,
+    show_default=True,
+    help="Require strict no-drop policy.",
+)
+@click.option(
+    "--allow-disruptive",
+    is_flag=True,
+    help="Allow restart_wireless/reboot mapped steps.",
+)
+@click.option("--dry-run", is_flag=True, help="Evaluate flow without writing settings.")
+def optimize_rollout_run(
+    profile: str,
+    watch_mac: str | None,
+    max_loss: float,
+    hold_seconds: int,
+    poll_seconds: float,
+    no_disconnect: bool,
+    allow_disruptive: bool,
+    dry_run: bool,
+):
+    """Run staged rollout with hard connectivity gates and rollback-on-drop."""
+    from asusroutercontrol.rollout import run_rollout_profile
+
+    cfg = load_config()
+
+    async def _run():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            result = await run_rollout_profile(
+                store,
+                profile=profile,
+                max_loss_pct=max_loss,
+                hold_seconds=hold_seconds,
+                poll_seconds=poll_seconds,
+                watch_mac=watch_mac,
+                no_disconnect=no_disconnect,
+                allow_disruptive=allow_disruptive,
+                dry_run=dry_run,
+            )
+        except Exception as e:
+            console.print(f"[red]Rollout failed to execute: {e}[/red]")
+            return
+        finally:
+            await store.close()
+
+        table = Table(title=f"Rollout Results: {profile}")
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Target")
+        table.add_column("Service")
+        table.add_column("Status")
+        table.add_column("Reason")
+        for step in result.step_results:
+            color = {
+                "pass": "green",
+                "skipped": "yellow",
+                "rolled_back": "yellow",
+                "fail": "red",
+            }.get(step.status, "white")
+            table.add_row(
+                step.key,
+                step.target,
+                step.service or "-",
+                f"[{color}]{step.status}[/{color}]",
+                step.reason[:140],
+            )
+        console.print(table)
+        if result.completed:
+            console.print("[green]Rollout completed successfully.[/green]")
+        else:
+            console.print(f"[red]Rollout stopped: {result.aborted_reason or 'unknown'}[/red]")
+
+    asyncio.run(_run())
+
+
+@optimize_rollout.command("status")
+@click.option("--profile", default="last-rollback", show_default=True)
+@click.option("--days", default=30, show_default=True, type=click.IntRange(1, 365))
+def optimize_rollout_status(profile: str, days: int):
+    """Show last known rollout phase per step for a profile."""
+    from asusroutercontrol.rollout import rollout_status
+
+    cfg = load_config()
+
+    async def _status():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            state = await rollout_status(store, profile=profile, days=days)
+        finally:
+            await store.close()
+
+        table = Table(title=f"Rollout Status: {profile}")
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Target")
+        table.add_column("Phase")
+        table.add_column("Timestamp")
+        for row in state["rows"]:
+            phase = row["phase"]
+            color = (
+                "green" if phase in {"pass", "dry_run_pass"} else
+                "yellow" if phase.startswith("skip") or phase == "not_started" else
+                "red" if "fail" in phase or "abort" in phase else
+                "white"
+            )
+            table.add_row(
+                row["key"],
+                row["target"],
+                f"[{color}]{phase}[/{color}]",
+                row["timestamp"][:19] if row["timestamp"] else "-",
+            )
+        console.print(table)
+        console.print(
+            f"Run phase: [bold]{state['run_phase']}[/bold] "
+            f"({state['run_timestamp'][:19] if state['run_timestamp'] else '-'})"
+        )
+
+    asyncio.run(_status())
+
+
+@optimize.command("init-start")
+@click.option("--tcp/--no-tcp", default=True, help="Include TCP tuning")
+@click.option(
+    "--kill", "-k", multiple=True,
+    help="Service names to kill at boot (e.g. mastiff, cfg_server)",
+)
+@click.option("--deploy", is_flag=True, help="Deploy to router (otherwise just preview)")
+def optimize_init_start(tcp: bool, kill: tuple[str, ...], deploy: bool):
+    """Build and optionally deploy init-start optimization script."""
+    from asusroutercontrol.merlin.jffs import build_init_start, deploy_init_start
+    from asusroutercontrol.ssh import RouterSSH
+
+    content = build_init_start(
+        tcp_tuning=tcp,
+        kill_services=list(kill) if kill else None,
+    )
+
+    if not deploy:
+        console.print("[bold]Preview:[/bold]")
+        from rich.syntax import Syntax
+        console.print(Syntax(content, "bash", theme="monokai"))
+        console.print("[dim]Add --deploy to write to router.[/dim]")
+        return
+
+    async def _deploy():
+        async with RouterSSH() as ssh:
+            ok = await deploy_init_start(ssh, content)
+            if ok:
+                console.print("[green]init-start deployed to router.[/green]")
+            else:
+                console.print("[red]Failed to deploy init-start.[/red]")
+
+    asyncio.run(_deploy())
 
 
 if __name__ == "__main__":

@@ -28,18 +28,18 @@
     {"timestamp": "2026-01-03T18:00:00", "target": "gateway", "avg_ms": 11.0, "loss_pct": 0, "quality": "ok"}
   ],
   "system_snapshots": [
-    {"timestamp": "2026-01-01T00:00:00", "ram_pct": 58.1, "temp_c": 70.0, "conntrack_count": 32000, "conntrack_max": 100000},
-    {"timestamp": "2026-01-01T06:00:00", "ram_pct": 58.2, "temp_c": 70.1, "conntrack_count": 32100, "conntrack_max": 100000},
-    {"timestamp": "2026-01-01T12:00:00", "ram_pct": 58.3, "temp_c": 70.2, "conntrack_count": 32200, "conntrack_max": 100000},
-    {"timestamp": "2026-01-01T18:00:00", "ram_pct": 58.2, "temp_c": 70.1, "conntrack_count": 32300, "conntrack_max": 100000},
-    {"timestamp": "2026-01-02T00:00:00", "ram_pct": 58.3, "temp_c": 70.2, "conntrack_count": 32400, "conntrack_max": 100000},
-    {"timestamp": "2026-01-02T06:00:00", "ram_pct": 58.4, "temp_c": 70.3, "conntrack_count": 32500, "conntrack_max": 100000},
-    {"timestamp": "2026-01-02T12:00:00", "ram_pct": 58.3, "temp_c": 70.2, "conntrack_count": 32600, "conntrack_max": 100000},
-    {"timestamp": "2026-01-02T18:00:00", "ram_pct": 58.4, "temp_c": 70.2, "conntrack_count": 32700, "conntrack_max": 100000},
-    {"timestamp": "2026-01-03T00:00:00", "ram_pct": 58.5, "temp_c": 70.3, "conntrack_count": 32800, "conntrack_max": 100000},
-    {"timestamp": "2026-01-03T06:00:00", "ram_pct": 58.4, "temp_c": 70.2, "conntrack_count": 32900, "conntrack_max": 100000},
-    {"timestamp": "2026-01-03T12:00:00", "ram_pct": 58.5, "temp_c": 70.3, "conntrack_count": 33000, "conntrack_max": 100000},
-    {"timestamp": "2026-01-03T18:00:00", "ram_pct": 58.6, "temp_c": 70.4, "conntrack_count": 33100, "conntrack_max": 100000}
+    {"timestamp": "2026-01-01T00:00:00", "ram_pct": 58.1, "temp_c": 70.0, "conntrack_count": 32100, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T06:00:00", "ram_pct": 58.2, "temp_c": 70.1, "conntrack_count": 31900, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T12:00:00", "ram_pct": 58.0, "temp_c": 70.2, "conntrack_count": 32050, "conntrack_max": 100000},
+    {"timestamp": "2026-01-01T18:00:00", "ram_pct": 58.2, "temp_c": 70.1, "conntrack_count": 31950, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T00:00:00", "ram_pct": 58.1, "temp_c": 70.2, "conntrack_count": 32100, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T06:00:00", "ram_pct": 58.0, "temp_c": 70.1, "conntrack_count": 31900, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T12:00:00", "ram_pct": 58.2, "temp_c": 70.2, "conntrack_count": 32000, "conntrack_max": 100000},
+    {"timestamp": "2026-01-02T18:00:00", "ram_pct": 58.1, "temp_c": 70.2, "conntrack_count": 32050, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T00:00:00", "ram_pct": 58.0, "temp_c": 70.1, "conntrack_count": 31950, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T06:00:00", "ram_pct": 58.2, "temp_c": 70.2, "conntrack_count": 32100, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T12:00:00", "ram_pct": 58.1, "temp_c": 70.1, "conntrack_count": 31900, "conntrack_max": 100000},
+    {"timestamp": "2026-01-03T18:00:00", "ram_pct": 58.0, "temp_c": 70.2, "conntrack_count": 32000, "conntrack_max": 100000}
   ],
   "wifi_snapshots": []
 }

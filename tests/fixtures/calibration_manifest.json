@@ -30,7 +30,7 @@
       "fixture": "healthy_baseline.json",
       "expected_recommendations": [
         {
-          "category": "general",
+          "category": "system",
           "priority": "info"
         }
       ],

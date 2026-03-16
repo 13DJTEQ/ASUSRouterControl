@@ -14,7 +14,13 @@ class _Result:
 
 
 class _FakeSSH:
-    def __init__(self, *, batch_ok: bool, batch_out: str, per_key: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        batch_ok: bool,
+        batch_out: str,
+        per_key: dict[str, str] | None = None,
+    ) -> None:
         self.batch_ok = batch_ok
         self.batch_out = batch_out
         self.per_key = per_key or {}

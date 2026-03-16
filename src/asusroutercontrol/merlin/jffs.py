@@ -159,3 +159,101 @@ async def create_hook_script(
         log.warning("Unknown hook: %s", hook)
     content = "#!/bin/sh\n" + "\n".join(commands) + "\n"
     return await write_script(ssh, hook, content)
+
+
+# ---------------------------------------------------------------------------
+# Init-start script builder for persistent optimizations
+# ---------------------------------------------------------------------------
+
+# Default TCP tuning for 300 Mbps / 256MB ARM router
+DEFAULT_TCP_TUNING: list[str] = [
+    'echo 4194304 > /proc/sys/net/core/rmem_max',
+    'echo 4194304 > /proc/sys/net/core/wmem_max',
+    'echo "4096 87380 4194304" > /proc/sys/net/ipv4/tcp_rmem',
+    'echo "4096 87380 4194304" > /proc/sys/net/ipv4/tcp_wmem',
+    'echo 2000 > /proc/sys/net/core/netdev_max_backlog',
+    'echo 3 > /proc/sys/net/ipv4/tcp_fastopen',
+]
+
+# Known bloat services safe to kill at boot
+BLOAT_KILL_COMMANDS: dict[str, str] = {
+    "aaews": "killall -9 aaews 2>/dev/null  # AiCloud",
+    "mastiff": "killall -9 mastiff 2>/dev/null  # AiMesh controller",
+    "cfg_server": "killall -9 cfg_server 2>/dev/null  # AiMesh config sync",
+    "amas_lib": "killall -9 amas_lib 2>/dev/null  # AiMesh library",
+    "awsiot": "killall -9 awsiot 2>/dev/null  # AWS IoT cloud push",
+    "conn_diag": "killall -9 conn_diag 2>/dev/null  # Connection diagnostics",
+}
+
+
+def build_init_start(
+    *,
+    tcp_tuning: bool = True,
+    kill_services: list[str] | None = None,
+    extra_commands: list[str] | None = None,
+) -> str:
+    """Generate init-start script content for persistent optimizations.
+
+    Args:
+        tcp_tuning: Include TCP buffer tuning commands.
+        kill_services: List of service names to kill at boot (from BLOAT_KILL_COMMANDS).
+        extra_commands: Additional shell commands to include.
+    """
+    lines = ["#!/bin/sh"]
+    lines.append("# ASUSRouterControl init-start — generated optimizations")
+    lines.append("# Do not edit manually; regenerate via 'asusrouter optimize init-start'")
+    lines.append("")
+
+    if tcp_tuning:
+        lines.append("# --- TCP/network tuning ---")
+        lines.extend(DEFAULT_TCP_TUNING)
+        lines.append("")
+
+    if kill_services:
+        lines.append("# --- Kill unnecessary services ---")
+        lines.append("# Wait for services to start before killing")
+        lines.append("sleep 30")
+        for svc in kill_services:
+            cmd = BLOAT_KILL_COMMANDS.get(svc)
+            if cmd:
+                lines.append(cmd)
+        lines.append("")
+
+    if extra_commands:
+        lines.append("# --- Custom commands ---")
+        lines.extend(extra_commands)
+        lines.append("")
+
+    lines.append('logger -t init-start "ASUSRouterControl optimizations applied"')
+    return "\n".join(lines) + "\n"
+
+
+async def deploy_init_start(
+    ssh: RouterSSH,
+    content: str,
+    *,
+    backup: bool = True,
+) -> bool:
+    """Write init-start script to router with optional backup of existing.
+
+    Returns True if deployment succeeded.
+    """
+    path = f"{SCRIPTS_DIR}/init-start"
+
+    if backup:
+        existing = await ssh.read_file(path)
+        if existing and existing.strip() and existing.strip() != "exit 0":
+            backup_path = f"{SCRIPTS_DIR}/init-start.bak"
+            await ssh.write_file(backup_path, existing)
+            log.info("Backed up existing init-start to %s", backup_path)
+
+    ok = await ssh.write_file(path, content)
+    if ok:
+        await ssh.run(f"chmod +x {shlex.quote(path)}")
+        log.info("Deployed init-start script (%d bytes)", len(content))
+    return ok
+
+
+async def read_init_start(ssh: RouterSSH) -> str | None:
+    """Read current init-start script content."""
+    return await ssh.read_file(f"{SCRIPTS_DIR}/init-start")

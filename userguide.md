@@ -17,7 +17,7 @@ pip install -e .
 Optional extras:
 
 ```bash
-pip install -e ".[menubar]"   # macOS menubar applet (requires rumps)
+pip install -e ".[menubar]"   # macOS menubar applet (PyObjC Cocoa bindings)
 pip install -e ".[dev]"       # lint + test tooling
 ```
 
@@ -221,6 +221,19 @@ asusrouter report --export ~/Desktop/weekly.json
 
 ---
 
+### `asusrouter optimize benchmark [-n ITERATIONS] [-d DAYS] [--json]`
+Runs a deterministic local datastore benchmark for baseline timing observability.
+- Measures query latency for speed tests, latency probes, WiFi snapshots, and device reads
+- Measures synthetic write/commit timing against a temporary SQLite table
+- Produces either a rich table or structured JSON for tracking over time
+
+```bash
+asusrouter optimize benchmark
+asusrouter optimize benchmark -n 50 -d 14 --json
+```
+
+---
+
 ### `asusrouter config-snapshot [--show]`
 - **Default**: takes a new NVRAM config snapshot via SSH and saves it to the database. Reports any diff from the previous snapshot.
 - `--show`: displays the latest stored snapshot (all key/value pairs and diff summary).
@@ -283,7 +296,7 @@ Host key pinning to protect against MITM on the router SSH connection.
 
 ## Menubar Applet (`asusrouter menubar`)
 
-Requires `rumps`: `pip install 'asusroutercontrol[menubar]'`
+Requires PyObjC Cocoa bindings: `pip install 'asusroutercontrol[menubar]'`
 
 | Command | Description |
 |---|---|

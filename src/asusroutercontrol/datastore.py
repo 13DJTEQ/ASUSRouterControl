@@ -9,6 +9,7 @@ from pathlib import Path
 import aiosqlite
 
 from asusroutercontrol.models import (
+    ClientLoad,
     ConfigEvent,
     ConfigSnapshot,
     Device,
@@ -109,7 +110,11 @@ CREATE TABLE IF NOT EXISTS wifi_snapshots (
     avg_rssi REAL,
     min_rssi REAL,
     channel TEXT,
-    noise_floor REAL
+    noise_floor REAL,
+    rx_bytes INTEGER,
+    tx_bytes INTEGER,
+    rx_rate_bps REAL,
+    tx_rate_bps REAL
 );
 
 CREATE TABLE IF NOT EXISTS config_snapshots (
@@ -135,6 +140,31 @@ CREATE TABLE IF NOT EXISTS notification_log (
     last_notified TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS client_traffic (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    tx_rate_mbps REAL,
+    rx_rate_mbps REAL,
+    rssi INTEGER,
+    load_pct REAL DEFAULT 0,
+    FOREIGN KEY (mac) REFERENCES devices(mac)
+);
+
+CREATE TABLE IF NOT EXISTS device_perf_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    tx_rate_mbps REAL,
+    rx_rate_mbps REAL,
+    rssi INTEGER,
+    load_pct REAL DEFAULT 0,
+    band TEXT,
+    FOREIGN KEY (mac) REFERENCES devices(mac)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_perf_mac_ts ON device_perf_history(mac, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_client_traffic_mac_ts ON client_traffic(mac, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_mac ON device_sessions(mac);
 CREATE INDEX IF NOT EXISTS idx_sessions_seen ON device_sessions(seen_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_mac_seen ON device_sessions(mac, seen_at DESC);
@@ -181,6 +211,10 @@ class DataStore:
             ("speed_tests", "provider_details_json", "TEXT DEFAULT '{}'"),
             ("speed_tests", "quality", "TEXT DEFAULT 'ok'"),
             ("latency_probes", "quality", "TEXT DEFAULT 'ok'"),
+            ("wifi_snapshots", "rx_bytes", "INTEGER"),
+            ("wifi_snapshots", "tx_bytes", "INTEGER"),
+            ("wifi_snapshots", "rx_rate_bps", "REAL"),
+            ("wifi_snapshots", "tx_rate_bps", "REAL"),
         ]
         for table, col, col_def in migrations:
             try:
@@ -462,7 +496,14 @@ class DataStore:
         metric: str = "avg_rssi",
         band: str | None = None,
     ) -> list[dict]:
-        allowed = {"client_count", "avg_rssi", "min_rssi", "noise_floor"}
+        allowed = {
+            "client_count",
+            "avg_rssi",
+            "min_rssi",
+            "noise_floor",
+            "rx_rate_bps",
+            "tx_rate_bps",
+        }
         if metric not in allowed:
             raise ValueError(f"Unsupported wifi metric: {metric}")
         db = self._conn()
@@ -540,7 +581,14 @@ class DataStore:
     async def get_system_metric_series(
         self, *, days: int = 7, metric: str = "ram_pct"
     ) -> list[dict]:
-        allowed = {"cpu_pct", "ram_pct", "temp_c", "uptime_s", "conntrack_count", "conntrack_max"}
+        allowed = {
+            "cpu_pct",
+            "ram_pct",
+            "temp_c",
+            "uptime_s",
+            "conntrack_count",
+            "conntrack_max",
+        }
         if metric not in allowed:
             raise ValueError(f"Unsupported system metric: {metric}")
         db = self._conn()
@@ -559,12 +607,15 @@ class DataStore:
         db = self._conn()
         await db.execute(
             "INSERT INTO wifi_snapshots"
-            " (timestamp, band, client_count, avg_rssi, min_rssi, channel, noise_floor)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " (timestamp, band, client_count, avg_rssi, min_rssi, channel, noise_floor,"
+            "  rx_bytes, tx_bytes, rx_rate_bps, tx_rate_bps)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 snap.timestamp.isoformat(),
                 snap.band, snap.client_count, snap.avg_rssi,
                 snap.min_rssi, snap.channel, snap.noise_floor,
+                snap.rx_bytes, snap.tx_bytes,
+                snap.rx_rate_bps, snap.tx_rate_bps,
             ),
         )
         if commit:
@@ -581,6 +632,16 @@ class DataStore:
         sql += " ORDER BY timestamp DESC"
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def get_latest_wifi_snapshot(self, band: str) -> dict | None:
+        """Return the most recent wifi_snapshot for a given band."""
+        db = self._conn()
+        async with db.execute(
+            "SELECT * FROM wifi_snapshots WHERE band = ? ORDER BY id DESC LIMIT 1",
+            (band,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
     # --- Config Snapshots ---
 
@@ -743,6 +804,8 @@ class DataStore:
             ("config_snapshots", "timestamp"),
             ("config_events", "timestamp"),
             ("notification_log", "last_notified"),
+            ("client_traffic", "timestamp"),
+            ("device_perf_history", "timestamp"),
         ]:
             cur = await db.execute(
                 f"DELETE FROM {table} WHERE {col} < ?", (cutoff_ts,)
@@ -750,6 +813,108 @@ class DataStore:
             pruned[table] = cur.rowcount
         await db.commit()
         return pruned
+
+    # --- Client Traffic ---
+
+    async def insert_client_load(
+        self, load: ClientLoad, *, commit: bool = True
+    ) -> None:
+        db = self._conn()
+        await db.execute(
+            "INSERT INTO client_traffic"
+            " (mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                load.mac,
+                load.timestamp.isoformat(),
+                load.tx_rate_mbps,
+                load.rx_rate_mbps,
+                load.rssi,
+                load.load_pct,
+            ),
+        )
+        if commit:
+            await db.commit()
+
+    async def get_client_loads(self, *, hours: int = 1, limit: int = 500) -> list[dict]:
+        """Return latest client_traffic rows within the window."""
+        db = self._conn()
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        async with db.execute(
+            "SELECT ct.*, d.hostname, d.band"
+            " FROM client_traffic ct"
+            " LEFT JOIN devices d ON ct.mac = d.mac"
+            " WHERE ct.timestamp >= ?"
+            " ORDER BY ct.load_pct DESC"
+            " LIMIT ?",
+            (cutoff.isoformat(), limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_client_load_history(
+        self, mac: str, *, hours: int = 24, limit: int = 500
+    ) -> list[dict]:
+        db = self._conn()
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        async with db.execute(
+            "SELECT * FROM client_traffic"
+            " WHERE mac = ? AND timestamp >= ?"
+            " ORDER BY timestamp DESC LIMIT ?",
+            (mac, cutoff.isoformat(), limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def insert_device_perf(
+        self, load: ClientLoad, *, commit: bool = True
+    ) -> None:
+        db = self._conn()
+        await db.execute(
+            "INSERT INTO device_perf_history"
+            " (mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct, band)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                load.mac,
+                load.timestamp.isoformat(),
+                load.tx_rate_mbps,
+                load.rx_rate_mbps,
+                load.rssi,
+                load.load_pct,
+                load.band,
+            ),
+        )
+        if commit:
+            await db.commit()
+
+    async def get_device_perf_history(
+        self, mac: str, *, days: int = 7, limit: int = 1000
+    ) -> list[dict]:
+        """Return device_perf_history rows for a given MAC."""
+        db = self._conn()
+        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        async with db.execute(
+            "SELECT * FROM device_perf_history"
+            " WHERE mac = ? AND timestamp >= ?"
+            " ORDER BY timestamp DESC LIMIT ?",
+            (mac, cutoff.isoformat(), limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_client_load_trends(self, *, hours: int = 1) -> dict[str, float | None]:
+        """Return avg load_pct per MAC over the last N hours from device_perf_history.
+
+        Returns {mac: avg_load_pct}.
+        """
+        db = self._conn()
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        async with db.execute(
+            "SELECT mac, AVG(load_pct) as avg_load"
+            " FROM device_perf_history"
+            " WHERE timestamp >= ? AND load_pct IS NOT NULL"
+            " GROUP BY mac",
+            (cutoff.isoformat(),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {r["mac"]: float(r["avg_load"]) if r["avg_load"] is not None else None for r in rows}
 
     async def get_traffic_aggregates(self, *, hours: int = 24) -> dict:
         """Return aggregate traffic stats over the given window."""
