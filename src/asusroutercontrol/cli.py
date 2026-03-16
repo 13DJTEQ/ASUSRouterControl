@@ -29,8 +29,8 @@ _AUTH_EVENT_RE = re.compile(
 
 
 def _get_backend():
-    """Create and return a configured MerlinBackend instance."""
-    from asusroutercontrol.backends.merlin import MerlinBackend
+    """Create and return a configured firmware backend instance."""
+    from asusroutercontrol.backends.factory import create_backend
 
     cfg = load_config()
     username, password = get_router_credentials()
@@ -39,13 +39,10 @@ def _get_backend():
             "[red]Router credentials not configured.[/red] Run: [bold]asusrouter setup[/bold]"
         )
         sys.exit(1)
-    return MerlinBackend(
-        hostname=cfg.router_host,
-        username=username,
-        password=password,
-        use_ssl=cfg.use_ssl,
-        port=cfg.router_port,
-    )
+    try:
+        return create_backend(cfg, username=username, password=password)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _normalize_mac(mac: str | None) -> str | None:
@@ -1048,10 +1045,14 @@ def incident_rollback(
 
 async def _run_with_backend(coro_factory):
     """Connect, run coroutine, disconnect."""
+    from asusroutercontrol.backends.base import BackendOperationUnsupported
     backend = _get_backend()
     try:
         await backend.connect()
-        return await coro_factory(backend)
+        try:
+            return await coro_factory(backend)
+        except BackendOperationUnsupported as exc:
+            raise click.ClickException(str(exc)) from exc
     finally:
         await backend.disconnect()
 

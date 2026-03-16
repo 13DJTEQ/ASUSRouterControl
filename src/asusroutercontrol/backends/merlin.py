@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 import aiohttp
 from asusrouter import AsusData, AsusRouter
+from asusrouter.modules.port_forwarding import PortForwardingRule as AsusPortForwardingRule
 
 from asusroutercontrol.backends.base import FirmwareBackend
 from asusroutercontrol.models import (
@@ -23,11 +25,7 @@ log = logging.getLogger(__name__)
 
 
 class MerlinBackend(FirmwareBackend):
-    """Backend for stock AsusWRT and AsusWRT-Merlin firmware.
-
-    Uses the `asusrouter` library (HTTP API wrapper).
-    Works identically on stock and Merlin — same HTTP endpoints.
-    """
+    """Backend for stock AsusWRT and AsusWRT-Merlin firmware."""
 
     def __init__(
         self,
@@ -71,8 +69,6 @@ class MerlinBackend(FirmwareBackend):
             raise RuntimeError("Not connected. Call connect() first.")
         return self._router
 
-    # --- Data retrieval ---
-
     async def get_connected_devices(self) -> list[Device]:
         router = self._ensure_connected()
         now = datetime.utcnow()
@@ -86,7 +82,6 @@ class MerlinBackend(FirmwareBackend):
         if not data or not isinstance(data, dict):
             return devices
 
-        # asusrouter returns dict[MAC, AsusClient] with rich objects
         for mac, client in data.items():
             try:
                 desc = getattr(client, "description", None)
@@ -94,7 +89,6 @@ class MerlinBackend(FirmwareBackend):
                 state = getattr(client, "state", None)
 
                 hostname = getattr(desc, "name", None) if desc else None
-                # Library uses MAC as name when hostname is unknown
                 if hostname and hostname.upper() == str(mac).upper():
                     hostname = None
 
@@ -103,8 +97,6 @@ class MerlinBackend(FirmwareBackend):
                 rssi = getattr(conn_obj, "rssi", None)
                 tx_rate = getattr(conn_obj, "tx_rate", None)
                 rx_rate = getattr(conn_obj, "rx_rate", None)
-
-                # Determine online from state enum
                 is_online = "CONNECTED" in str(state) if state else True
 
                 devices.append(
@@ -136,7 +128,6 @@ class MerlinBackend(FirmwareBackend):
         if not data or not isinstance(data, dict):
             return TrafficSnapshot()
 
-        # Network data is nested: data["wan"] has rx/tx/rx_speed/tx_speed
         wan_net = data.get("wan", {})
         return TrafficSnapshot(
             timestamp=datetime.utcnow(),
@@ -180,25 +171,22 @@ class MerlinBackend(FirmwareBackend):
         except Exception:
             log.debug("Firmware data unavailable")
 
-        # Uptime + model from SYSINFO
         try:
             sys_data = await router.async_get_data(AsusData.SYSINFO)
             if sys_data and isinstance(sys_data, dict):
                 sys_info = sys_data.get("sys", {})
                 uptime_str = sys_info.get("uptimeStr", "")
-                # Parse "...(<N> secs since boot)" pattern
                 import re
+
                 m = re.search(r"\((\d+)\s+secs? since boot\)", uptime_str)
                 if m:
                     info.uptime_seconds = int(m.group(1))
         except Exception:
             log.debug("SYSINFO data unavailable")
 
-        # Temperature
         try:
             temp_data = await router.async_get_data(AsusData.TEMPERATURE)
             if temp_data and isinstance(temp_data, dict):
-                # Keys may be enum or string; find CPU temp
                 for k, v in temp_data.items():
                     if "cpu" in str(k).lower():
                         info.temperature_c = float(v)
@@ -219,20 +207,12 @@ class MerlinBackend(FirmwareBackend):
         if not data or not isinstance(data, dict):
             return WANStatus()
 
-        # Parse nested WAN structure:
-        # data["internet"] has link status + ip_address
-        # data["0"] is primary WAN with real_ip, gateway, dns, state
         internet = data.get("internet", {})
         primary = data.get("0", data.get(0, {}))
-
-        # Resolve link status from enum — str() gives value ("2"), .name gives "CONNECTED"
         link = internet.get("link", None)
         link_name = getattr(link, "name", str(link)).upper() if link else ""
         status = "connected" if "CONNECTED" in link_name else "disconnected"
-
         ip_addr = internet.get("ip_address") or primary.get("real_ip")
-
-        # Gateway and DNS may be in primary or from DEVICEMAP; handle None gracefully
         gateway = primary.get("gateway")
         dns_raw = primary.get("dns")
         if dns_raw is None:
@@ -271,7 +251,6 @@ class MerlinBackend(FirmwareBackend):
     async def set_state(self, action: str, **kwargs) -> bool:
         router = self._ensure_connected()
         try:
-            # Import action enums dynamically based on action string
             from asusrouter.modules.system import AsusSystem
 
             action_map = {
@@ -298,34 +277,72 @@ class MerlinBackend(FirmwareBackend):
             log.exception("Failed to get port forwarding rules")
             return []
 
-        if not data or not isinstance(data, dict):
+        if not data:
+            return []
+        if isinstance(data, dict) and isinstance(data.get("rules"), list):
+            return [
+                self._from_asus_port_forwarding_rule(rule)
+                for rule in data["rules"]
+                if rule is not None
+            ]
+        if isinstance(data, list):
+            return [
+                self._from_asus_port_forwarding_rule(rule)
+                for rule in data
+                if rule is not None
+            ]
+        if not isinstance(data, dict):
             return []
 
         rules: list[PortRule] = []
         for _key, rule in data.items():
             if isinstance(rule, dict):
-                rules.append(
-                    PortRule(
-                        name=rule.get("name", ""),
-                        protocol=rule.get("protocol", "tcp"),
-                        src_port=str(rule.get("src_port", "")),
-                        dst_port=str(rule.get("dst_port", "")),
-                        dst_ip=rule.get("dst_ip", ""),
-                        enabled=rule.get("enabled", True),
-                    )
-                )
+                rules.append(self._from_asus_port_forwarding_rule(rule))
         return rules
 
     async def set_port_forwarding(self, rules: list[PortRule]) -> bool:
-        # TODO: Implement via async_set_state with AsusPortForwarding
-        log.warning("set_port_forwarding not yet implemented")
-        return False
+        router = self._ensure_connected()
+        desired_rules = [
+            self._to_asus_port_forwarding_rule(rule)
+            for rule in rules
+            if rule.enabled
+        ]
 
-    # --- Helpers ---
+        try:
+            current_data = await router.async_get_data(AsusData.PORT_FORWARDING)
+        except Exception:
+            log.exception("Failed to fetch current port forwarding rules before apply")
+            current_data = None
+
+        current_rules = self._extract_asus_port_forwarding_rules(current_data)
+        if self._pf_signature(current_rules) == self._pf_signature(desired_rules):
+            log.info("Port forwarding rules already match desired state; no changes needed")
+            return True
+
+        try:
+            applied = await router.async_apply_port_forwarding_rules(desired_rules)
+        except Exception:
+            log.exception("Failed to apply port forwarding rules")
+            return False
+
+        if not applied:
+            log.warning("Router refused port forwarding rule update")
+            return False
+
+        verify = await self.get_port_forwarding()
+        verify_signature = self._port_rule_signature(
+            [rule for rule in verify if rule.enabled]
+        )
+        desired_signature = self._port_rule_signature(
+            [self._normalize_port_rule(rule) for rule in rules if rule.enabled]
+        )
+        if verify_signature != desired_signature:
+            log.warning("Port forwarding verification mismatch after apply")
+            return False
+        return True
 
     @staticmethod
     def _parse_connection_obj(conn_obj) -> ConnectionType:
-        """Map asusrouter connection object to our ConnectionType."""
         if conn_obj is None:
             return ConnectionType.UNKNOWN
         conn_type = getattr(conn_obj, "type", None)
@@ -338,8 +355,113 @@ class MerlinBackend(FirmwareBackend):
             return ConnectionType.WIFI_6G
         if "2G" in type_str or "WLAN" in type_str:
             return ConnectionType.WIFI_2G
-        # Fallback: if object is a WLAN subclass, it's wireless
         cls_name = type(conn_obj).__name__
         if "Wlan" in cls_name:
             return ConnectionType.WIFI_2G
         return ConnectionType.UNKNOWN
+
+    @staticmethod
+    def _safe_str(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+    @classmethod
+    def _normalize_port_rule(cls, rule: PortRule) -> PortRule:
+        return PortRule(
+            name=cls._safe_str(rule.name),
+            protocol=cls._safe_str(rule.protocol).lower() or "tcp",
+            src_port=cls._safe_str(rule.src_port),
+            dst_port=cls._safe_str(rule.dst_port),
+            dst_ip=cls._safe_str(rule.dst_ip),
+            enabled=bool(rule.enabled),
+        )
+
+    @classmethod
+    def _port_rule_signature(cls, rules: list[PortRule]) -> list[tuple[str, ...]]:
+        normalized = [cls._normalize_port_rule(rule) for rule in rules]
+        return sorted(
+            (
+                rule.name,
+                rule.protocol,
+                rule.src_port,
+                rule.dst_ip,
+                rule.dst_port,
+            )
+            for rule in normalized
+        )
+
+    @classmethod
+    def _pf_signature(cls, rules: list[AsusPortForwardingRule]) -> list[tuple[str, ...]]:
+        return sorted(
+            (
+                cls._safe_str(rule.name),
+                cls._safe_str(rule.protocol).lower(),
+                cls._safe_str(rule.port_external),
+                cls._safe_str(rule.ip_address),
+                cls._safe_str(rule.port),
+            )
+            for rule in rules
+        )
+
+    @classmethod
+    def _extract_asus_port_forwarding_rules(
+        cls, data: Any
+    ) -> list[AsusPortForwardingRule]:
+        if isinstance(data, dict):
+            data = data.get("rules", [])
+        if not isinstance(data, list):
+            return []
+        results: list[AsusPortForwardingRule] = []
+        for item in data:
+            if isinstance(item, AsusPortForwardingRule):
+                results.append(item)
+            elif isinstance(item, dict):
+                results.append(
+                    AsusPortForwardingRule(
+                        name=cls._safe_str(item.get("name")),
+                        ip_address=cls._safe_str(item.get("dst_ip") or item.get("ip_address")),
+                        port=cls._safe_str(item.get("dst_port") or item.get("port")),
+                        protocol=cls._safe_str(item.get("protocol")).lower(),
+                        ip_external=cls._safe_str(item.get("ip_external")),
+                        port_external=cls._safe_str(
+                            item.get("src_port") or item.get("port_external")
+                        ),
+                    )
+                )
+        return results
+
+    @classmethod
+    def _to_asus_port_forwarding_rule(cls, rule: PortRule) -> AsusPortForwardingRule:
+        normalized = cls._normalize_port_rule(rule)
+        return AsusPortForwardingRule(
+            name=normalized.name,
+            ip_address=normalized.dst_ip,
+            port=normalized.dst_port,
+            protocol=normalized.protocol,
+            ip_external="",
+            port_external=normalized.src_port,
+        )
+
+    @classmethod
+    def _from_asus_port_forwarding_rule(cls, rule: Any) -> PortRule:
+        if isinstance(rule, dict):
+            return cls._normalize_port_rule(
+                PortRule(
+                    name=cls._safe_str(rule.get("name")),
+                    protocol=cls._safe_str(rule.get("protocol")),
+                    src_port=cls._safe_str(rule.get("src_port") or rule.get("port_external")),
+                    dst_port=cls._safe_str(rule.get("dst_port") or rule.get("port")),
+                    dst_ip=cls._safe_str(rule.get("dst_ip") or rule.get("ip_address")),
+                    enabled=bool(rule.get("enabled", True)),
+                )
+            )
+
+        return cls._normalize_port_rule(
+            PortRule(
+                name=cls._safe_str(getattr(rule, "name", "")),
+                protocol=cls._safe_str(getattr(rule, "protocol", "")),
+                src_port=cls._safe_str(getattr(rule, "port_external", "")),
+                dst_port=cls._safe_str(getattr(rule, "port", "")),
+                dst_ip=cls._safe_str(getattr(rule, "ip_address", "")),
+                enabled=True,
+            )
+        )

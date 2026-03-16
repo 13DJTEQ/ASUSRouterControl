@@ -14,11 +14,46 @@ from asusroutercontrol.models import (
 )
 
 
+class BackendOperationUnsupported(RuntimeError):
+    """Raised when a backend does not support a requested operation."""
+
+    def __init__(self, backend: str, operation: str, reason: str | None = None) -> None:
+        message = f"{backend} does not support operation `{operation}`"
+        if reason:
+            message = f"{message}: {reason}"
+        super().__init__(message)
+        self.backend = backend
+        self.operation = operation
+        self.reason = reason
+
+
 class FirmwareBackend(ABC):
     """Contract for all router firmware integrations.
 
     Implementations: MerlinBackend (asusrouter lib), FreshTomatoBackend (future).
     """
+
+    def backend_name(self) -> str:
+        return type(self).__name__
+
+    def supported_operations(self) -> set[str]:
+        return {
+            "read.devices",
+            "read.traffic",
+            "read.system",
+            "read.wan",
+            "read.wifi_clients",
+            "read.port_forwarding",
+            "write.state",
+            "write.port_forwarding",
+        }
+
+    def supports_operation(self, operation: str) -> bool:
+        return operation in self.supported_operations()
+
+    def require_operation(self, operation: str, reason: str | None = None) -> None:
+        if not self.supports_operation(operation):
+            raise BackendOperationUnsupported(self.backend_name(), operation, reason)
 
     @abstractmethod
     async def connect(self) -> None: ...

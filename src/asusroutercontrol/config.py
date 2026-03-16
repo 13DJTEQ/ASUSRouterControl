@@ -13,6 +13,7 @@ _DEFAULT_SPEEDTEST_TIMES = tuple(range(24))
 
 @dataclass(frozen=True)
 class Config:
+    router_backend: str = "merlin"  # merlin | freshtomato
     router_host: str = "router.asus.com"
     router_port: int = 80
     use_ssl: bool = False
@@ -52,6 +53,7 @@ def load_config() -> Config:
     load_dotenv()
     data_dir = Path(os.environ.get("DATA_DIR", "~/.asusroutercontrol")).expanduser()
     return Config(
+        router_backend=os.environ.get("ROUTER_BACKEND", "merlin").strip().lower(),
         router_host=os.environ.get("ROUTER_HOST", "router.asus.com"),
         router_port=int(os.environ.get("ROUTER_PORT", "80")),
         use_ssl=os.environ.get("USE_SSL", "false").lower() in ("true", "1", "yes"),

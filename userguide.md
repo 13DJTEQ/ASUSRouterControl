@@ -50,6 +50,10 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `DATA_DIR` | `~/.asusroutercontrol` | SQLite DB and data storage root |
 | `SOUNDSHIELD_EXPORT_PATH` | `~/.asusroutercontrol/soundshield_network.json` | SoundShield JSON export |
 
+Backend selection:
+- `ROUTER_BACKEND=merlin` (default): full feature set, including write operations.
+- `ROUTER_BACKEND=freshtomato`: read-only MVP backend (write operations like reboot/WiFi/port-forward updates are intentionally unsupported).
+
 **SSH (Merlin features)**
 
 | Variable | Default | Description |
