@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from asusroutercontrol.analysis.clients import (
     LOAD_CRIT_PCT,
     LOAD_WARN_PCT,
     RSSI_WEAK_DBM,
     _health_dot,
     compute_client_loads,
+    format_client_load_display,
+    get_client_load_summary,
 )
 from asusroutercontrol.models import ClientLoad, ConnectionType, Device
 
@@ -152,3 +156,48 @@ def test_client_load_defaults() -> None:
     assert cl.load_pct == 0.0
     assert cl.health == "🟢"
     assert cl.timestamp is not None
+
+
+def test_format_client_load_display_precision_and_idle() -> None:
+    assert format_client_load_display(None) == "n/a"
+    assert format_client_load_display(0.0) == "idle"
+    assert format_client_load_display(0.4) == "0.4%"
+    assert format_client_load_display(9.9) == "9.9%"
+    assert format_client_load_display(10.0) == "10%"
+
+
+@pytest.mark.asyncio
+async def test_get_client_load_summary_prioritizes_signal_rows() -> None:
+    class _Store:
+        async def get_client_loads(self, *, hours: int = 1):
+            return [
+                {
+                    "mac": "AA:AA:AA:AA:AA:01",
+                    "timestamp": "2026-03-21T10:00:00",
+                    "tx_rate_mbps": None,
+                    "rx_rate_mbps": None,
+                    "rssi": None,
+                    "load_pct": 99.0,
+                },
+                {
+                    "mac": "AA:AA:AA:AA:AA:01",
+                    "timestamp": "2026-03-21T10:00:10",
+                    "tx_rate_mbps": 2.5,
+                    "rx_rate_mbps": 1.2,
+                    "rssi": -60,
+                    "load_pct": 0.8,
+                },
+                {
+                    "mac": "AA:AA:AA:AA:AA:02",
+                    "timestamp": "2026-03-21T10:00:20",
+                    "tx_rate_mbps": None,
+                    "rx_rate_mbps": None,
+                    "rssi": None,
+                    "load_pct": 0.0,
+                },
+            ]
+
+    rows = await get_client_load_summary(_Store())
+    by_mac = {r["mac"]: r for r in rows}
+    assert by_mac["AA:AA:AA:AA:AA:01"]["tx_rate_mbps"] == 2.5
+    assert by_mac["AA:AA:AA:AA:AA:02"]["load_pct"] == 0.0

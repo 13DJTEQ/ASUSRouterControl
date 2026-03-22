@@ -10,6 +10,7 @@ import base64
 import hashlib
 import logging
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -192,6 +193,7 @@ class RouterSSH:
                 username=self._username,
                 password=self._password,
                 known_hosts=None,
+                family=socket.AF_INET,
             ),
             timeout=self._connect_timeout,
         )

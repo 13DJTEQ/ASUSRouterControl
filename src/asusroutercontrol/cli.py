@@ -1243,6 +1243,53 @@ def traffic(hours: int):
 
 
 @cli.command()
+@click.option("--hours", default=1, show_default=True, type=click.IntRange(1, 168))
+def client_load_diagnostics(hours: int):
+    """Show client load data-quality diagnostics for a recent window."""
+    cfg = load_config()
+
+    async def _diag():
+        store = DataStore(cfg.data_dir / "router.db")
+        await store.open()
+        try:
+            stats = await store.get_client_load_window_stats(hours=hours)
+        finally:
+            await store.close()
+
+        samples = int(stats.get("samples") or 0)
+        if samples == 0:
+            console.print("[dim]No client load rows in the selected window.[/dim]")
+            return
+
+        signal_rows = int(stats.get("signal_rows") or 0)
+        placeholder_rows = int(stats.get("placeholder_rows") or 0)
+        max_load = stats.get("max_load_pct")
+        avg_load = stats.get("avg_load_pct")
+
+        table = Table(title=f"Client Load Diagnostics ({hours}h)", show_header=False)
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Value")
+        table.add_row("Samples", str(samples))
+        table.add_row("Signal rows", str(signal_rows))
+        table.add_row("Placeholder rows", str(placeholder_rows))
+        table.add_row(
+            "Signal ratio",
+            f"{(signal_rows / samples) * 100:.1f}%",
+        )
+        table.add_row(
+            "Max load",
+            f"{float(max_load):.1f}%" if max_load is not None else "—",
+        )
+        table.add_row(
+            "Avg load",
+            f"{float(avg_load):.2f}%" if avg_load is not None else "—",
+        )
+        console.print(table)
+
+    asyncio.run(_diag())
+
+
+@cli.command()
 @click.argument("mac", required=False)
 def history(mac: str | None):
     """Show device history. Provide MAC for specific device, or omit for all."""

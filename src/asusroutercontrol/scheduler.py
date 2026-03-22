@@ -55,6 +55,7 @@ def _percentile(samples: list[float], quantile: float) -> float:
 
 # Timeout constants (seconds)
 PROBE_CYCLE_TIMEOUT = 120.0
+CLIENT_TRAFFIC_CYCLE_TIMEOUT = 120.0
 POLL_CYCLE_TIMEOUT = 120.0
 CONFIG_CYCLE_TIMEOUT = 120.0
 SPEEDTEST_CYCLE_TIMEOUT = 300.0
@@ -99,14 +100,17 @@ class MonitorScheduler:
         """Start all task loops as cancellable Tasks."""
         self._running = True
         log.info(
-            "Scheduler started — speed tests at %s, probes every %ds, polls every %ds",
+            "Scheduler started — speed tests at %s, probes every %ds, "
+            "client traffic every %ds, polls every %ds",
             self._cfg.speedtest_times,
             self._cfg.probe_interval,
+            self._cfg.client_traffic_interval,
             self._cfg.poll_interval,
         )
         self._tasks = [
             asyncio.create_task(self._speedtest_loop(), name="speedtest"),
             asyncio.create_task(self._probe_loop(), name="probe"),
+            asyncio.create_task(self._client_traffic_loop(), name="client-traffic"),
             asyncio.create_task(self._poll_loop(), name="poll"),
             asyncio.create_task(self._prune_loop(), name="prune"),
             asyncio.create_task(self._config_snapshot_loop(), name="config"),
@@ -275,13 +279,52 @@ class MonitorScheduler:
                     compute_wifi_rates(ws, prev_bytes, prev_ts)
                 await self._store.insert_wifi_snapshot(ws, commit=False)
 
-            await self._collect_client_traffic(ssh)
-
         await self._store.commit()
         log.info(
             "Probes stored: %d latency, 1 system, %d wifi",
             len(latency_results), len(wifi_snaps),
         )
+
+    # --- Client Traffic Loop (high-frequency deltas) ---
+
+    async def _client_traffic_loop(self) -> None:
+        try:
+            while self._running:
+                cycle_start = perf_counter()
+                try:
+                    await asyncio.wait_for(
+                        self._run_client_traffic_cycle(),
+                        timeout=CLIENT_TRAFFIC_CYCLE_TIMEOUT,
+                    )
+                    self._record_perf_sample(
+                        "client_traffic.cycle",
+                        perf_counter() - cycle_start,
+                    )
+                    self._record_success("client_traffic")
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Client traffic cycle timed out after %.0fs",
+                        CLIENT_TRAFFIC_CYCLE_TIMEOUT,
+                    )
+                    await self._store.rollback()
+                    backoff = self._record_failure("client_traffic")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+                except Exception:
+                    await self._store.rollback()
+                    log.exception("Client traffic task error")
+                    backoff = self._record_failure("client_traffic")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+
+                await asyncio.sleep(self._cfg.client_traffic_interval)
+        except asyncio.CancelledError:
+            log.info("Client traffic loop cancelled")
+
+    async def _run_client_traffic_cycle(self) -> None:
+        async with RouterSSH() as ssh:
+            await self._collect_client_traffic(ssh)
+        await self._store.commit()
 
     async def _collect_client_traffic(self, ssh: RouterSSH) -> None:
         """Probe per-client byte counters, compute rate deltas, store loads."""
@@ -302,8 +345,10 @@ class MonitorScheduler:
             perf_counter() - devices_start,
         )
         hostname_map = {d["mac"]: d.get("hostname") for d in devices}
-
-        stored = 0
+        probed = len(snapshots)
+        with_rates = 0
+        inserted_valid = 0
+        inserted_placeholder = 0
         for snap in snapshots:
             mac = snap["mac"]
             rx_bytes = snap["rx_bytes"]
@@ -323,6 +368,7 @@ class MonitorScheduler:
             dtx = tx_bytes - prev_tx
             if drx < 0 or dtx < 0:
                 continue
+            with_rates += 1
 
             rx_mbps = (drx * 8) / dt / 1_000_000
             tx_mbps = (dtx * 8) / dt / 1_000_000
@@ -354,9 +400,16 @@ class MonitorScheduler:
             )
             await self._store.insert_client_load(cl, commit=False)
             await self._store.insert_device_perf(cl, commit=False)
-            stored += 1
+            inserted_valid += 1
 
-        log.info("Client traffic: %d probed, %d with rates", len(snapshots), stored)
+        log.info(
+            "Client traffic cycle: probed=%d with_rates=%d "
+            "inserted_valid=%d inserted_placeholder=%d",
+            probed,
+            with_rates,
+            inserted_valid,
+            inserted_placeholder,
+        )
 
     # --- Device + Traffic Poll Loop ---
 

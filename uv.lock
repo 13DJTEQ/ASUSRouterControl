@@ -181,7 +181,8 @@ dev = [
     { name = "ruff" },
 ]
 menubar = [
-    { name = "rumps" },
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
 ]
 
 [package.metadata]
@@ -193,12 +194,13 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "keyring", specifier = ">=25.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyobjc-core", marker = "extra == 'menubar'", specifier = ">=12.1" },
+    { name = "pyobjc-framework-cocoa", marker = "extra == 'menubar'", specifier = ">=12.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3" },
-    { name = "rumps", marker = "extra == 'menubar'", specifier = ">=0.4.0" },
 ]
 provides-extras = ["dev", "menubar"]
 
@@ -1090,15 +1092,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/89/7a/09ece68445ceac348df06e08bf75db72d0e8427765b96c9c0ffabc1be1d9/ruff-0.15.6-py3-none-win_amd64.whl", hash = "sha256:aee25bc84c2f1007ecb5037dff75cef00414fdf17c23f07dc13e577883dca406", size = 11787271, upload-time = "2026-03-12T23:05:20.168Z" },
     { url = "https://files.pythonhosted.org/packages/7f/d0/578c47dd68152ddddddf31cd7fc67dc30b7cdf639a86275fda821b0d9d98/ruff-0.15.6-py3-none-win_arm64.whl", hash = "sha256:c34de3dd0b0ba203be50ae70f5910b17188556630e2178fd7d79fc030eb0d837", size = 11060497, upload-time = "2026-03-12T23:05:25.968Z" },
 ]
-
-[[package]]
-name = "rumps"
-version = "0.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyobjc-framework-cocoa" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/e2/2e6a47951290bd1a2831dcc50aec4b25d104c0cf00e8b7868cbd29cf3bfe/rumps-0.4.0.tar.gz", hash = "sha256:17fb33c21b54b1e25db0d71d1d793dc19dc3c0b7d8c79dc6d833d0cffc8b1596", size = 39257, upload-time = "2022-10-15T05:15:10.386Z" }
 
 [[package]]
 name = "secretstorage"

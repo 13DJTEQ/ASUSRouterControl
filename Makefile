@@ -1,28 +1,50 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages
+
+VENV_PYTHON := .venv/bin/python
+SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
+
+unhide-site-packages:
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
+		echo "No $(VENV_PYTHON); skipping UF_HIDDEN fix"; \
+		exit 0; \
+	fi
+	@SITE_PACKAGES=$$($(VENV_PYTHON) -c '$(SITE_PACKAGES_PY)'); \
+	if [ -n "$$SITE_PACKAGES" ] && [ -d "$$SITE_PACKAGES" ]; then \
+		chflags -R nohidden "$$SITE_PACKAGES"; \
+	fi
 
 setup:
 	uv venv --python 3.11
 	uv pip install -e ".[dev,menubar]"
-	# uv sets UF_HIDDEN on the venv tree; Homebrew Python 3.11 honours that flag
+	# uv sets UF_HIDDEN on the venv tree; Homebrew Python honours that flag
 	# and skips all .pth files in hidden directories, breaking editable installs.
-	chflags -R nohidden .venv/lib/python3.11/site-packages
+	$(MAKE) unhide-site-packages
 
 install:
 	uv pip install -e ".[menubar]"
+	# uv sets UF_HIDDEN on the venv tree; Homebrew Python honours that flag
+	# and skips all .pth files in hidden directories, breaking editable installs.
+	$(MAKE) unhide-site-packages
 
 dev:
 	uv pip install -e ".[dev,menubar]"
+	# uv sets UF_HIDDEN on the venv tree; Homebrew Python honours that flag
+	# and skips all .pth files in hidden directories, breaking editable installs.
+	$(MAKE) unhide-site-packages
 
 rebuild:
 	uv pip install -e ".[dev,menubar]"
+	# uv sets UF_HIDDEN on the venv tree; Homebrew Python honours that flag
+	# and skips all .pth files in hidden directories, breaking editable installs.
+	$(MAKE) unhide-site-packages
 	.venv/bin/python -m ruff check src/
 	.venv/bin/python -m pytest
 
-app: install
+app: run-menubar
 
 asusroutercontrol: app
 
-run-menubar:
+run-menubar: install
 	.venv/bin/python -m asusroutercontrol.menubar
 
 test:
@@ -32,4 +54,4 @@ lint:
 	.venv/bin/python -m ruff check src/
 
 clean:
-	safe_rm -r .venv
+	rm -rf .venv

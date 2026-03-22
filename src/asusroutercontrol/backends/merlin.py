@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from datetime import datetime
 from typing import Any
 
@@ -45,7 +46,9 @@ class MerlinBackend(FirmwareBackend):
         self._router: AsusRouter | None = None
 
     async def connect(self) -> None:
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(family=socket.AF_INET)
+        )
         self._router = AsusRouter(
             hostname=self._hostname,
             username=self._username,

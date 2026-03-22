@@ -32,6 +32,7 @@ class Config:
     peak_start: int = 18  # 6 PM
     peak_end: int = 23    # 11 PM
     probe_interval: int = 1800   # 30 min
+    client_traffic_interval: int = 60  # 1 min
     poll_interval: int = 300     # 5 min
     notify_on_speedtest: bool = True  # notify when scheduled speed test completes
 
@@ -79,6 +80,7 @@ def load_config() -> Config:
         peak_start=int(os.environ.get("PEAK_START", "18")),
         peak_end=int(os.environ.get("PEAK_END", "23")),
         probe_interval=int(os.environ.get("PROBE_INTERVAL", "1800")),
+        client_traffic_interval=int(os.environ.get("CLIENT_TRAFFIC_INTERVAL", "60")),
         poll_interval=int(os.environ.get("POLL_INTERVAL", "300")),
         notify_on_speedtest=os.environ.get(
             "NOTIFY_ON_SPEEDTEST", "true"

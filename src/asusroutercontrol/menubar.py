@@ -34,6 +34,7 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
+from asusroutercontrol.analysis.clients import format_client_load_display
 from asusroutercontrol.config import load_config
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
@@ -208,32 +209,69 @@ class AppDelegate(NSObject):
         log.info("AsusRouterMonitor starting (health check in progress)")
 
     def _startup_health_check(self):
-        """Attempt SSH connect before starting scheduler; enter degraded mode on failure."""
+        """Check router backend reachability before starting scheduler."""
+        from asusroutercontrol.backends.factory import create_backend
+        from asusroutercontrol.credentials import get_router_credentials
         from asusroutercontrol.ssh import RouterSSH
 
-        try:
-            async def _check():
-                ssh = RouterSSH(connect_timeout=10.0)
-                await ssh.connect()
-                await ssh.disconnect()
-
-            asyncio.run(_check())
-            log.info("Router reachable — starting scheduler")
-            self._degraded = False
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "startAfterHealthCheck:", None, False
+        async def _check_backend():
+            username, password = get_router_credentials()
+            if not username or not password:
+                raise RuntimeError("Missing router credentials")
+            backend = create_backend(
+                self._cfg,
+                username=username,
+                password=password,
             )
+            try:
+                await backend.connect()
+            finally:
+                try:
+                    await backend.disconnect()
+                except Exception:
+                    pass
+
+        async def _check_ssh():
+            ssh = RouterSSH(connect_timeout=10.0)
+            await ssh.connect()
+            await ssh.disconnect()
+
+        try:
+            asyncio.run(_check_backend())
         except Exception as exc:
-            log.warning("Router unreachable: %s — entering degraded mode", exc)
+            log.warning(
+                "Router backend unreachable: %s — entering degraded mode",
+                exc,
+            )
             self._degraded = True
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "enterDegradedMode:", None, False
             )
+            return
+
+        if (self._cfg.router_backend or "").strip().lower() == "merlin":
+            try:
+                asyncio.run(_check_ssh())
+            except Exception as exc:
+                log.warning(
+                    "SSH unavailable at startup: %s — starting scheduler with limited data",
+                    exc,
+                )
+
+        log.info("Router reachable — starting scheduler")
+        self._degraded = False
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "startAfterHealthCheck:", None, False
+        )
 
     @objc.typedSelector(b"v@:@")
     def startAfterHealthCheck_(self, _):
         """Called on main thread after successful health check."""
-        self.statusitem.button().setTitle_("📡 —")
+        if self._degraded:
+            self.statusitem.button().setTitle_("📡 ⚠️")
+            self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
+        else:
+            self.statusitem.button().setTitle_("📡 —")
         self._start_scheduler()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             REFRESH_INTERVAL, self, "refreshData:", None, True
@@ -245,7 +283,7 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router unreachable — show offline status and retry in 60s."""
+        """Router backend unreachable — show offline status and retry in 60s."""
         self.statusitem.button().setTitle_("📡 ⚠️ Offline")
         self._mi_sched_status.setTitle_("Scheduler: ○ Offline (retrying in 60s)")
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -729,7 +767,8 @@ class AppDelegate(NSObject):
                 band = cl.get("band") or "?"
                 tx = cl.get("tx_rate_mbps")
                 rx = cl.get("rx_rate_mbps")
-                load = cl.get("load_pct", 0)
+                raw_load = cl.get("load_pct")
+                load = float(raw_load) if raw_load is not None else 0.0
                 rssi = cl.get("rssi")
                 health = "🟢"
                 if rssi is not None and rssi < -75:
@@ -748,7 +787,8 @@ class AppDelegate(NSObject):
                 else:
                     trend = ""
                 trend_s = f" {trend}" if trend else ""
-                title = f"{health} {name} — {band}  ↓{rx_s} ↑{tx_s} Mbps  ({load:.0f}%{trend_s})"
+                load_s = format_client_load_display(raw_load)
+                title = f"{health} {name} — {band}  ↓{rx_s} ↑{tx_s} Mbps  ({load_s}{trend_s})"
                 item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                     title, None, ""
                 )

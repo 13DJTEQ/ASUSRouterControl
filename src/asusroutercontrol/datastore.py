@@ -247,6 +247,13 @@ class DataStore:
             pass
 
     @staticmethod
+    def _is_unknown_label(value: str | None) -> bool:
+        if value is None:
+            return True
+        normalized = str(value).strip().lower()
+        return normalized in {"", "unknown", "none", "null"}
+
+    @staticmethod
     def _classify_speed_quality(result: SpeedTestResult) -> str:
         if result.error:
             return "error"
@@ -306,22 +313,74 @@ class DataStore:
         now_str = now.isoformat()
 
         async with db.execute(
-            "SELECT first_seen FROM devices WHERE mac = ?", (dev.mac,)
+            "SELECT first_seen, connection, band FROM devices WHERE mac = ?",
+            (dev.mac,),
         ) as cur:
             row = await cur.fetchone()
 
         is_new = row is None
+        incoming_connection = (dev.connection.value or "").strip()
         if is_new:
+            merged_connection = (
+                incoming_connection if incoming_connection else "unknown"
+            )
+            if merged_connection == "wired":
+                merged_band = None
+            elif not self._is_unknown_label(dev.band):
+                merged_band = dev.band
+            elif not self._is_unknown_label(merged_connection):
+                merged_band = merged_connection
+            else:
+                merged_band = dev.band
             await db.execute(
                 "INSERT INTO devices (mac, ip, hostname, connection, band, first_seen, last_seen)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (dev.mac, dev.ip, dev.hostname, dev.connection.value, dev.band, now_str, now_str),
+                (
+                    dev.mac,
+                    dev.ip,
+                    dev.hostname,
+                    merged_connection,
+                    merged_band,
+                    now_str,
+                    now_str,
+                ),
             )
         else:
+            existing_connection = (row["connection"] or "").strip()
+            existing_band_raw = row["band"]
+            existing_band = (
+                str(existing_band_raw).strip() if existing_band_raw is not None else ""
+            )
+
+            if (
+                self._is_unknown_label(incoming_connection)
+                and not self._is_unknown_label(existing_connection)
+            ):
+                merged_connection = existing_connection
+            else:
+                merged_connection = incoming_connection or existing_connection or "unknown"
+
+            if merged_connection == "wired":
+                merged_band = None
+            elif not self._is_unknown_label(dev.band):
+                merged_band = dev.band
+            elif not self._is_unknown_label(existing_band):
+                merged_band = existing_band_raw
+            elif not self._is_unknown_label(merged_connection):
+                merged_band = merged_connection
+            else:
+                merged_band = dev.band
             await db.execute(
                 "UPDATE devices SET ip=?, hostname=?, connection=?, band=?, last_seen=?"
                 " WHERE mac=?",
-                (dev.ip, dev.hostname, dev.connection.value, dev.band, now_str, dev.mac),
+                (
+                    dev.ip,
+                    dev.hostname,
+                    merged_connection,
+                    merged_band,
+                    now_str,
+                    dev.mac,
+                ),
             )
 
         # Always record session
@@ -330,8 +389,8 @@ class DataStore:
             " (mac, ip, hostname, connection, band, rssi, tx_rate_mbps, rx_rate_mbps, seen_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                dev.mac, dev.ip, dev.hostname, dev.connection.value,
-                dev.band, dev.rssi, dev.tx_rate_mbps, dev.rx_rate_mbps, now_str,
+                dev.mac, dev.ip, dev.hostname, merged_connection,
+                merged_band, dev.rssi, dev.tx_rate_mbps, dev.rx_rate_mbps, now_str,
             ),
         )
         if commit:
@@ -837,15 +896,70 @@ class DataStore:
             await db.commit()
 
     async def get_client_loads(self, *, hours: int = 1, limit: int = 500) -> list[dict]:
-        """Return latest client_traffic rows within the window."""
+        """Return latest per-client load rows within the window.
+
+        Prefers device_perf_history because it persists per-sample transport band.
+        Falls back to client_traffic for legacy rows.
+        """
         db = self._conn()
         cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        signal_expr_perf = (
+            "CASE WHEN dph.tx_rate_mbps IS NOT NULL OR dph.rx_rate_mbps IS NOT NULL "
+            "OR dph.rssi IS NOT NULL "
+            "THEN 1 ELSE 0 END"
+        )
+        signal_expr_traffic = (
+            "CASE WHEN ct.tx_rate_mbps IS NOT NULL OR ct.rx_rate_mbps IS NOT NULL "
+            "OR ct.rssi IS NOT NULL "
+            "THEN 1 ELSE 0 END"
+        )
+        preferred_band_expr = (
+            "CASE "
+            "WHEN dph.band IS NOT NULL AND TRIM(dph.band) <> '' "
+            "AND LOWER(TRIM(dph.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN dph.band "
+            "WHEN d.connection = 'wired' THEN 'wired' "
+            "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
+            "AND LOWER(TRIM(d.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN d.band "
+            "WHEN d.connection IS NOT NULL AND TRIM(d.connection) <> '' "
+            "THEN d.connection "
+            "ELSE NULL END"
+        )
+        fallback_band_expr = (
+            "CASE "
+            "WHEN d.connection = 'wired' THEN 'wired' "
+            "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
+            "AND LOWER(TRIM(d.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN d.band "
+            "WHEN d.connection IS NOT NULL AND TRIM(d.connection) <> '' "
+            "THEN d.connection "
+            "ELSE NULL END"
+        )
         async with db.execute(
-            "SELECT ct.*, d.hostname, d.band"
+            "SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps, "
+            "dph.rssi, dph.load_pct, d.hostname, "
+            f"{preferred_band_expr} AS band, "
+            f"{signal_expr_perf} AS has_signal"
+            " FROM device_perf_history dph"
+            " LEFT JOIN devices d ON dph.mac = d.mac"
+            " WHERE dph.timestamp >= ?"
+            " ORDER BY has_signal DESC, dph.load_pct DESC, dph.timestamp DESC"
+            " LIMIT ?",
+            (cutoff.isoformat(), limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            return rows
+
+        async with db.execute(
+            "SELECT ct.*, d.hostname, "
+            f"{fallback_band_expr} AS band, "
+            f"{signal_expr_traffic} AS has_signal"
             " FROM client_traffic ct"
             " LEFT JOIN devices d ON ct.mac = d.mac"
             " WHERE ct.timestamp >= ?"
-            " ORDER BY ct.load_pct DESC"
+            " ORDER BY has_signal DESC, ct.load_pct DESC, ct.timestamp DESC"
             " LIMIT ?",
             (cutoff.isoformat(), limit),
         ) as cur:
@@ -856,10 +970,50 @@ class DataStore:
     ) -> list[dict]:
         db = self._conn()
         cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        preferred_band_expr = (
+            "CASE "
+            "WHEN dph.band IS NOT NULL AND TRIM(dph.band) <> '' "
+            "AND LOWER(TRIM(dph.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN dph.band "
+            "WHEN d.connection = 'wired' THEN 'wired' "
+            "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
+            "AND LOWER(TRIM(d.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN d.band "
+            "WHEN d.connection IS NOT NULL AND TRIM(d.connection) <> '' "
+            "THEN d.connection "
+            "ELSE NULL END"
+        )
+        fallback_band_expr = (
+            "CASE "
+            "WHEN d.connection = 'wired' THEN 'wired' "
+            "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
+            "AND LOWER(TRIM(d.band)) NOT IN ('unknown', 'none', 'null') "
+            "THEN d.band "
+            "WHEN d.connection IS NOT NULL AND TRIM(d.connection) <> '' "
+            "THEN d.connection "
+            "ELSE NULL END"
+        )
         async with db.execute(
-            "SELECT * FROM client_traffic"
-            " WHERE mac = ? AND timestamp >= ?"
-            " ORDER BY timestamp DESC LIMIT ?",
+            "SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps, "
+            "dph.rssi, dph.load_pct, d.hostname, "
+            f"{preferred_band_expr} AS band"
+            " FROM device_perf_history dph"
+            " LEFT JOIN devices d ON dph.mac = d.mac"
+            " WHERE dph.mac = ? AND dph.timestamp >= ?"
+            " ORDER BY dph.timestamp DESC LIMIT ?",
+            (mac, cutoff.isoformat(), limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            return rows
+        async with db.execute(
+            "SELECT ct.mac, ct.timestamp, ct.tx_rate_mbps, ct.rx_rate_mbps, "
+            "ct.rssi, ct.load_pct, d.hostname, "
+            f"{fallback_band_expr} AS band"
+            " FROM client_traffic ct"
+            " LEFT JOIN devices d ON ct.mac = d.mac"
+            " WHERE ct.mac = ? AND ct.timestamp >= ?"
+            " ORDER BY ct.timestamp DESC LIMIT ?",
             (mac, cutoff.isoformat(), limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -915,6 +1069,27 @@ class DataStore:
         ) as cur:
             rows = await cur.fetchall()
         return {r["mac"]: float(r["avg_load"]) if r["avg_load"] is not None else None for r in rows}
+
+    async def get_client_load_window_stats(self, *, hours: int = 1) -> dict:
+        """Return aggregate diagnostics for client_traffic rows in a recent window."""
+        db = self._conn()
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        async with db.execute(
+            "SELECT COUNT(*) AS samples,"
+            " SUM(CASE WHEN tx_rate_mbps IS NOT NULL OR rx_rate_mbps IS NOT NULL"
+            " OR rssi IS NOT NULL THEN 1 ELSE 0 END)"
+            " AS signal_rows,"
+            " SUM(CASE WHEN tx_rate_mbps IS NULL AND rx_rate_mbps IS NULL"
+            " AND rssi IS NULL THEN 1 ELSE 0 END)"
+            " AS placeholder_rows,"
+            " MAX(load_pct) AS max_load_pct,"
+            " AVG(load_pct) AS avg_load_pct"
+            " FROM client_traffic"
+            " WHERE timestamp >= ?",
+            (cutoff.isoformat(),),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else {}
 
     async def get_traffic_aggregates(self, *, hours: int = 24) -> dict:
         """Return aggregate traffic stats over the given window."""
