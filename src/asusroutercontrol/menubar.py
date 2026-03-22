@@ -134,6 +134,17 @@ def _connection_status(
     return worst
 
 
+def _band_bucket(band: str | None) -> str:
+    """Normalise a band string to '2.4', '5', 'wired', or 'other'."""
+    if band in ("2.4GHz", "2.4"):
+        return "2.4"
+    if band in ("5GHz", "5"):
+        return "5"
+    if band == "wired":
+        return "wired"
+    return "other"
+
+
 def _add_section_header(menu, title: str):
     """Add a bold/underline section header menu item."""
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
@@ -324,12 +335,26 @@ class AppDelegate(NSObject):
         self._mi_wifi5 = _add_info(menu, "WiFi 5G: —")
         menu.addItem_(NSMenuItem.separatorItem())
 
-        # LAN Clients submenu
-        self._mi_clients_header = _add_info(menu, "👥 LAN Clients")
-        self._clients_submenu = NSMenu.new()
-        self._clients_submenu.setAutoenablesItems_(False)
-        self._mi_clients_header.setSubmenu_(self._clients_submenu)
-        self._mi_clients_header.setEnabled_(True)
+        # WiFi 2.4GHz Clients submenu
+        self._mi_clients_wifi24 = _add_info(menu, "📶 WiFi 2.4GHz Clients")
+        self._clients_wifi24_submenu = NSMenu.new()
+        self._clients_wifi24_submenu.setAutoenablesItems_(False)
+        self._mi_clients_wifi24.setSubmenu_(self._clients_wifi24_submenu)
+        self._mi_clients_wifi24.setEnabled_(True)
+
+        # WiFi 5GHz Clients submenu
+        self._mi_clients_wifi5 = _add_info(menu, "📶 WiFi 5GHz Clients")
+        self._clients_wifi5_submenu = NSMenu.new()
+        self._clients_wifi5_submenu.setAutoenablesItems_(False)
+        self._mi_clients_wifi5.setSubmenu_(self._clients_wifi5_submenu)
+        self._mi_clients_wifi5.setEnabled_(True)
+
+        # LAN Wired Clients submenu
+        self._mi_clients_lan = _add_info(menu, "🔌 LAN Clients")
+        self._clients_lan_submenu = NSMenu.new()
+        self._clients_lan_submenu.setAutoenablesItems_(False)
+        self._mi_clients_lan.setSubmenu_(self._clients_lan_submenu)
+        self._mi_clients_lan.setEnabled_(True)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self._mi_speedtest = _add_action(menu, "▶ Run Speed Test", "runSpeedTest:", self)
@@ -345,6 +370,58 @@ class AppDelegate(NSObject):
         _add_action(menu, "🔄 Restart AsusRouterMonitor", "quitApp:", self)
         self.statusitem.setMenu_(menu)
 
+
+    # ------------------------------------------------------------------
+    # Client submenu population
+    # ------------------------------------------------------------------
+
+    def _populate_client_submenu(
+        self,
+        submenu,
+        clients: list[dict],
+        client_trends: dict,
+    ) -> list[str]:
+        """Fill a client submenu; return list of saturated client names."""
+        submenu.removeAllItems()
+        saturated: list[str] = []
+        if not clients:
+            _add_info(submenu, "No clients")
+            return saturated
+        for cl in clients:
+            name = cl.get("hostname") or cl.get("mac", "?")
+            mac = cl.get("mac", "")
+            tx = cl.get("tx_rate_mbps")
+            rx = cl.get("rx_rate_mbps")
+            raw_load = cl.get("load_pct")
+            load = float(raw_load) if raw_load is not None else 0.0
+            rssi = cl.get("rssi")
+            health = "🟢"
+            if rssi is not None and rssi < -75:
+                health = "🔴"
+            elif load >= 80:
+                health = "🔴"
+            elif load >= 50:
+                health = "🟡"
+            tx_s = f"{tx:.0f}" if tx else "—"
+            rx_s = f"{rx:.0f}" if rx else "—"
+            trend_avg = client_trends.get(mac)
+            if trend_avg is not None and load > 0:
+                diff = load - trend_avg
+                trend = "↑" if diff > 5 else "↓" if diff < -5 else "—"
+            else:
+                trend = ""
+            trend_s = f" {trend}" if trend else ""
+            load_s = format_client_load_display(raw_load)
+            rssi_s = f"  {rssi} dBm" if rssi is not None else ""
+            title = f"{health} {name}  ↓{rx_s} ↑{tx_s} Mbps  ({load_s}{trend_s}){rssi_s}"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, None, ""
+            )
+            item.setEnabled_(False)
+            submenu.addItem_(item)
+            if load >= 80:
+                saturated.append(name)
+        return saturated
 
     # ------------------------------------------------------------------
     # Scheduler
@@ -755,66 +832,47 @@ class AppDelegate(NSObject):
             bw = _format_band_bw(w5)
             self._mi_wifi5.setTitle_(f"WiFi 5G: {clients} clients (ch {ch}){bw}")
 
-        # --- LAN Clients submenu ---
-        self._clients_submenu.removeAllItems()
+        # --- Client submenus (split by connectivity type) ---
         client_loads = data.get("client_loads", [])
         client_trends = data.get("client_trends", {})
-        if client_loads:
-            saturated = []
-            for cl in client_loads:
-                name = cl.get("hostname") or cl.get("mac", "?")
-                mac = cl.get("mac", "")
-                band = cl.get("band") or "?"
-                tx = cl.get("tx_rate_mbps")
-                rx = cl.get("rx_rate_mbps")
-                raw_load = cl.get("load_pct")
-                load = float(raw_load) if raw_load is not None else 0.0
-                rssi = cl.get("rssi")
-                health = "🟢"
-                if rssi is not None and rssi < -75:
-                    health = "🔴"
-                elif load >= 80:
-                    health = "🔴"
-                elif load >= 50:
-                    health = "🟡"
-                tx_s = f"{tx:.0f}" if tx else "—"
-                rx_s = f"{rx:.0f}" if rx else "—"
-                # Trend arrow based on current load vs 1h average
-                trend_avg = client_trends.get(mac)
-                if trend_avg is not None and load > 0:
-                    diff = load - trend_avg
-                    trend = "↑" if diff > 5 else "↓" if diff < -5 else "—"
-                else:
-                    trend = ""
-                trend_s = f" {trend}" if trend else ""
-                load_s = format_client_load_display(raw_load)
-                title = f"{health} {name} — {band}  ↓{rx_s} ↑{tx_s} Mbps  ({load_s}{trend_s})"
-                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                    title, None, ""
+
+        wifi24 = [c for c in client_loads if _band_bucket(c.get("band")) == "2.4"]
+        wifi5  = [c for c in client_loads if _band_bucket(c.get("band")) == "5"]
+        lan    = [c for c in client_loads if _band_bucket(c.get("band")) == "wired"]
+
+        saturated = self._populate_client_submenu(
+            self._clients_wifi24_submenu, wifi24, client_trends
+        )
+        saturated += self._populate_client_submenu(
+            self._clients_wifi5_submenu, wifi5, client_trends
+        )
+        saturated += self._populate_client_submenu(
+            self._clients_lan_submenu, lan, client_trends
+        )
+
+        self._mi_clients_wifi24.setTitle_(
+            f"📶 WiFi 2.4GHz ({len(wifi24)})" if wifi24 else "📶 WiFi 2.4GHz Clients"
+        )
+        self._mi_clients_wifi5.setTitle_(
+            f"📶 WiFi 5GHz ({len(wifi5)})" if wifi5 else "📶 WiFi 5GHz Clients"
+        )
+        self._mi_clients_lan.setTitle_(
+            f"🔌 LAN ({len(lan)})" if lan else "🔌 LAN Clients"
+        )
+
+        # Saturation notification (cooldown: max once per 10 min)
+        if saturated:
+            now_ts = datetime.now()
+            if (
+                self._last_saturation_notify is None
+                or (now_ts - self._last_saturation_notify).total_seconds() > 600
+            ):
+                self._last_saturation_notify = now_ts
+                _notify(
+                    "🔴 Client Saturation",
+                    f"{len(saturated)} client(s) above 80% load",
+                    ", ".join(saturated[:3]),
                 )
-                item.setEnabled_(False)
-                self._clients_submenu.addItem_(item)
-                if load >= 80:
-                    saturated.append(name)
-            self._mi_clients_header.setTitle_(
-                f"👥 LAN Clients ({len(client_loads)})"
-            )
-            # Saturation notification (cooldown: max once per 10 min)
-            if saturated:
-                now_ts = datetime.now()
-                if (
-                    self._last_saturation_notify is None
-                    or (now_ts - self._last_saturation_notify).total_seconds() > 600
-                ):
-                    self._last_saturation_notify = now_ts
-                    _notify(
-                        "🔴 Client Saturation",
-                        f"{len(saturated)} client(s) above 80% load",
-                        ", ".join(saturated[:3]),
-                    )
-        else:
-            _add_info(self._clients_submenu, "No client data")
-            self._mi_clients_header.setTitle_("👥 LAN Clients")
 
         alive = self._sched_thread and self._sched_thread.is_alive()
         dot = "●" if alive else "○"
