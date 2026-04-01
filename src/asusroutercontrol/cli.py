@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 import time
@@ -12,7 +13,12 @@ from rich.console import Console
 from rich.table import Table
 
 from asusroutercontrol.config import load_config
-from asusroutercontrol.credentials import get_router_credentials, store_credential
+from asusroutercontrol.credentials import (
+    delete_legacy_credentials,
+    get_router_credentials,
+    migrate_legacy_credentials,
+    store_credential,
+)
 from asusroutercontrol.datastore import DataStore
 
 console = Console()
@@ -1059,20 +1065,60 @@ async def _run_with_backend(coro_factory):
 
 @cli.command()
 def setup():
-    """Store router credentials in macOS Keychain."""
+    """Store router credentials in macOS Keychain (universal-keychain format)."""
     console.print("[bold]ASUSRouterControl Setup[/bold]\n")
 
     username = click.prompt("Router username", default="admin")
     password = click.prompt("Router password", hide_input=True)
 
-    ok_user = store_credential("router.username", username)
-    ok_pass = store_credential("router.password", password)
+    ok_user = store_credential("router_username", username)
+    ok_pass = store_credential("router_password", password)
 
     if ok_user and ok_pass:
-        console.print("\n[green]Credentials stored in macOS Keychain.[/green]")
+        console.print("\n[green]Credentials stored in macOS Keychain (universal-keychain).[/green]")
         console.print("Config file: copy .env.example to .env and adjust ROUTER_HOST if needed.")
     else:
         console.print("\n[red]Failed to store credentials.[/red]")
+
+
+@cli.group()
+def credentials():
+    """Manage router credentials."""
+
+
+@credentials.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Show what would be migrated without writing.")
+def credentials_migrate(dry_run: bool):
+    """Migrate legacy com.asusroutercontrol.* entries to universal-keychain format."""
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
+    migrated = migrate_legacy_credentials(dry_run=dry_run)
+    if not migrated:
+        console.print(
+            "[dim]Nothing to migrate — all entries already in universal-keychain format.[/dim]"
+        )
+        return
+    verb = "Would migrate" if dry_run else "Migrated"
+    for key in migrated:
+        console.print(f"  [green]{verb}[/green] {key}")
+    if not dry_run:
+        console.print(
+            "\n[bold]Run [cyan]asusrouter credentials cleanup[/cyan]"
+            " to remove legacy entries.[/bold]"
+        )
+
+
+@credentials.command("cleanup")
+def credentials_cleanup():
+    """Remove deprecated legacy keychain entries after migration."""
+    removed = delete_legacy_credentials()
+    if not removed:
+        console.print("[dim]No legacy entries to remove.[/dim]")
+        return
+    for key in removed:
+        console.print(f"  [yellow]Removed[/yellow] com.asusroutercontrol.{key}")
+    console.print("[green]Legacy entries cleaned up.[/green]")
 
 
 @cli.command()
@@ -1913,6 +1959,10 @@ def menubar_install():
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>{cfg.data_dir}/menubar.out.log</string>
     <key>StandardErrorPath</key>
@@ -1924,10 +1974,21 @@ def menubar_install():
 </dict>
 </plist>
 """
+    uid = str(os.getuid())
+    # Bootout existing service before writing new plist (avoids "already loaded" error)
+    if subprocess.run(
+        ["launchctl", "list", "com.asusroutermonitor"],
+        capture_output=True,
+    ).returncode == 0:
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False)
+        import time
+        time.sleep(0.5)
     plist_path.write_text(plist_content)
-    subprocess.run(["launchctl", "load", str(plist_path)], check=False)
+    # Use modern bootstrap (load is deprecated on macOS 10.10+)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=False)
     console.print(f"[green]Installed and loaded:[/green] {plist_path}")
     console.print("Menubar app will auto-start on login and restart on crash.")
+    console.print("[dim]ThrottleInterval=30s prevents crash-loop death.[/dim]")
 
 
 @menubar.command("uninstall")
@@ -1940,7 +2001,8 @@ def menubar_uninstall():
     if not plist_path.exists():
         console.print("[dim]Not installed.[/dim]")
         return
-    subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+    uid = str(os.getuid())
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False)
     plist_path.unlink()
     console.print(f"[green]Uninstalled:[/green] {plist_path}")
 
@@ -1962,10 +2024,11 @@ def menubar_build():
         capture_output=True,
     ).returncode == 0
 
-    # 1. Unload launchd agent (stops running app)
+    # 1. Stop launchd agent (bootout replaces deprecated unload)
+    uid = str(os.getuid())
     if was_loaded:
         console.print("[dim]Stopping menubar app...[/dim]")
-        subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False)
 
     # 2. Reinstall package — prefer uv (no pip in uv venvs), fall back to pip
     console.print(f"[dim]Reinstalling from {project_root}...[/dim]")
@@ -1987,11 +2050,11 @@ def menubar_build():
 
     # 3. Reload launchd agent (starts fresh app)
     if was_loaded:
-        subprocess.run(["launchctl", "load", str(plist_path)], check=False)
+        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=False)
         console.print("[green]Menubar app restarted.[/green]")
     elif plist_path.exists():
         console.print("[yellow]Plist exists but was not loaded. Load with:[/yellow]")
-        console.print(f"  launchctl load {plist_path}")
+        console.print(f"  launchctl bootstrap gui/$(id -u) {plist_path}")
     else:
         console.print(
             "[yellow]No launchd plist installed. Run:[/yellow]"
@@ -2024,6 +2087,106 @@ def menubar_status():
             "Start with: launchctl load"
             " ~/Library/LaunchAgents/com.asusroutermonitor.plist"
         )
+
+
+@menubar.command("doctor")
+@click.option("--fix", is_flag=True, help="Attempt to re-bootstrap the service if it's unloaded.")
+def menubar_doctor(fix: bool):
+    """Diagnose and optionally repair menubar launchd service."""
+    import subprocess
+    from pathlib import Path
+
+    issues = 0
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.asusroutermonitor.plist"
+
+    # 1. Plist exists?
+    if not plist_path.exists():
+        console.print("[red]\u2717 Plist not found:[/red]", str(plist_path))
+        console.print("  Fix: [bold]asusrouter menubar install[/bold]")
+        return  # nothing else to check
+    console.print("[green]\u2713 Plist exists[/green]")
+
+    # 2. Service loaded?
+    svc_result = subprocess.run(
+        ["launchctl", "list", "com.asusroutermonitor"],
+        capture_output=True, text=True,
+    )
+    service_loaded = svc_result.returncode == 0
+    if service_loaded:
+        console.print("[green]\u2713 Service loaded[/green]")
+        # Extract PID if present
+        for line in svc_result.stdout.splitlines():
+            if '"PID"' in line:
+                console.print(f"  {line.strip()}")
+    else:
+        console.print("[red]\u2717 Service NOT loaded[/red] (launchd has abandoned it)")
+        issues += 1
+
+    # 3. Venv python exists?
+    project_root = Path(__file__).resolve().parents[2]
+    venv_python = project_root / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        console.print(f"[green]\u2713 Venv python exists:[/green] {venv_python}")
+    else:
+        console.print(f"[red]\u2717 Venv python missing:[/red] {venv_python}")
+        issues += 1
+
+    # 4. Can import objc?
+    if venv_python.exists():
+        import_check = subprocess.run(
+            [str(venv_python), "-c", "import objc; import AppKit; print('ok')"],
+            capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(project_root / "src")},
+        )
+        if import_check.returncode == 0 and "ok" in import_check.stdout:
+            console.print("[green]\u2713 objc + AppKit importable[/green]")
+        else:
+            console.print("[red]\u2717 Import failed:[/red]")
+            console.print(f"  {import_check.stderr.strip()[-200:]}")
+            console.print("  Fix: [bold]asusrouter menubar build[/bold]")
+            issues += 1
+
+    # 5. Check stderr log for recent crash patterns
+    cfg = load_config()
+    err_log = cfg.data_dir / "menubar.err.log"
+    if err_log.exists():
+        tail = err_log.read_text()[-2000:]
+        crash_keywords = ["ImportError", "ModuleNotFoundError", "Load failed", "Traceback"]
+        found = [kw for kw in crash_keywords if kw in tail]
+        if found:
+            console.print(
+                f"[yellow]\u26a0 Recent crash signatures in stderr log:[/yellow]"
+                f" {', '.join(found)}"
+            )
+            console.print(f"  Log: {err_log}")
+            issues += 1
+        else:
+            console.print("[green]\u2713 No crash patterns in stderr log[/green]")
+    else:
+        console.print("[dim]  No stderr log file yet[/dim]")
+
+    # Summary
+    if issues == 0:
+        console.print("\n[bold green]All checks passed.[/bold green]")
+        return
+
+    console.print(f"\n[bold yellow]{issues} issue(s) found.[/bold yellow]")
+
+    # Auto-fix: re-bootstrap if service is unloaded
+    if not service_loaded and fix:
+        uid = str(os.getuid())
+        console.print("[dim]Re-bootstrapping service...[/dim]")
+        r = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            console.print("[green]\u2713 Service re-bootstrapped successfully.[/green]")
+        else:
+            console.print(f"[red]Bootstrap failed:[/red] {r.stderr.strip()}")
+            console.print("  Try: [bold]asusrouter menubar install[/bold]")
+    elif not service_loaded:
+        console.print("Run [bold]asusrouter menubar doctor --fix[/bold] to re-bootstrap.")
 
 
 # --- Scheduler & Monitoring ---
@@ -2276,9 +2439,14 @@ def ssh_trust_revoke(host: str | None, port: int | None, yes: bool):
 @cli.command()
 @click.option("--no-store", is_flag=True, help="Don't save result to database")
 @click.option(
-    "--source", "-s", default=None,
-    type=click.Choice(["ookla", "cloudflare", "http_download"]),
-    help="Run a single provider only",
+    "--source",
+    "-s",
+    default=None,
+    type=str,
+    help=(
+        "Run a single provider only "
+        "(e.g. ookla, cloudflare, cachefly, cloudfront, fastly, http_download)"
+    ),
 )
 def speedtest(no_store: bool, source: str | None):
     """Run a multi-source speed test."""
@@ -2307,21 +2475,26 @@ def speedtest(no_store: bool, source: str | None):
             pt.add_column("Upload")
             pt.add_column("Ping")
             pt.add_column("Jitter")
+            pt.add_column("POP")
+            pt.add_column("Cache")
             pt.add_column("Server")
             for r in providers:
                 if r.error:
                     pt.add_row(
                         r.provider, f"[red]{r.error}[/red]",
-                        "", "", "", "",
+                        "", "", "", "", "", "",
                     )
                 else:
                     dl = f"{r.download_bps / 1e6:.1f}" if r.download_bps else "—"
                     ul = f"{r.upload_bps / 1e6:.1f}" if r.upload_bps else "—"
                     pg = f"{r.ping_ms:.1f}" if r.ping_ms is not None else "—"
                     jt = f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "—"
+                    pop = r.pop_code or "—"
+                    cache_status = r.cache_status or "—"
                     pt.add_row(
                         r.provider, f"{dl} Mbps", f"{ul} Mbps",
                         f"{pg} ms", f"{jt} ms",
+                        pop, cache_status,
                         r.server_name or "—",
                     )
             console.print(pt)
@@ -2919,6 +3092,9 @@ def optimize_apply(
     from asusroutercontrol.optimizer import suggest_settings
     from asusroutercontrol.ssh import RouterSSH
 
+    if key is not None and value is not None and clear:
+        raise click.ClickException("Use either --value or --clear, not both.")
+
     cfg = load_config()
 
     async def _apply():
@@ -2928,8 +3104,6 @@ def optimize_apply(
             async with RouterSSH() as ssh:
                 has_single_target = key is not None and (value is not None or clear)
                 if has_single_target:
-                    if value is not None and clear:
-                        raise click.ClickException("Use either --value or --clear, not both.")
                     target_value = "" if clear else (value or "")
                     result = await apply_nvram_setting(
                         ssh, store, key, target_value, dry_run=dry_run,

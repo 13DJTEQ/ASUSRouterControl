@@ -184,7 +184,7 @@ asusrouter live-dhcp-auth --mac 80:B9:89:D9:FD:04 -s 120
 ---
 
 ### `asusrouter speedtest [--no-store] [-s PROVIDER]`
-Multi-source speed test (Ookla, Cloudflare, HTTP download). Displays per-provider breakdown and a composite result with confidence score and peak-hour flag.
+Multi-source speed test (Ookla, Cloudflare, and HTTP CDN probes). Built-in CDN targets are CacheFly, CloudFront, and Fastly (configurable via `.env` `CDN_TARGETS` / `CDN_TARGETS_JSON`). Displays per-provider breakdown and a composite result with confidence score and peak-hour flag.
 
 Results are saved to the database by default; use `--no-store` to skip.
 
@@ -192,6 +192,7 @@ Results are saved to the database by default; use `--no-store` to skip.
 asusrouter speedtest                    # All providers
 asusrouter speedtest -s ookla           # Ookla only
 asusrouter speedtest -s cloudflare --no-store
+asusrouter speedtest -s cloudfront
 ```
 
 ---

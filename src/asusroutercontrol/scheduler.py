@@ -465,14 +465,41 @@ class MonitorScheduler:
 
     async def _run_poll_cycle(self, backend) -> None:
         """Single poll cycle — extracted so it can be wrapped in wait_for."""
+        from asusroutercontrol.models import ClientLoad, ConnectionType
+
         await backend.connect()
         devices = await backend.get_connected_devices()
+        now = datetime.utcnow()
         for dev in devices:
             await self._store.upsert_device(dev, commit=False)
+            # Record a presence snapshot for wired clients in device_perf_history
+            # so they appear in the LAN Clients submenu.  WiFi per-client throughput
+            # is handled by the client_traffic_loop via wl sta_info byte-counter
+            # deltas; the router API only returns link speed (not throughput) for
+            # wired ports, so we store None rates (displayed as "idle").
+            if dev.is_online and dev.connection == ConnectionType.WIRED:
+                cl = ClientLoad(
+                    timestamp=now,
+                    mac=dev.mac,
+                    hostname=dev.hostname,
+                    band="wired",
+                    rssi=None,
+                    tx_rate_mbps=None,
+                    rx_rate_mbps=None,
+                    load_pct=0.0,
+                    health="🟢",
+                )
+                await self._store.insert_device_perf(cl, commit=False)
         traffic = await backend.get_traffic_stats()
         await self._store.insert_traffic(traffic, commit=False)
         await self._store.commit()
-        log.info("Poll: %d devices, RX=%.0f bps", len(devices), traffic.rx_rate_bps or 0)
+        wired_count = sum(
+            1 for d in devices if d.is_online and d.connection == ConnectionType.WIRED
+        )
+        log.info(
+            "Poll: %d devices (%d wired), RX=%.0f bps",
+            len(devices), wired_count, traffic.rx_rate_bps or 0,
+        )
 
     # --- Daily Data Pruning ---
 

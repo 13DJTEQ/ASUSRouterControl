@@ -98,9 +98,15 @@ class MerlinBackend(FirmwareBackend):
                 conn_type = self._parse_connection_obj(conn_obj)
                 ip_addr = getattr(conn_obj, "ip_address", None)
                 rssi = getattr(conn_obj, "rssi", None)
-                tx_rate = getattr(conn_obj, "tx_rate", None)
-                rx_rate = getattr(conn_obj, "rx_rate", None)
-                is_online = "CONNECTED" in str(state) if state else True
+                tx_rate = (
+                    getattr(conn_obj, "tx_rate", None)
+                    or getattr(conn_obj, "tx_speed", None)
+                )
+                rx_rate = (
+                    getattr(conn_obj, "rx_rate", None)
+                    or getattr(conn_obj, "rx_speed", None)
+                )
+                is_online = self._parse_online_state(state, conn_obj)
 
                 devices.append(
                     Device(
@@ -345,18 +351,48 @@ class MerlinBackend(FirmwareBackend):
         return True
 
     @staticmethod
+    def _parse_online_state(state, conn_obj) -> bool:
+        state_name = getattr(state, "name", None)
+        if state_name:
+            state_upper = str(state_name).upper()
+            if "DISCONNECTED" in state_upper:
+                return False
+            if "CONNECTED" in state_upper:
+                return True
+        state_str = str(state).upper() if state is not None else ""
+        if "DISCONNECTED" in state_str:
+            return False
+        if "CONNECTED" in state_str:
+            return True
+        online = getattr(conn_obj, "online", None)
+        if online is not None:
+            return bool(online)
+        if state is None:
+            return True
+        return bool(state)
+
+    @staticmethod
     def _parse_connection_obj(conn_obj) -> ConnectionType:
         if conn_obj is None:
             return ConnectionType.UNKNOWN
-        conn_type = getattr(conn_obj, "type", None)
+        conn_type = (
+            getattr(conn_obj, "connection_type", None)
+            or getattr(conn_obj, "type", None)
+        )
         type_str = getattr(conn_type, "name", str(conn_type)).upper() if conn_type else ""
-        if "WIRED" in type_str:
+        if not type_str:
+            type_str = str(conn_obj).upper()
+        if "DISCONNECTED" in type_str:
+            return ConnectionType.UNKNOWN
+        if "WIRED" in type_str or "ETHERNET" in type_str:
             return ConnectionType.WIRED
-        if "5G" in type_str:
-            return ConnectionType.WIFI_5G
         if "6G" in type_str:
             return ConnectionType.WIFI_6G
-        if "2G" in type_str or "WLAN" in type_str:
+        if "5G" in type_str:
+            return ConnectionType.WIFI_5G
+        if "2G" in type_str:
+            return ConnectionType.WIFI_2G
+        if "WLAN" in type_str:
             return ConnectionType.WIFI_2G
         cls_name = type(conn_obj).__name__
         if "Wlan" in cls_name:

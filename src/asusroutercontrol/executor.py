@@ -217,7 +217,7 @@ async def verify_deep_dive_findings(ssh: RouterSSH) -> list[dict]:
     checks = [
         {
             "id": 1, "title": "aaews killed",
-            "cmd": "ps w | grep -v grep | grep -c aaews || echo 0",
+            "cmd": "ps w | grep -v grep | grep aaews | wc -l",
             "want": "0", "compare": "eq",
         },
         {
@@ -237,7 +237,7 @@ async def verify_deep_dive_findings(ssh: RouterSSH) -> list[dict]:
         },
         {
             "id": 6, "title": "AiMesh disabled",
-            "cmd": "ps w | grep -v grep | grep -c mastiff || echo 0",
+            "cmd": "ps w | grep -v grep | grep mastiff | wc -l",
             "want": "0", "compare": "eq",
         },
         {

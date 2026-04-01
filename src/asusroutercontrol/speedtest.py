@@ -1,6 +1,6 @@
 """Multi-source speed test runner.
 
-Orchestrates multiple providers (Ookla, Cloudflare, HTTP Download),
+Orchestrates multiple providers (Ookla, Cloudflare, configurable CDN HTTP),
 produces a cross-validated composite result with confidence scoring.
 """
 
@@ -17,16 +17,17 @@ from asusroutercontrol.config import load_config
 from asusroutercontrol.models import SpeedTestResult
 from asusroutercontrol.speedtest_providers import (
     CloudflareProvider,
-    HTTPDownloadProvider,
     OoklaProvider,
     ProviderResult,
     SpeedTestProvider,
+    build_cdn_http_providers,
 )
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_COOLDOWN = 10  # seconds between providers
 _OUTLIER_THRESHOLD = 0.25  # 25% deviation from median = outlier
+_LEGACY_HTTP_ALIAS = "http_download"
 
 
 def _is_peak_hour(cfg) -> bool:
@@ -35,6 +36,37 @@ def _is_peak_hour(cfg) -> bool:
     if cfg.peak_start <= cfg.peak_end:
         return cfg.peak_start <= hour < cfg.peak_end
     return hour >= cfg.peak_start or hour < cfg.peak_end
+
+
+def _build_default_providers() -> list[SpeedTestProvider]:
+    cfg = load_config()
+    providers: list[SpeedTestProvider] = [
+        OoklaProvider(),
+        CloudflareProvider(),
+        *build_cdn_http_providers(cfg.cdn_targets),
+    ]
+    # Preserve order while deduplicating by provider name.
+    seen: set[str] = set()
+    out: list[SpeedTestProvider] = []
+    for provider in providers:
+        if provider.name in seen:
+            continue
+        seen.add(provider.name)
+        out.append(provider)
+    return out
+
+
+def _build_source_aliases(providers: list[SpeedTestProvider]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    names = [p.name for p in providers]
+    if "cachefly" in names:
+        aliases[_LEGACY_HTTP_ALIAS] = "cachefly"
+        return aliases
+    for name in names:
+        if name not in {"ookla", "cloudflare"}:
+            aliases[_LEGACY_HTTP_ALIAS] = name
+            break
+    return aliases
 
 
 # ---------------------------------------------------------------------------
@@ -50,12 +82,17 @@ class MultiSourceSpeedTest:
         providers: list[SpeedTestProvider] | None = None,
         cooldown: float = _DEFAULT_COOLDOWN,
     ) -> None:
-        self._providers = providers or [
-            OoklaProvider(),
-            CloudflareProvider(),
-            HTTPDownloadProvider(),
-        ]
+        self._providers = providers or _build_default_providers()
+        self._source_aliases = _build_source_aliases(self._providers)
         self._cooldown = cooldown
+
+    @property
+    def provider_names(self) -> list[str]:
+        return [p.name for p in self._providers]
+
+    @property
+    def source_aliases(self) -> dict[str, str]:
+        return dict(self._source_aliases)
 
     async def run(
         self, *, source_filter: str | None = None
@@ -68,15 +105,17 @@ class MultiSourceSpeedTest:
 
         providers = self._providers
         if source_filter:
-            providers = [
-                p for p in providers if p.name == source_filter
-            ]
+            requested = source_filter.strip().lower()
+            resolved = self._source_aliases.get(requested, requested)
+            providers = [p for p in providers if p.name == resolved]
             if not providers:
+                known = sorted(set(self.provider_names) | set(self._source_aliases.keys()))
+                known_str = ", ".join(known)
                 return (
                     SpeedTestResult(
                         timestamp=now,
                         is_peak=is_peak,
-                        error=f"unknown provider: {source_filter}",
+                        error=f"unknown provider: {source_filter} (available: {known_str})",
                     ),
                     [],
                 )
@@ -86,10 +125,12 @@ class MultiSourceSpeedTest:
         for i, provider in enumerate(providers):
             if not await provider.is_available():
                 log.warning("%s not available, skipping", provider.name)
-                results.append(ProviderResult(
-                    provider=provider.name,
-                    error="not available",
-                ))
+                results.append(
+                    ProviderResult(
+                        provider=provider.name,
+                        error="not available",
+                    )
+                )
                 continue
 
             log.info("Running %s speed test...", provider.name)
@@ -103,7 +144,9 @@ class MultiSourceSpeedTest:
                 ul = (result.upload_bps or 0) / 1_000_000
                 log.info(
                     "%s: %.1f/%.1f Mbps, ping=%s ms",
-                    provider.name, dl, ul,
+                    provider.name,
+                    dl,
+                    ul,
                     f"{result.ping_ms:.1f}" if result.ping_ms else "N/A",
                 )
 
@@ -127,9 +170,7 @@ class MultiSourceSpeedTest:
         """Merge provider results into one composite SpeedTestResult."""
         ok = [r for r in results if not r.error]
         if not ok:
-            errors = "; ".join(
-                f"{r.provider}: {r.error}" for r in results if r.error
-            )
+            errors = "; ".join(f"{r.provider}: {r.error}" for r in results if r.error)
             return SpeedTestResult(
                 timestamp=now,
                 is_peak=is_peak,
@@ -150,12 +191,8 @@ class MultiSourceSpeedTest:
         ping_vals = [r.ping_ms for r in ok if r.ping_ms is not None]
         ping = min(ping_vals) if ping_vals else None
 
-        # Jitter from Cloudflare (only provider that measures it)
-        jitter = None
-        for r in ok:
-            if r.provider == "cloudflare" and r.jitter_ms is not None:
-                jitter = r.jitter_ms
-                break
+        jitter_vals = [r.jitter_ms for r in ok if r.jitter_ms is not None]
+        jitter = median(jitter_vals) if jitter_vals else None
 
         # Server name: use the first successful provider's server
         server = None
@@ -166,7 +203,7 @@ class MultiSourceSpeedTest:
 
         # Confidence + outliers
         outliers = self._detect_outliers(dl_vals, results)
-        confidence = self._compute_confidence(dl_vals, ok)
+        confidence = self._compute_confidence(dl_vals)
 
         # Build provider details JSON
         provider_details = {"providers": {}, "composite_method": "median"}
@@ -184,10 +221,17 @@ class MultiSourceSpeedTest:
                 entry["error"] = r.error
             if r.server_name:
                 entry["server"] = r.server_name
+            if r.cdn_target:
+                entry["cdn"] = r.cdn_target
+            if r.pop_code:
+                entry["pop"] = r.pop_code
+            if r.cache_status:
+                entry["cache_status"] = r.cache_status
             provider_details["providers"][r.provider] = entry
 
         provider_details["confidence"] = confidence
         provider_details["outliers"] = outliers
+        provider_details["download_samples"] = len(dl_vals)
 
         composite = SpeedTestResult(
             timestamp=now,
@@ -203,8 +247,7 @@ class MultiSourceSpeedTest:
         )
 
         log.info(
-            "Composite: %.1f/%.1f Mbps, ping=%s ms, "
-            "jitter=%s ms, confidence=%d, outliers=%s",
+            "Composite: %.1f/%.1f Mbps, ping=%s ms, jitter=%s ms, confidence=%d, outliers=%s",
             (dl or 0) / 1_000_000,
             (ul or 0) / 1_000_000,
             f"{ping:.1f}" if ping else "N/A",
@@ -230,15 +273,13 @@ class MultiSourceSpeedTest:
                 outliers.append(f"{r.provider} ({pct:+.0f}%)")
         return outliers
 
-    def _compute_confidence(
-        self, dl_vals: list[float], ok_results: list[ProviderResult]
-    ) -> int:
+    def _compute_confidence(self, dl_vals: list[float]) -> int:
         """Score 0-100 based on provider count and agreement."""
         if not dl_vals:
             return 0
         score = 0
-        # More providers = more confidence (up to 40 pts)
-        score += min(40, len(ok_results) * 15)
+        # More comparable download providers = more confidence (up to 40 pts)
+        score += min(40, len(dl_vals) * 15)
         # Agreement: lower spread = higher confidence (up to 60 pts)
         if len(dl_vals) >= 2:
             med = median(dl_vals)
@@ -262,13 +303,11 @@ class MultiSourceSpeedTest:
 # ---------------------------------------------------------------------------
 
 
-async def run_speed_test(
-    *, source: str | None = None
-) -> SpeedTestResult:
+async def run_speed_test(*, source: str | None = None) -> SpeedTestResult:
     """Run a multi-source speed test and return the composite result.
 
-    Pass ``source='ookla'`` (or 'cloudflare' / 'http_download') to
-    run only a single provider.
+    Pass ``source='ookla'`` (or 'cloudflare' / 'cachefly' / 'cloudfront'
+    / 'fastly' / 'http_download') to run only a single provider.
     """
     multi = MultiSourceSpeedTest()
     composite, _individual = await multi.run(source_filter=source)
@@ -281,3 +320,11 @@ async def run_speed_test_detailed(
     """Like run_speed_test but also returns per-provider results."""
     multi = MultiSourceSpeedTest()
     return await multi.run(source_filter=source)
+
+
+def available_speedtest_sources() -> list[str]:
+    """Return provider names plus source aliases accepted by the speedtest command."""
+    multi = MultiSourceSpeedTest()
+    names = set(multi.provider_names)
+    names.update(multi.source_aliases.keys())
+    return sorted(names)

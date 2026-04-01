@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 _DEFAULT_SPEEDTEST_TIMES = tuple(range(24))
+_DEFAULT_CDN_TARGETS = ("cachefly", "cloudfront", "fastly")
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class Config:
 
     # Scheduler settings
     speedtest_times: tuple[int, ...] = _DEFAULT_SPEEDTEST_TIMES  # local-hour triggers
+    cdn_targets: tuple[str, ...] = _DEFAULT_CDN_TARGETS  # download CDN comparators
     peak_start: int = 18  # 6 PM
     peak_end: int = 23    # 11 PM
     probe_interval: int = 1800   # 30 min
@@ -48,6 +50,14 @@ def _parse_int_tuple(val: str, default: tuple[int, ...]) -> tuple[int, ...]:
         return tuple(int(x.strip()) for x in val.split(","))
     except ValueError:
         return default
+
+
+def _parse_str_tuple(val: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Parse comma-separated strings from env var."""
+    if not val:
+        return default
+    items = tuple(x.strip().lower() for x in val.split(",") if x.strip())
+    return items or default
 
 
 def load_config() -> Config:
@@ -76,6 +86,10 @@ def load_config() -> Config:
         speedtest_times=_parse_int_tuple(
             os.environ.get("SPEEDTEST_TIMES", ""),
             _DEFAULT_SPEEDTEST_TIMES,
+        ),
+        cdn_targets=_parse_str_tuple(
+            os.environ.get("CDN_TARGETS", ""),
+            _DEFAULT_CDN_TARGETS,
         ),
         peak_start=int(os.environ.get("PEAK_START", "18")),
         peak_end=int(os.environ.get("PEAK_END", "23")),

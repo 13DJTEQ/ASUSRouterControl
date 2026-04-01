@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 
 import objc
@@ -145,6 +146,16 @@ def _band_bucket(band: str | None) -> str:
     return "other"
 
 
+def _launchd_service_loaded(label: str) -> bool:
+    """Return True if a launchd service is currently registered."""
+    result = subprocess.run(
+        ["launchctl", "list", label],
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def _add_section_header(menu, title: str):
     """Add a bold/underline section header menu item."""
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
@@ -199,6 +210,7 @@ class AppDelegate(NSObject):
         self._sched_store = None
         self._sched_thread = None
         self._sched_loop = None
+        self._runtime_started = False
         self._last_speedtest_id = None
         self._last_device_count = None
         self._last_saturation_notify = None
@@ -283,20 +295,16 @@ class AppDelegate(NSObject):
             self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
         else:
             self.statusitem.button().setTitle_("📡 —")
-        self._start_scheduler()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            REFRESH_INTERVAL, self, "refreshData:", None, True
-        )
-        threading.Thread(
-            target=self._do_refresh, name="initial-refresh", daemon=True
-        ).start()
+            self._mi_sched_status.setTitle_("Scheduler: ● Running")
+        self._ensure_runtime_started()
         log.info("AsusRouterMonitor ready")
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router backend unreachable — show offline status and retry in 60s."""
-        self.statusitem.button().setTitle_("📡 ⚠️ Offline")
-        self._mi_sched_status.setTitle_("Scheduler: ○ Offline (retrying in 60s)")
+        """Router backend unreachable — run in degraded mode and retry health check."""
+        self.statusitem.button().setTitle_("📡 ⚠️")
+        self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
+        self._ensure_runtime_started()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             60.0, self, "retryHealthCheck:", None, False
         )
@@ -426,6 +434,17 @@ class AppDelegate(NSObject):
     # ------------------------------------------------------------------
     # Scheduler
     # ------------------------------------------------------------------
+    def _ensure_runtime_started(self):
+        if self._runtime_started:
+            return
+        self._runtime_started = True
+        self._start_scheduler()
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            REFRESH_INTERVAL, self, "refreshData:", None, True
+        )
+        threading.Thread(
+            target=self._do_refresh, name="initial-refresh", daemon=True
+        ).start()
 
     def _start_scheduler(self):
         def _run():
@@ -537,7 +556,7 @@ class AppDelegate(NSObject):
             speed_rows = await store.get_speed_tests(days=1)
             result["speed"] = speed_rows[0] if speed_rows else None
             result["speed_id"] = speed_rows[0].get("id") if speed_rows else None
-            one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+            one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
             result["speed_tests_last_hour"] = 0
             for row in speed_rows:
                 if not row.get("download_bps"):
@@ -546,7 +565,10 @@ class AppDelegate(NSObject):
                 if not ts:
                     continue
                 try:
-                    if datetime.fromisoformat(ts) >= one_hour_ago:
+                    dt = datetime.fromisoformat(ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt >= one_hour_ago:
                         result["speed_tests_last_hour"] += 1
                 except ValueError:
                     continue
@@ -1034,27 +1056,73 @@ class AppDelegate(NSObject):
 
         plist = Path.home() / "Library" / "LaunchAgents" / "com.asusroutermonitor.plist"
         if plist.exists():
-            subprocess.run(["launchctl", "unload", str(plist)], check=False)
-            log.info("Unloaded launchd agent — will not restart")
+            uid = str(os.getuid())
+            if _launchd_service_loaded("com.asusroutermonitor"):
+                subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], check=False)
+                log.info("Unloaded launchd agent — will not restart")
+            else:
+                log.info("launchd agent not loaded — nothing to unload")
         NSApplication.sharedApplication().terminate_(sender)
 
     @objc.typedSelector(b"v@:@")
     def quitApp_(self, sender):
         """Stop scheduler and terminate — launchd KeepAlive will restart."""
-        log.info("quitApp_ invoked — restarting")
+        log.info("quitApp_ invoked — restarting via KeepAlive")
         self._stop_scheduler()
         from pathlib import Path
 
         plist = Path.home() / "Library" / "LaunchAgents" / "com.asusroutermonitor.plist"
-        if plist.exists():
-            # Ensure agent is loaded so KeepAlive can respawn after terminate
-            subprocess.run(["launchctl", "load", "-w", str(plist)], check=False)
-            log.info("Ensured launchd agent is loaded — KeepAlive will restart")
+        if not plist.exists():
+            log.warning("No plist found — app will not restart")
+            _notify(
+                "⚠️ Restart Failed",
+                "No launchd plist installed.",
+                "Run: asusrouter menubar install",
+            )
+        elif not _launchd_service_loaded("com.asusroutermonitor"):
+            # Running outside launchd (e.g. make run-menubar) — no KeepAlive.
+            log.warning("Not managed by launchd — app will not restart")
+            _notify(
+                "⚠️ Restart Failed",
+                "Not running under launchd.",
+                "Run: asusrouter menubar install",
+            )
+        else:
+            log.info("Terminating — launchd KeepAlive will respawn")
+        # Simply terminate; launchd sees the exit and respawns via KeepAlive.
+        # Do NOT bootout — that deregisters the service and kills this process
+        # before bootstrap can run, preventing respawn entirely.
         NSApplication.sharedApplication().terminate_(sender)
 
 
 def main() -> None:
     """Entry point for the menubar app."""
+    import sys
+
+    # Pre-flight: verify critical native dependencies are importable.
+    # If the venv is broken (e.g. UF_HIDDEN .pth, missing pyobjc),
+    # exit with EX_CONFIG (78) so the error is diagnosable and
+    # ThrottleInterval prevents a rapid crash-loop from permanently
+    # killing the launchd service.
+    try:
+        import objc as _objc_check  # noqa: F401
+        from AppKit import NSApplication as _ns_check  # noqa: F401
+        from PyObjCTools import AppHelper as _ah_check  # noqa: F401
+    except ImportError as exc:
+        msg = f"FATAL: missing native dependency — {exc}"
+        print(msg, file=sys.stderr, flush=True)
+        # Also try to write to the log file for post-mortem diagnostics
+        try:
+            from asusroutercontrol.config import load_config as _lc
+            _cfg = _lc()
+            _cfg.ensure_dirs()
+            with open(_cfg.data_dir / "scheduler.log", "a") as f:
+                from datetime import datetime as _dt
+                f.write(f"{_dt.now().isoformat()} CRITICAL menubar: {msg}\n")
+        except Exception:
+            pass
+        sys.exit(78)  # EX_CONFIG
+
     cfg = load_config()
     cfg.ensure_dirs()
     log_path = cfg.data_dir / "scheduler.log"

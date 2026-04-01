@@ -371,7 +371,11 @@ class RouterSSH:
         return cmd_result
 
     async def read_file(self, path: str) -> str | None:
-        """Read a remote file, return None if not found."""
+        """Read a remote file, return None if not found.
+
+        Tries SFTP first, falls back to ``cat`` over shell when the
+        router's SSH server (e.g. dropbear) lacks SFTP support.
+        """
         if not self._conn:
             raise RuntimeError("Not connected. Call connect() first.")
         safe_path = str(PurePosixPath(path))
@@ -381,9 +385,19 @@ class RouterSSH:
                     return await f.read()
         except asyncssh.SFTPNoSuchFile:
             return None
+        except (asyncssh.SFTPConnectionLost, asyncssh.SFTPError, OSError):
+            log.debug("SFTP unavailable for read_file, falling back to cat")
+            r = await self.run(f"cat {safe_path} 2>/dev/null")
+            if r.ok:
+                return r.stdout
+            return None
 
     async def write_file(self, path: str, content: str) -> bool:
-        """Write content to a remote file."""
+        """Write content to a remote file.
+
+        Tries SFTP first, falls back to a shell printf+redirect when
+        SFTP is unavailable.
+        """
         if not self._conn:
             raise RuntimeError("Not connected. Call connect() first.")
         safe_path = str(PurePosixPath(path))
@@ -392,6 +406,17 @@ class RouterSSH:
                 async with sftp.open(safe_path, "w") as f:
                     await f.write(content)
             return True
+        except (asyncssh.SFTPConnectionLost, asyncssh.SFTPError, OSError):
+            log.debug("SFTP unavailable for write_file, falling back to shell")
+            # Escape content for safe shell transport via printf
+            escaped = content.replace("\\", "\\\\").replace("'", "'\\''")
+            r = await self.run(
+                f"printf '%s' '{escaped}' > {safe_path}",
+                timeout=15.0,
+            )
+            if not r.ok:
+                log.error("Shell write_file failed: %s", r.stderr)
+            return r.ok
         except Exception:
             log.exception("Failed to write remote file: %s", safe_path)
             return False
@@ -406,6 +431,10 @@ class RouterSSH:
                 return True
         except asyncssh.SFTPNoSuchFile:
             return False
+        except (asyncssh.SFTPConnectionLost, asyncssh.SFTPError, OSError):
+            log.debug("SFTP unavailable for file_exists, falling back to test")
+            r = await self.run(f"test -f {safe_path}")
+            return r.ok
         except Exception:
             log.exception("Failed to stat remote file: %s", safe_path)
             return False
