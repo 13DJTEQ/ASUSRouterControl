@@ -115,6 +115,8 @@ class MonitorScheduler:
             asyncio.create_task(self._prune_loop(), name="prune"),
             asyncio.create_task(self._config_snapshot_loop(), name="config"),
             asyncio.create_task(self._recommendation_loop(), name="recommend"),
+            asyncio.create_task(self._lan_probe_loop(), name="lan-probe"),
+            asyncio.create_task(self._switch_probe_loop(), name="switch-probe"),
         ]
         try:
             await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -414,7 +416,7 @@ class MonitorScheduler:
     # --- Device + Traffic Poll Loop ---
 
     async def _poll_loop(self) -> None:
-        from asusroutercontrol.backends.merlin import MerlinBackend
+        from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
 
         try:
@@ -424,13 +426,7 @@ class MonitorScheduler:
                 log.error("No router credentials — poll loop disabled")
                 return
 
-            backend = MerlinBackend(
-                hostname=cfg.router_host,
-                username=username,
-                password=password,
-                use_ssl=cfg.use_ssl,
-                port=cfg.router_port,
-            )
+            backend = create_backend(cfg, username=username, password=password)
 
             while self._running:
                 cycle_start = perf_counter()
@@ -470,35 +466,54 @@ class MonitorScheduler:
         await backend.connect()
         devices = await backend.get_connected_devices()
         now = datetime.utcnow()
+        wired_count = wifi_count = unknown_count = 0
         for dev in devices:
             await self._store.upsert_device(dev, commit=False)
-            # Record a presence snapshot for wired clients in device_perf_history
-            # so they appear in the LAN Clients submenu.  WiFi per-client throughput
-            # is handled by the client_traffic_loop via wl sta_info byte-counter
-            # deltas; the router API only returns link speed (not throughput) for
-            # wired ports, so we store None rates (displayed as "idle").
-            if dev.is_online and dev.connection == ConnectionType.WIRED:
-                cl = ClientLoad(
-                    timestamp=now,
-                    mac=dev.mac,
-                    hostname=dev.hostname,
-                    band="wired",
-                    rssi=None,
-                    tx_rate_mbps=None,
-                    rx_rate_mbps=None,
-                    load_pct=0.0,
-                    health="🟢",
-                )
-                await self._store.insert_device_perf(cl, commit=False)
+            if not dev.is_online:
+                continue
+            # Write a presence row for every online device so all client submenus
+            # populate even when SSH telemetry is unavailable.  tx/rx rates are
+            # stored as None (presence-only); the SSH client_traffic_loop enriches
+            # these with actual throughput deltas and wins via _row_rank ordering.
+            if dev.connection == ConnectionType.WIRED:
+                band = "wired"
+                wired_count += 1
+            elif dev.connection in (
+                ConnectionType.WIFI_2G,
+                ConnectionType.WIFI_5G,
+                ConnectionType.WIFI_6G,
+            ):
+                band = dev.connection.value  # "2.4GHz", "5GHz", "6GHz"
+                wifi_count += 1
+            else:
+                # UNKNOWN connection type — use stored band hint if available
+                band = dev.band or ""
+                unknown_count += 1
+                if not band or band.lower() in ("unknown", "none", "null"):
+                    log.debug(
+                        "Skipping presence row: unknown band for %s (%s)",
+                        dev.hostname or dev.mac, dev.mac,
+                    )
+                    continue
+            cl = ClientLoad(
+                timestamp=now,
+                mac=dev.mac,
+                hostname=dev.hostname,
+                band=band,
+                rssi=dev.rssi,      # API RSSI elevates row rank; SSH enriches further
+                tx_rate_mbps=None,  # API link-speed != throughput; SSH loop fills this
+                rx_rate_mbps=None,
+                load_pct=0.0,
+                health="\U0001f7e2",
+            )
+            await self._store.insert_device_perf(cl, commit=False)
         traffic = await backend.get_traffic_stats()
         await self._store.insert_traffic(traffic, commit=False)
         await self._store.commit()
-        wired_count = sum(
-            1 for d in devices if d.is_online and d.connection == ConnectionType.WIRED
-        )
         log.info(
-            "Poll: %d devices (%d wired), RX=%.0f bps",
-            len(devices), wired_count, traffic.rx_rate_bps or 0,
+            "Poll: %d devices (%d wired, %d wifi, %d unknown-band), RX=%.0f bps",
+            len(devices), wired_count, wifi_count, unknown_count,
+            traffic.rx_rate_bps or 0,
         )
 
     # --- Daily Data Pruning ---
@@ -576,6 +591,156 @@ class MonitorScheduler:
             else:
                 log.info("Config snapshot stored (no changes)")
 
+    # --- LAN Probe Loop ---
+
+    LAN_PROBE_CYCLE_TIMEOUT = 120.0
+    SWITCH_PROBE_CYCLE_TIMEOUT = 60.0
+    AUTO_DISABLE_THRESHOLD_S = 60.0
+    AUTO_DISABLE_CONSECUTIVE = 3
+
+    async def _lan_probe_loop(self) -> None:
+        """Ping RFC1918 LAN hosts and track bridge throughput."""
+        from asusroutercontrol.probes_lan import (
+            probe_bridge_throughput,
+            probe_lan_clients,
+        )
+
+        overrun_count = 0
+        try:
+            while self._running:
+                if not self._cfg.lan_probes_enabled:
+                    log.debug("LAN probes disabled, sleeping 60s")
+                    await asyncio.sleep(60)
+                    continue
+
+                cycle_start = perf_counter()
+                try:
+                    async with RouterSSH() as ssh:
+                        # LAN client latency probes
+                        probes = await asyncio.wait_for(
+                            probe_lan_clients(
+                                ssh,
+                                ping_count=self._cfg.lan_probe_ping_count,
+                                concurrency=self._cfg.lan_probe_concurrency,
+                            ),
+                            timeout=self.LAN_PROBE_CYCLE_TIMEOUT,
+                        )
+                        for p in probes:
+                            await self._store.insert_lan_client_probe(
+                                p, commit=False
+                            )
+
+                        # Bridge throughput
+                        bridge = await probe_bridge_throughput(ssh)
+                        if bridge:
+                            prev = await self._store.get_latest_bridge_throughput()
+                            if prev and prev.get("rx_bytes") is not None:
+                                dt = (
+                                    bridge.timestamp
+                                    - datetime.fromisoformat(prev["timestamp"])
+                                ).total_seconds()
+                                if dt > 0:
+                                    drx = bridge.rx_bytes - prev["rx_bytes"]
+                                    dtx = bridge.tx_bytes - prev["tx_bytes"]
+                                    if drx >= 0 and dtx >= 0:
+                                        bridge.rx_rate_bps = (drx * 8) / dt
+                                        bridge.tx_rate_bps = (dtx * 8) / dt
+                            await self._store.insert_bridge_throughput(
+                                bridge, commit=False
+                            )
+
+                    await self._store.commit()
+                    elapsed = perf_counter() - cycle_start
+                    self._record_perf_sample("lan_probe.cycle", elapsed)
+                    self._record_success("lan_probe")
+                    log.info(
+                        "LAN probe cycle: %d clients in %.1fs",
+                        len(probes), elapsed,
+                    )
+
+                    # Auto-disable check
+                    if elapsed > self.AUTO_DISABLE_THRESHOLD_S:
+                        overrun_count += 1
+                        if overrun_count >= self.AUTO_DISABLE_CONSECUTIVE:
+                            log.warning(
+                                "LAN probes auto-disabled: %d consecutive cycles "
+                                "> %.0fs",
+                                overrun_count,
+                                self.AUTO_DISABLE_THRESHOLD_S,
+                            )
+                            # Cannot mutate frozen dataclass; log and stop loop
+                            break
+                    else:
+                        overrun_count = 0
+
+                except asyncio.TimeoutError:
+                    log.error(
+                        "LAN probe cycle timed out after %.0fs",
+                        self.LAN_PROBE_CYCLE_TIMEOUT,
+                    )
+                    await self._store.rollback()
+                    backoff = self._record_failure("lan_probe")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+                except Exception:
+                    await self._store.rollback()
+                    log.exception("LAN probe task error")
+                    backoff = self._record_failure("lan_probe")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+
+                await asyncio.sleep(self._cfg.lan_probe_interval)
+        except asyncio.CancelledError:
+            log.info("LAN probe loop cancelled")
+
+    async def _switch_probe_loop(self) -> None:
+        """Read switch port error/drop counters."""
+        from asusroutercontrol.probes_lan import probe_switch_ports
+
+        try:
+            while self._running:
+                if not self._cfg.lan_probes_enabled:
+                    await asyncio.sleep(60)
+                    continue
+
+                cycle_start = perf_counter()
+                try:
+                    async with RouterSSH() as ssh:
+                        stats = await asyncio.wait_for(
+                            probe_switch_ports(ssh),
+                            timeout=self.SWITCH_PROBE_CYCLE_TIMEOUT,
+                        )
+                        for s in stats:
+                            await self._store.insert_switch_port_stats(
+                                s, commit=False
+                            )
+                    await self._store.commit()
+                    self._record_perf_sample(
+                        "switch_probe.cycle", perf_counter() - cycle_start
+                    )
+                    self._record_success("switch_probe")
+                    log.info("Switch probe: %d ports", len(stats))
+
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Switch probe timed out after %.0fs",
+                        self.SWITCH_PROBE_CYCLE_TIMEOUT,
+                    )
+                    await self._store.rollback()
+                    backoff = self._record_failure("switch_probe")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+                except Exception:
+                    await self._store.rollback()
+                    log.exception("Switch probe task error")
+                    backoff = self._record_failure("switch_probe")
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+
+                await asyncio.sleep(self._cfg.switch_probe_interval)
+        except asyncio.CancelledError:
+            log.info("Switch probe loop cancelled")
+
     # --- Recommendation Loop ---
 
     RECOMMENDATION_INTERVAL = 12 * 3600  # every 12 hours
@@ -619,7 +784,7 @@ class MonitorScheduler:
             if last and (now - last).total_seconds() < self.RECOMMENDATION_COOLDOWN:
                 continue  # already notified recently
             notified += 1
-            emoji = "🔴" if rec["priority"] == "high" else "🟡"
+            emoji = "\U0001f534" if rec["priority"] == "high" else "\U0001f7e1"
             from asusroutercontrol.notifications import notify
 
             notify(
