@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
 
 import asyncssh
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.backends.base import (
     BackendOperationUnsupported,
     FirmwareBackend,
@@ -81,7 +81,7 @@ class FreshTomatoBackend(FirmwareBackend):
         output = await self._run("cat /proc/net/dev")
         rx, tx = self._parse_net_dev(output)
         return TrafficSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             rx_bytes=rx,
             tx_bytes=tx,
         )
@@ -211,7 +211,7 @@ class FreshTomatoBackend(FirmwareBackend):
                     connection=ConnectionType.WIRED,
                     band=iface,
                     is_online=True,
-                    last_seen=datetime.utcnow(),
+                    last_seen=utcnow(),
                 )
             )
         return devices

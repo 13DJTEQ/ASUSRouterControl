@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.config import Config
 from asusroutercontrol.models import SpeedTestResult
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -19,7 +20,7 @@ class _Store:
         return self.sent.get(rec_key)
 
     async def set_notification_last_sent(self, rec_key: str, *, sent_at=None) -> None:
-        self.sent[rec_key] = sent_at or datetime.utcnow()
+        self.sent[rec_key] = sent_at or utcnow()
 
 
 class _SpeedtestStore:
@@ -158,7 +159,7 @@ async def test_speedtest_callback_fires_on_completion(
 
     store = _SpeedtestStore()
     # Use speedtest_times that match "now" so the loop fires immediately
-    hour_now = datetime.now().hour
+    hour_now = datetime.now(timezone.utc).astimezone().hour
     cfg = Config(speedtest_times=(hour_now,))
     scheduler = MonitorScheduler(
         store=store, cfg=cfg, on_speedtest_complete=_cb
@@ -201,7 +202,7 @@ async def test_speedtest_callback_not_set(
     )
 
     store = _SpeedtestStore()
-    hour_now = datetime.now().hour
+    hour_now = datetime.now(timezone.utc).astimezone().hour
     cfg = Config(speedtest_times=(hour_now,))
     scheduler = MonitorScheduler(store=store, cfg=cfg)  # no callback
     scheduler._running = True
@@ -242,7 +243,7 @@ async def test_scheduled_speedtest_uses_unfiltered_runner(
     )
 
     store = _SpeedtestStore()
-    cfg = Config(speedtest_times=(datetime.now().hour,))
+    cfg = Config(speedtest_times=(datetime.now(timezone.utc).astimezone().hour,))
     scheduler = MonitorScheduler(store=store, cfg=cfg)
     scheduler._running = True
 

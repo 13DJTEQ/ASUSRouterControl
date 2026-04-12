@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.config import load_config
 from asusroutercontrol.datastore import DataStore
 
@@ -45,7 +46,7 @@ def _fmt_ms(ms: float | None) -> str:
 async def generate_report(store: DataStore, *, days: int = 7) -> dict:
     """Generate a structured report dict from `days` of data."""
     cfg = load_config()
-    report: dict = {"period_days": days, "generated_at": datetime.utcnow().isoformat()}
+    report: dict = {"period_days": days, "generated_at": utcnow().isoformat()}
 
     # Fetch all data
     speed_tests = await store.get_speed_tests(days=days)

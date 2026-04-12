@@ -6,9 +6,10 @@ import asyncio
 import logging
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.config import Config, load_config
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import SpeedTestResult
@@ -28,7 +29,7 @@ log = logging.getLogger(__name__)
 
 def _next_speedtest_time(cfg: Config) -> datetime:
     """Calculate the next clock-aligned speed test time."""
-    now = datetime.now()
+    now = datetime.now(timezone.utc).astimezone()
     today_hours = sorted(cfg.speedtest_times)
 
     for hour in today_hours:
@@ -185,7 +186,7 @@ class MonitorScheduler:
         try:
             while self._running:
                 next_run = _next_speedtest_time(self._cfg)
-                wait_secs = (next_run - datetime.now()).total_seconds()
+                wait_secs = (next_run - datetime.now(timezone.utc).astimezone()).total_seconds()
                 log.info(
                     "Next speed test at %s (in %.0f min)",
                     next_run.strftime("%H:%M"), wait_secs / 60,
@@ -339,7 +340,7 @@ class MonitorScheduler:
             log.exception("Client traffic probe failed")
             return
 
-        now = datetime.utcnow()
+        now = utcnow()
         devices_start = perf_counter()
         devices = await self._store.get_all_devices()
         self._record_perf_sample(
@@ -465,7 +466,7 @@ class MonitorScheduler:
 
         await backend.connect()
         devices = await backend.get_connected_devices()
-        now = datetime.utcnow()
+        now = utcnow()
         wired_count = wifi_count = unknown_count = 0
         for dev in devices:
             await self._store.upsert_device(dev, commit=False)
@@ -522,7 +523,7 @@ class MonitorScheduler:
         """Run data retention pruning once per day."""
         try:
             while self._running:
-                now = datetime.now()
+                now = datetime.now(timezone.utc).astimezone()
                 next_prune = now.replace(hour=3, minute=0, second=0, microsecond=0)
                 if next_prune <= now:
                     next_prune += timedelta(days=1)
@@ -776,7 +777,7 @@ class MonitorScheduler:
             )
             return
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc).astimezone()
         notified = 0
         for rec in actionable:
             key = f"{rec['category']}:{rec['priority']}"

@@ -5,8 +5,8 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from asusroutercontrol.benchmark import run_datastore_benchmark
 from asusroutercontrol._cli import cli
+from asusroutercontrol.benchmark import run_datastore_benchmark
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import Device, LatencyProbe, SpeedTestResult, WiFiSnapshot
 
