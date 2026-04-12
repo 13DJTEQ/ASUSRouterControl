@@ -1,4 +1,4 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages bundle dmg
 
 VENV_PYTHON := .venv/bin/python
 SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
@@ -53,5 +53,21 @@ test:
 lint:
 	.venv/bin/python -m ruff check src/
 
+bundle:
+	rm -rf build dist
+	.venv/bin/pyinstaller AsusRouterMonitor.spec --noconfirm
+	@echo "\n✅  dist/AsusRouterMonitor.app is ready"
+
+dmg: bundle
+	rm -rf /tmp/dmg-stage dist/AsusRouterMonitor.dmg
+	mkdir -p /tmp/dmg-stage
+	cp -R dist/AsusRouterMonitor.app /tmp/dmg-stage/
+	ln -s /Applications /tmp/dmg-stage/Applications
+	hdiutil create -volname "AsusRouterMonitor" \
+		-srcfolder /tmp/dmg-stage -ov -format UDZO \
+		dist/AsusRouterMonitor.dmg
+	rm -rf /tmp/dmg-stage
+	@echo "\n✅  dist/AsusRouterMonitor.dmg is ready"
+
 clean:
-	rm -rf .venv
+	rm -rf .venv build dist
