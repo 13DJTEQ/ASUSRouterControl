@@ -23,7 +23,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
     "ruff>=0.3",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 menubar = [
     "pyobjc-core>=12.1",
@@ -37,14 +40,32 @@ asusroutermonitor = "asusroutercontrol.menubar:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+asusroutercontrol = ["*.toml"]  # ships dhcp_profiles.example.toml
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "B", "DTZ"]
+# B — flake8-bugbear: catches common Python footguns
+# DTZ — flake8-datetimez: enforces timezone-aware datetime; prevents datetime.utcnow() regression
+ignore = [
+    "B008",   # do-not-perform-function-call-in-default-argument (ok in Click commands)
+    "B904",   # raise-without-from-inside-except (too noisy in legacy exception paths)
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "--tb=short"
+
+[tool.coverage.run]
+source = ["src/asusroutercontrol"]
+omit = ["src/asusroutercontrol/menubar.py"]  # requires PyObjC / macOS
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 30  # floor today; raise incrementally as tests are added
