@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from asusroutercontrol.benchmark import run_datastore_benchmark
-from asusroutercontrol.cli import cli
+from asusroutercontrol._cli import cli
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import Device, LatencyProbe, SpeedTestResult, WiFiSnapshot
 
@@ -159,7 +159,7 @@ def test_optimize_benchmark_cli_json_output(monkeypatch: pytest.MonkeyPatch) -> 
             },
         }
 
-    monkeypatch.setattr("asusroutercontrol.cli.DataStore", _FakeDataStore)
+    monkeypatch.setattr("asusroutercontrol._cli.DataStore", _FakeDataStore)
     monkeypatch.setattr(
         "asusroutercontrol.benchmark.run_datastore_benchmark",
         _fake_run_datastore_benchmark,

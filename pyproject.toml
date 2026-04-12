@@ -34,7 +34,7 @@ menubar = [
 ]
 
 [project.scripts]
-asusrouter = "asusroutercontrol.cli:cli"
+asusrouter = "asusroutercontrol._cli:cli"
 asusroutermonitor = "asusroutercontrol.menubar:main"
 
 [tool.setuptools.packages.find]

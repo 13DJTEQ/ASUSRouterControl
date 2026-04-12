@@ -1,4 +1,11 @@
-"""CLI interface for ASUSRouterControl."""
+"""CLI interface for ASUSRouterControl.
+
+This module is being refactored. Command groups are being extracted to:
+- cli/dhcp.py - DHCP reservation management
+- cli/optimize.py - Router optimization commands
+- cli/incident.py - Incident triage (TODO)
+- cli/scripts.py, cli/entware.py, cli/menubar.py, cli/scheduler.py (TODO)
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,9 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+# Import extracted CLI submodules
+from asusroutercontrol.cli.dhcp import dhcp_group
+from asusroutercontrol.cli.optimize import optimize_group
 from asusroutercontrol.config import load_config
 from asusroutercontrol.credentials import (
     delete_legacy_credentials,
@@ -394,9 +404,21 @@ def cli():
     """ASUSRouterControl — manage your ASUS router."""
 
 
-@cli.group("dhcp")
-def dhcp_group():
-    """Manage DHCP reservations."""
+# Register extracted command groups
+cli.add_command(dhcp_group, name="dhcp")
+cli.add_command(optimize_group, name="optimize")
+
+
+# =============================================================================
+# LEGACY: The dhcp and optimize groups below are now in cli/dhcp.py and
+# cli/optimize.py. Keeping this code temporarily for reference during the
+# refactoring transition. These definitions are SHADOWED by the add_command
+# calls above and will NOT be used.
+# =============================================================================
+
+# @cli.group("dhcp")  # MOVED to cli/dhcp.py
+# def dhcp_group():
+#     """Manage DHCP reservations."""
 
 
 @dhcp_group.command("show")

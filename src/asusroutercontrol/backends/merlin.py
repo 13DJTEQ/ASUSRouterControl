@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 import socket
-from datetime import datetime
 from typing import Any
 
 import aiohttp
 from asusrouter import AsusData, AsusRouter
 from asusrouter.modules.port_forwarding import PortForwardingRule as AsusPortForwardingRule
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.backends.base import FirmwareBackend
 from asusroutercontrol.models import (
     ConnectionType,
@@ -74,7 +74,7 @@ class MerlinBackend(FirmwareBackend):
 
     async def get_connected_devices(self) -> list[Device]:
         router = self._ensure_connected()
-        now = datetime.utcnow()
+        now = utcnow()
         try:
             data = await router.async_get_data(AsusData.CLIENTS)
         except Exception:
@@ -139,7 +139,7 @@ class MerlinBackend(FirmwareBackend):
 
         wan_net = data.get("wan", {})
         return TrafficSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             rx_bytes=wan_net.get("rx", 0),
             tx_bytes=wan_net.get("tx", 0),
             rx_rate_bps=wan_net.get("rx_speed"),
