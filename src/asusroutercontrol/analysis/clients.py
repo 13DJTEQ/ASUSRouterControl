@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import ClientLoad, Device
@@ -27,12 +27,12 @@ RSSI_WEAK_DBM = -75
 def _health_dot(load_pct: float, rssi: int | None) -> str:
     """Color-coded health indicator."""
     if rssi is not None and rssi < RSSI_WEAK_DBM:
-        return "🔴"
+        return "\U0001f534"
     if load_pct >= LOAD_CRIT_PCT:
-        return "🔴"
+        return "\U0001f534"
     if load_pct >= LOAD_WARN_PCT:
-        return "🟡"
-    return "🟢"
+        return "\U0001f7e1"
+    return "\U0001f7e2"
 
 
 def compute_client_loads(devices: list[Device]) -> list[ClientLoad]:
@@ -125,6 +125,36 @@ async def get_client_load_summary(store: DataStore) -> list[dict]:
     for mac, row in best_fallback.items():
         if mac not in best_valid:
             combined.append(row)
+
+    # Last-resort fallback: if no perf rows exist (cold start, SSH gap, poll hasn't
+    # run yet) synthesize presence-only entries from the devices table so submenus
+    # are never blank.  These rows have has_signal=0 and load_pct=0.0 ("idle").
+    if not combined:
+        log.debug(
+            "No recent client perf rows — falling back to device presence table"
+        )
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(
+            tzinfo=None
+        ).isoformat()
+        devices = await store.get_all_devices()
+        for dev in devices:
+            last_seen = dev.get("last_seen") or ""
+            if last_seen < cutoff:
+                continue
+            band = dev.get("band") or dev.get("connection") or ""
+            if not band or band.lower() in ("unknown", "none", "null"):
+                continue
+            combined.append({
+                "mac": dev["mac"],
+                "hostname": dev.get("hostname"),
+                "band": band,
+                "tx_rate_mbps": None,
+                "rx_rate_mbps": None,
+                "rssi": None,
+                "load_pct": 0.0,
+                "has_signal": 0,
+                "timestamp": last_seen,
+            })
 
     # Sort by signal quality then load descending, cap at 15
     sorted_clients = sorted(combined, key=_row_rank, reverse=True)

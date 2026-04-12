@@ -379,24 +379,34 @@ class MerlinBackend(FirmwareBackend):
             getattr(conn_obj, "connection_type", None)
             or getattr(conn_obj, "type", None)
         )
-        type_str = getattr(conn_type, "name", str(conn_type)).upper() if conn_type else ""
-        if not type_str:
+        # Prefer enum .name (e.g. "WLAN_5G") over str() which may include module path
+        if conn_type is not None:
+            type_str = (getattr(conn_type, "name", None) or str(conn_type)).upper()
+        else:
             type_str = str(conn_obj).upper()
-        if "DISCONNECTED" in type_str:
+
+        if not type_str or "DISCONNECTED" in type_str:
             return ConnectionType.UNKNOWN
         if "WIRED" in type_str or "ETHERNET" in type_str:
             return ConnectionType.WIRED
-        if "6G" in type_str:
+        # 6GHz must be checked before 5G to avoid ambiguous partial matches
+        if "6G" in type_str or "WLAN6" in type_str or "WIFI6" in type_str:
             return ConnectionType.WIFI_6G
-        if "5G" in type_str:
+        # 5GHz: explicit tag or WLAN_5 / WLAN5 naming variants
+        if "5G" in type_str or "WLAN_5" in type_str or "WLAN5" in type_str:
             return ConnectionType.WIFI_5G
-        if "2G" in type_str:
+        # 2.4GHz: explicit tag or WLAN_2 / WLAN2 naming variants
+        if "2G" in type_str or "2.4" in type_str or "WLAN_2" in type_str or "WLAN2" in type_str:
             return ConnectionType.WIFI_2G
-        if "WLAN" in type_str:
-            return ConnectionType.WIFI_2G
+        # Generic wireless label without explicit band — inspect class name for hints
         cls_name = type(conn_obj).__name__
-        if "Wlan" in cls_name:
-            return ConnectionType.WIFI_2G
+        if "WLAN" in type_str or "WIFI" in type_str or "WIRELESS" in type_str or "Wlan" in cls_name:
+            cls_upper = cls_name.upper()
+            if "5" in cls_upper:
+                return ConnectionType.WIFI_5G
+            if "6" in cls_upper:
+                return ConnectionType.WIFI_6G
+            return ConnectionType.WIFI_2G  # default: 2.4GHz is the most common band
         return ConnectionType.UNKNOWN
 
     @staticmethod
