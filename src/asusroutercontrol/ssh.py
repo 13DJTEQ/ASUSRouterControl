@@ -120,6 +120,9 @@ class RouterSSH:
         )
         self._expected_fingerprint = _normalize_fingerprint(cfg.ssh_host_key_fingerprint)
         self._known_hosts_path = cfg.ssh_known_hosts_path or (cfg.data_dir / "known_hosts")
+        self._encryption_algs = cfg.ssh_encryption_algs
+        self._mac_algs = cfg.ssh_mac_algs
+        self._server_host_key_algs = cfg.ssh_server_host_key_algs
         self._conn: asyncssh.SSHClientConnection | None = None
 
     async def connect(self) -> None:
@@ -186,15 +189,23 @@ class RouterSSH:
     async def _probe_server_key(self) -> tuple[asyncssh.SSHClientConnection, HostKeyDetails]:
         import asyncio as _aio
 
+        connect_kwargs = {
+            "host": self._hostname,
+            "port": self._port,
+            "username": self._username,
+            "password": self._password,
+            "known_hosts": None,
+            "family": socket.AF_INET,
+        }
+        if self._encryption_algs:
+            connect_kwargs["encryption_algs"] = self._encryption_algs
+        if self._mac_algs:
+            connect_kwargs["mac_algs"] = self._mac_algs
+        if self._server_host_key_algs:
+            connect_kwargs["server_host_key_algs"] = self._server_host_key_algs
+
         conn = await _aio.wait_for(
-            asyncssh.connect(
-                self._hostname,
-                port=self._port,
-                username=self._username,
-                password=self._password,
-                known_hosts=None,
-                family=socket.AF_INET,
-            ),
+            asyncssh.connect(**connect_kwargs),
             timeout=self._connect_timeout,
         )
         host_key = conn.get_server_host_key()

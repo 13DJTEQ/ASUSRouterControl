@@ -24,6 +24,9 @@ class Config:
     ssh_trust_mode: str = "tofu_confirm"  # strict | tofu_confirm | tofu_auto
     ssh_host_key_fingerprint: str | None = None  # e.g. SHA256:...
     ssh_known_hosts_path: Path | None = None
+    ssh_encryption_algs: tuple[str, ...] | None = None  # Override default ciphers
+    ssh_mac_algs: tuple[str, ...] | None = None  # Override default MACs
+    ssh_server_host_key_algs: tuple[str, ...] | None = None  # Preferred host key algorithms
     soundshield_export_path: Path = field(
         default_factory=lambda: Path.home() / ".asusroutercontrol" / "soundshield_network.json"
     )
@@ -80,6 +83,18 @@ def load_config() -> Config:
             if os.environ.get("SSH_KNOWN_HOSTS_PATH")
             else None
         ),
+        ssh_encryption_algs=_parse_str_tuple(
+            os.environ.get("SSH_ENCRYPTION_ALGS", ""),
+            (),
+        ) or None,
+        ssh_mac_algs=_parse_str_tuple(
+            os.environ.get("SSH_MAC_ALGS", ""),
+            (),
+        ) or None,
+        ssh_server_host_key_algs=_parse_str_tuple(
+            os.environ.get("SSH_SERVER_HOST_KEY_ALGS", ""),
+            (),
+        ) or None,
         soundshield_export_path=Path(
             os.environ.get("SOUNDSHIELD_EXPORT_PATH", str(data_dir / "soundshield_network.json"))
         ).expanduser(),
