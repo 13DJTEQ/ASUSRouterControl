@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 # Import extracted CLI submodules
+from asusroutercontrol.cli.clients import clients_group
 from asusroutercontrol.cli.dhcp import dhcp_group
 from asusroutercontrol.cli.optimize import optimize_group
 from asusroutercontrol.config import load_config
@@ -405,6 +406,7 @@ def cli():
 
 
 # Register extracted command groups
+cli.add_command(clients_group, name="clients")
 cli.add_command(dhcp_group, name="dhcp")
 cli.add_command(optimize_group, name="optimize")
 

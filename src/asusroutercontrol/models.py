@@ -67,6 +67,14 @@ class WiFiClient(BaseModel):
     rx_rate_mbps: float | None = None
 
 
+class LanClient(BaseModel):
+    """Wired (Ethernet) client on the router LAN."""
+
+    mac: str
+    ip: str | None = None
+    hostname: str | None = None
+
+
 class PortRule(BaseModel):
     name: str = ""
     protocol: str = "tcp"

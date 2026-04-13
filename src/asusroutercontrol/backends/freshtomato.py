@@ -15,6 +15,7 @@ from asusroutercontrol.backends.base import (
 from asusroutercontrol.models import (
     ConnectionType,
     Device,
+    LanClient,
     PortRule,
     SystemInfo,
     TrafficSnapshot,
@@ -49,6 +50,7 @@ class FreshTomatoBackend(FirmwareBackend):
             "read.system",
             "read.wan",
             "read.wifi_clients",
+            "read.lan_clients",
             "read.port_forwarding",
         }
 
@@ -142,6 +144,15 @@ class FreshTomatoBackend(FirmwareBackend):
                 )
             )
         return clients
+
+    async def get_lan_clients(self) -> list[LanClient]:
+        devices = await self.get_connected_devices()
+        wifi_macs = {c.mac for c in await self.get_wifi_clients()}
+        return [
+            LanClient(mac=d.mac, ip=d.ip, hostname=d.hostname)
+            for d in devices
+            if d.mac not in wifi_macs
+        ]
 
     async def set_state(self, action: str, **kwargs) -> bool:
         raise BackendOperationUnsupported(

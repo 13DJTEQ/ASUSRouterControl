@@ -15,6 +15,7 @@ from asusroutercontrol.backends.base import FirmwareBackend
 from asusroutercontrol.models import (
     ConnectionType,
     Device,
+    LanClient,
     PortRule,
     SystemInfo,
     TrafficSnapshot,
@@ -255,6 +256,14 @@ class MerlinBackend(FirmwareBackend):
             for d in devices
             if d.connection
             in (ConnectionType.WIFI_2G, ConnectionType.WIFI_5G, ConnectionType.WIFI_6G)
+        ]
+
+    async def get_lan_clients(self) -> list[LanClient]:
+        devices = await self.get_connected_devices()
+        return [
+            LanClient(mac=d.mac, ip=d.ip, hostname=d.hostname)
+            for d in devices
+            if d.connection == ConnectionType.WIRED
         ]
 
     async def set_state(self, action: str, **kwargs) -> bool:

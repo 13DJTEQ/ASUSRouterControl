@@ -12,6 +12,35 @@ asusrouter setup
 The `setup` command stores router credentials securely in macOS Keychain.
 Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
 
+## Router Requirements
+
+For full functionality, configure your ASUS router:
+
+### Required: Web Admin Access
+- Router must be accessible at `ROUTER_HOST` (default: `router.asus.com`)
+- Admin credentials must match those stored via `asusrouter setup`
+
+### Required for Client Traffic Telemetry: SSH
+Enable SSH in router admin UI:
+1. Navigate to **Administration → System**
+2. Set **Enable SSH** to **Yes**
+3. Set **SSH Port** to **22** (or configure `SSH_PORT` in `.env`)
+4. Set **Allow Password Login** to **Yes**
+5. Click **Apply**
+
+Without SSH, the menubar app shows device presence but not per-client tx/rx rates.
+
+### Configuration
+Copy `.env.example` to `~/.asusroutercontrol/.env` and adjust as needed:
+```bash
+cp .env.example ~/.asusroutercontrol/.env
+```
+
+Key settings:
+- `SSH_PORT=22` — SSH daemon port (default 22, some setups use 1313)
+- `SSH_TRUST_MODE=tofu_confirm` — Host key verification mode
+- `ROUTER_HOST=router.asus.com` — Router hostname or IP
+
 ## Developer validation
 
 ```bash
