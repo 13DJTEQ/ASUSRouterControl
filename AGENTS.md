@@ -67,7 +67,10 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - CLI surface: `asusrouter dhcp profile {install,list,show}` — subgroup lives in `src/asusroutercontrol/cli/dhcp.py` (restored from the archived Claude variant during consolidation).
 - `dhcp_profiles.py` handles loading (user TOML → `BUILTIN_PROFILES` fallback) and exposes `load_dhcp_profiles(data_dir)` plus `install_user_profiles(data_dir, overwrite=)`.
 - The packaged example file is `src/asusroutercontrol/dhcp_profiles.example.toml`.
-
+### Analysis CLI (dashboard)
+- `asusrouter dashboard` lives in `src/asusroutercontrol/cli/analysis.py` (restored during consolidation).
+- Backed by `analysis/dashboard.py` (`build_isp_client_dashboard`).
+- Options: `--hours/-H`, `--clients`, `--timeline-points`, `--json`, `--export PATH`.
 ## Testing
 
 ### Test infrastructure
