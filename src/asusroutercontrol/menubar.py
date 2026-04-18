@@ -884,7 +884,7 @@ class AppDelegate(NSObject):
 
         # Saturation notification (cooldown: max once per 10 min)
         if saturated:
-            now_ts = datetime.now()
+            now_ts = datetime.now(timezone.utc).astimezone()
             if (
                 self._last_saturation_notify is None
                 or (now_ts - self._last_saturation_notify).total_seconds() > 600
@@ -973,7 +973,7 @@ class AppDelegate(NSObject):
 
             report_dir = self._cfg.data_dir / "reports"
             report_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
             report_path = report_dir / f"report_{ts}.json"
             export_report_json(data, report_path)
 
@@ -1117,8 +1117,9 @@ def main() -> None:
             _cfg = _lc()
             _cfg.ensure_dirs()
             with open(_cfg.data_dir / "scheduler.log", "a") as f:
-                from datetime import datetime as _dt
-                f.write(f"{_dt.now().isoformat()} CRITICAL menubar: {msg}\n")
+                import datetime as _datetime_mod
+                ts = _datetime_mod.datetime.now(_datetime_mod.timezone.utc).isoformat()
+                f.write(f"{ts} CRITICAL menubar: {msg}\n")
         except Exception:
             pass
         sys.exit(78)  # EX_CONFIG

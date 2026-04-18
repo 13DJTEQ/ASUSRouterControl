@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import ClientLoad, Device
 
@@ -37,7 +38,7 @@ def _health_dot(load_pct: float, rssi: int | None) -> str:
 
 def compute_client_loads(devices: list[Device]) -> list[ClientLoad]:
     """Compute load percentage for each device based on tx/rx vs band link rate."""
-    now = datetime.utcnow()
+    now = utcnow()
     results: list[ClientLoad] = []
 
     for dev in devices:

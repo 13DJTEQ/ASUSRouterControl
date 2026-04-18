@@ -31,7 +31,7 @@ def _linreg(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
     y_bar = mean(ys)
     ss_xx = sum((x - x_bar) ** 2 for x in xs)
     ss_yy = sum((y - y_bar) ** 2 for y in ys)
-    ss_xy = sum((x - x_bar) * (y - y_bar) for x, y in zip(xs, ys))
+    ss_xy = sum((x - x_bar) * (y - y_bar) for x, y in zip(xs, ys, strict=True))
     if ss_xx == 0:
         return 0.0, y_bar, 0.0
     slope = ss_xy / ss_xx
@@ -65,10 +65,10 @@ def _iqr_filter(xs: list[float], ys: list[float]) -> tuple[list[float], list[flo
         return xs, ys
     lo = q1 - 1.5 * iqr
     hi = q3 + 1.5 * iqr
-    filtered = [(x, y) for x, y in zip(xs, ys) if lo <= y <= hi]
+    filtered = [(x, y) for x, y in zip(xs, ys, strict=True) if lo <= y <= hi]
     if len(filtered) < max(3, int(len(ys) * 0.6)):
         return xs, ys
-    fx, fy = zip(*filtered)
+    fx, fy = zip(*filtered, strict=True)
     return list(fx), list(fy)
 
 
@@ -208,7 +208,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         if s.get("upload_bps") and s.get("quality", "ok") != "invalid"
     ]
     if len(dl_pts) >= 3:
-        raw_xs, raw_ys = zip(*dl_pts)
+        raw_xs, raw_ys = zip(*dl_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         mbps_per_week = slope * 604800 / 1_000_000
@@ -224,7 +224,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
             "outliers_removed": len(raw_ys) - len(ys),
         }
     if len(ul_pts) >= 3:
-        raw_xs, raw_ys = zip(*ul_pts)
+        raw_xs, raw_ys = zip(*ul_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         mbps_per_week = slope * 604800 / 1_000_000
@@ -247,7 +247,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         for p in lat_rows if p.get("avg_ms")
     ]
     if len(lat_pts) >= 3:
-        raw_xs, raw_ys = zip(*lat_pts)
+        raw_xs, raw_ys = zip(*lat_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         ms_per_week = slope * 604800
@@ -308,7 +308,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
             for w in band_rows if w.get("avg_rssi")
         ]
         if len(pts) >= 3:
-            raw_xs, raw_ys = zip(*pts)
+            raw_xs, raw_ys = zip(*pts, strict=True)
             xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
             slope, _, r2 = _linreg(xs, ys)
             db_per_week = slope * 604800
@@ -334,7 +334,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
             for w in band_rows if w.get("noise_floor") is not None
         ]
         if len(pts) >= 3:
-            raw_xs, raw_ys = zip(*pts)
+            raw_xs, raw_ys = zip(*pts, strict=True)
             xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
             slope, _, r2 = _linreg(xs, ys)
             db_per_week = slope * 604800
@@ -357,7 +357,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         for s in sys_rows if s.get("ram_pct")
     ]
     if len(ram_pts) >= 3:
-        raw_xs, raw_ys = zip(*ram_pts)
+        raw_xs, raw_ys = zip(*ram_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         pct_per_week = slope * 604800
@@ -381,7 +381,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         if s.get("jitter_ms") is not None and s.get("quality", "ok") != "invalid"
     ]
     if len(jitter_pts) >= 3:
-        raw_xs, raw_ys = zip(*jitter_pts)
+        raw_xs, raw_ys = zip(*jitter_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         ms_per_week = slope * 604800
@@ -404,7 +404,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         for s in temp_rows if s.get("temp_c") is not None
     ]
     if len(temp_pts) >= 3:
-        raw_xs, raw_ys = zip(*temp_pts)
+        raw_xs, raw_ys = zip(*temp_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         c_per_week = slope * 604800
@@ -437,7 +437,7 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
         if cmax and ccount is not None:
             util_pts.append((_ts_to_epoch(ts), (ccount / cmax) * 100))
     if len(util_pts) >= 3:
-        raw_xs, raw_ys = zip(*util_pts)
+        raw_xs, raw_ys = zip(*util_pts, strict=True)
         xs, ys = _iqr_filter(list(raw_xs), list(raw_ys))
         slope, _, r2 = _linreg(xs, ys)
         pct_per_week = slope * 604800

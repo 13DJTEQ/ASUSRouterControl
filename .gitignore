@@ -10,7 +10,12 @@ Screenshot*.png
 .env
 *.db
 *.sqlite
+.venv
 .venv/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+# Archived V1 and Claude variants (reference only; not tracked)
+archive/
+# Runtime logs (menubar, optimizer, launchd)
+logs/

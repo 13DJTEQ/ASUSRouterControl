@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from asusroutercontrol.cli import cli
+from asusroutercontrol._cli import cli
 from asusroutercontrol.dhcp_reservations import (
     parse_reservations,
     remove_reservation,
@@ -205,12 +205,13 @@ def _fake_result(*, success: bool = True, message: str = ""):
 
 
 def _patch_profile_command_deps(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("asusroutercontrol.cli._render_dhcp_apply_result", lambda _r: None)
+    # Patch the old _cli module (legacy code still runs from there)
+    monkeypatch.setattr("asusroutercontrol._cli._render_dhcp_apply_result", lambda _r: None)
     monkeypatch.setattr(
-        "asusroutercontrol.cli._print_profile_device_match_summary",
+        "asusroutercontrol._cli._print_profile_device_match_summary",
         lambda *_a: None,
     )
-    monkeypatch.setattr("asusroutercontrol.cli.DataStore", _FakeDataStoreCtx)
+    monkeypatch.setattr("asusroutercontrol._cli.DataStore", _FakeDataStoreCtx)
     monkeypatch.setattr("asusroutercontrol.ssh.RouterSSH", _FakeRouterSSHCtx)
 
 

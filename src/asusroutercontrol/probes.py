@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.models import (
     ChannelSurvey,
     ChannelSurveyEntry,
@@ -34,7 +35,7 @@ PING_COUNT = 20
 
 async def probe_latency(ssh: RouterSSH) -> list[LatencyProbe]:
     """Ping multiple targets from the router and return latency stats."""
-    now = datetime.utcnow()
+    now = utcnow()
     results: list[LatencyProbe] = []
 
     for name, ip in LATENCY_TARGETS.items():
@@ -95,7 +96,7 @@ def _parse_ping(output: str, target: str, ts: datetime) -> LatencyProbe:
 
 async def probe_system(ssh: RouterSSH) -> SystemSnapshot:
     """Capture CPU, RAM, temp, uptime, conntrack from the router."""
-    now = datetime.utcnow()
+    now = utcnow()
     snap = SystemSnapshot(timestamp=now)
 
     try:
@@ -176,7 +177,7 @@ async def probe_config(ssh: RouterSSH, source: str = "scheduled") -> ConfigSnaps
     """Snapshot tracked NVRAM keys from the router."""
     import json
 
-    now = datetime.utcnow()
+    now = utcnow()
     nvram: dict[str, str] = {k: "" for k in TRACKED_NVRAM_KEYS}
 
     key_pattern = "|".join(TRACKED_NVRAM_KEYS)
@@ -240,7 +241,7 @@ KNOWN_BLOAT: dict[str, str] = {
 
 async def probe_services(ssh: RouterSSH) -> ServiceAudit:
     """Audit running services, flag known bloat daemons."""
-    now = datetime.utcnow()
+    now = utcnow()
     audit = ServiceAudit(timestamp=now)
 
     try:
@@ -322,7 +323,7 @@ SYSCTL_RECOMMENDATIONS: dict[str, tuple[str, str]] = {
 
 async def probe_sysctl(ssh: RouterSSH) -> SysctlSnapshot:
     """Read key TCP/network sysctl values and compare against optimal."""
-    now = datetime.utcnow()
+    now = utcnow()
     snap = SysctlSnapshot(timestamp=now)
 
     try:
@@ -356,7 +357,7 @@ async def probe_sysctl(ssh: RouterSSH) -> SysctlSnapshot:
 
 async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
     """Run WiFi channel survey via wl chanim_stats."""
-    now = datetime.utcnow()
+    now = utcnow()
     results: list[ChannelSurvey] = []
 
     bands = [
@@ -447,7 +448,7 @@ async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
 
 async def probe_wifi(ssh: RouterSSH) -> list[WiFiSnapshot]:
     """Capture per-band WiFi client count, signal strength, noise floor, and byte counters."""
-    now = datetime.utcnow()
+    now = utcnow()
     results: list[WiFiSnapshot] = []
 
     bands = [

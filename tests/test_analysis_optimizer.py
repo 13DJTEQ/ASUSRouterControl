@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.analyzer import analyze_patterns, analyze_trends
 from asusroutercontrol.optimizer import (
     correlate_config_performance,
@@ -66,7 +67,7 @@ class _SuggestStore:
 
 class _CorrelationStore:
     def __init__(self) -> None:
-        self.event_ts = (datetime.utcnow() - timedelta(hours=12)).isoformat()
+        self.event_ts = (utcnow() - timedelta(hours=12)).isoformat()
 
     async def get_config_events(self, *, days: int = 90) -> list[dict]:
         return [{
@@ -97,7 +98,7 @@ class _CorrelationStore:
 
 @pytest.mark.asyncio
 async def test_analyze_trends_filters_outlier_points() -> None:
-    base = datetime.utcnow() - timedelta(days=20)
+    base = utcnow() - timedelta(days=20)
     speed_rows = []
     for i in range(12):
         dl = 280_000_000 + (i * 2_000_000)
@@ -119,7 +120,7 @@ async def test_analyze_trends_filters_outlier_points() -> None:
 
 @pytest.mark.asyncio
 async def test_analyze_trends_detects_abrupt_download_change_point() -> None:
-    now = datetime.utcnow()
+    now = utcnow()
     speed_rows = []
     for i in range(20):
         ts = (now - timedelta(hours=10 * i)).isoformat()
@@ -142,7 +143,7 @@ async def test_analyze_trends_detects_abrupt_download_change_point() -> None:
 
 @pytest.mark.asyncio
 async def test_analyze_patterns_uses_dynamic_peak_hours() -> None:
-    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    now = utcnow().replace(minute=0, second=0, microsecond=0)
     speed_rows: list[dict] = []
     for hour in range(24):
         for day in range(3):
@@ -258,7 +259,7 @@ async def test_suggest_settings_includes_extended_findings() -> None:
 
 @pytest.mark.asyncio
 async def test_analyze_trends_reports_jitter_temperature_and_conntrack() -> None:
-    now = datetime.utcnow()
+    now = utcnow()
     speed_rows = []
     system_rows = []
     for i in range(15):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import (
     ClientLoad,
@@ -43,7 +44,7 @@ async def test_get_client_loads_prioritizes_signal_rows(tmp_path) -> None:
     store = DataStore(tmp_path / "router.db")
     await store.open()
     try:
-        now = datetime.utcnow()
+        now = utcnow()
         await store.insert_client_load(
             ClientLoad(
                 timestamp=now - timedelta(seconds=30),
@@ -77,7 +78,7 @@ async def test_get_client_loads_prefers_device_perf_band_history(tmp_path) -> No
     store = DataStore(tmp_path / "router.db")
     await store.open()
     try:
-        now = datetime.utcnow()
+        now = utcnow()
         mac = "AA:AA:AA:AA:AA:10"
 
         await store.upsert_device(
@@ -122,7 +123,7 @@ async def test_get_client_loads_falls_back_to_client_traffic_for_legacy_rows(tmp
     store = DataStore(tmp_path / "router.db")
     await store.open()
     try:
-        now = datetime.utcnow()
+        now = utcnow()
         mac = "AA:AA:AA:AA:AA:11"
         await store.upsert_device(
             Device(
@@ -189,7 +190,7 @@ async def test_client_load_window_stats_counts_placeholders(tmp_path) -> None:
     store = DataStore(tmp_path / "router.db")
     await store.open()
     try:
-        now = datetime.utcnow()
+        now = utcnow()
         await store.insert_client_load(
             ClientLoad(
                 timestamp=now - timedelta(seconds=45),
@@ -254,7 +255,7 @@ async def test_prune_old_data_includes_speed_tests(tmp_path) -> None:
     store = DataStore(tmp_path / "router.db")
     await store.open()
     try:
-        old_ts = datetime.utcnow() - timedelta(days=120)
+        old_ts = utcnow() - timedelta(days=120)
         await store.insert_speed_test(
             SpeedTestResult(
                 timestamp=old_ts,
@@ -277,7 +278,7 @@ async def test_notification_cooldown_persistence(tmp_path) -> None:
     try:
         key = "speed:high"
         assert await store.get_notification_last_sent(key) is None
-        sent_at = datetime.utcnow() - timedelta(minutes=30)
+        sent_at = utcnow() - timedelta(minutes=30)
         await store.set_notification_last_sent(key, sent_at=sent_at)
         loaded = await store.get_notification_last_sent(key)
         assert loaded is not None

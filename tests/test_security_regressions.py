@@ -25,6 +25,9 @@ class _Cfg:
     ssh_trust_mode: str = "tofu_confirm"
     ssh_host_key_fingerprint: str | None = None
     ssh_known_hosts_path: Path | None = None
+    ssh_encryption_algs: tuple[str, ...] | None = None
+    ssh_mac_algs: tuple[str, ...] | None = None
+    ssh_server_host_key_algs: tuple[str, ...] | None = None
 
 
 class _FakeConn:
@@ -70,7 +73,7 @@ async def test_routerssh_strict_mode_unknown_host_fails_closed(
     def _get_creds():
         return ("admin", "secret")
 
-    async def _fake_connect(hostname, **kwargs):
+    async def _fake_connect(**kwargs):
         return _FakeConn(key_blob)
 
     monkeypatch.setattr("asusroutercontrol.ssh.load_config", _load_config)
@@ -96,7 +99,7 @@ async def test_routerssh_tofu_confirm_emits_fingerprints(
     def _get_creds():
         return ("admin", "secret")
 
-    async def _fake_connect(hostname, **kwargs):
+    async def _fake_connect(**kwargs):
         return _FakeConn(key_blob)
 
     monkeypatch.setattr("asusroutercontrol.ssh.load_config", _load_config)
@@ -128,7 +131,7 @@ async def test_routerssh_mismatch_reports_old_and_new_fingerprints(
     def _get_creds():
         return ("admin", "secret")
 
-    async def _fake_connect(hostname, **kwargs):
+    async def _fake_connect(**kwargs):
         return _FakeConn(new_blob)
 
     monkeypatch.setattr("asusroutercontrol.ssh.load_config", _load_config)
@@ -163,7 +166,8 @@ async def test_routerssh_rotate_replaces_only_target_entry(
     def _get_creds():
         return ("admin", "secret")
 
-    async def _fake_connect(hostname, **kwargs):
+    async def _fake_connect(**kwargs):
+        hostname = kwargs.get("host")
         return _FakeConn(new_blob if hostname == "router.local" else other_blob)
 
     monkeypatch.setattr("asusroutercontrol.ssh.load_config", _load_config)
@@ -192,7 +196,7 @@ async def test_routerssh_tofu_auto_pins_and_sets_permissions(
     def _get_creds():
         return ("admin", "secret")
 
-    async def _fake_connect(hostname, **kwargs):
+    async def _fake_connect(**kwargs):
         return _FakeConn(key_blob)
 
     monkeypatch.setattr("asusroutercontrol.ssh.load_config", _load_config)

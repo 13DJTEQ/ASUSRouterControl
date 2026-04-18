@@ -173,7 +173,7 @@ async def apply_optimization_batch(
         service = _service_for_key(key)
         by_service.setdefault(service, []).append(s)
 
-    for service, group in by_service.items():
+    for _service, group in by_service.items():
         for s in group:
             key = s.get("key", "")
             proposed = s.get("proposed", "")

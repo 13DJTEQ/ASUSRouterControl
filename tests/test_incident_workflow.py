@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from asusroutercontrol.cli import cli
+from asusroutercontrol._cli import cli
 from asusroutercontrol.incident import (
     IncidentSnapshot,
     PathSnapshot,
@@ -175,7 +175,7 @@ def test_optimize_apply_clear_sets_empty_value(monkeypatch: pytest.MonkeyPatch) 
             service_restarted="",
         )
 
-    monkeypatch.setattr("asusroutercontrol.cli.DataStore", _FakeDataStoreCtx)
+    monkeypatch.setattr("asusroutercontrol._cli.DataStore", _FakeDataStoreCtx)
     monkeypatch.setattr("asusroutercontrol.ssh.RouterSSH", _FakeRouterSSHCtx)
     monkeypatch.setattr(
         "asusroutercontrol.executor.apply_nvram_setting",

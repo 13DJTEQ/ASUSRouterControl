@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 
 from asusroutercontrol.models import (
     Device,
+    LanClient,
     PortRule,
     SystemInfo,
     TrafficSnapshot,
@@ -43,6 +44,7 @@ class FirmwareBackend(ABC):
             "read.system",
             "read.wan",
             "read.wifi_clients",
+            "read.lan_clients",
             "read.port_forwarding",
             "write.state",
             "write.port_forwarding",
@@ -75,6 +77,9 @@ class FirmwareBackend(ABC):
 
     @abstractmethod
     async def get_wifi_clients(self) -> list[WiFiClient]: ...
+
+    @abstractmethod
+    async def get_lan_clients(self) -> list[LanClient]: ...
 
     @abstractmethod
     async def set_state(self, action: str, **kwargs) -> bool: ...

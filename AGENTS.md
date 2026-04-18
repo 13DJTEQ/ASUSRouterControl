@@ -64,11 +64,16 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ### DHCP profiles
 - Device shortcut profiles (MAC → IP → hostname mappings) live in `~/.asusroutercontrol/dhcp_profiles.toml`.
-- Run `asusrouter dhcp profile install` to copy the packaged example file to the user config directory.
-- `dhcp_profiles.py` handles loading (user TOML → packaged defaults fallback) and exposes `load_dhcp_profiles(data_dir)`.
-- `cli.py` calls `_get_dhcp_profiles()` at runtime (lazy, per invocation) — never at module load time.
+- CLI surface: `asusrouter dhcp profile {install,list,show}` — subgroup lives in `src/asusroutercontrol/cli/dhcp.py` (restored from the archived Claude variant during consolidation).
+- `dhcp_profiles.py` handles loading (user TOML → `BUILTIN_PROFILES` fallback) and exposes `load_dhcp_profiles(data_dir)` plus `install_user_profiles(data_dir, overwrite=)`.
 - The packaged example file is `src/asusroutercontrol/dhcp_profiles.example.toml`.
-
+### Analysis CLI (dashboard)
+- `asusrouter dashboard` lives in `src/asusroutercontrol/cli/analysis.py` (restored during consolidation).
+- Backed by `analysis/dashboard.py` (`build_isp_client_dashboard`).
+- Options: `--hours/-H`, `--clients`, `--timeline-points`, `--json`, `--export PATH`.
+### Repository structure notes
+- `archive/` (gitignored): contains the two pre-consolidation variants — `ASUSRouterControl_v1_archived/` (original baseline) and `ASUSRouterControl_claude_archived/` (Claude rebuild). Reference only; do not modify. Safe to delete once consolidation is verified.
+- `logs/` (gitignored): runtime output from the menubar, optimizer, and launchd wrappers. Not tracked.
 ## Testing
 
 ### Test infrastructure

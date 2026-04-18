@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import median
 
 from asusroutercontrol.config import load_config
@@ -32,7 +32,7 @@ _LEGACY_HTTP_ALIAS = "http_download"
 
 def _is_peak_hour(cfg) -> bool:
     """Check if current local time falls within peak hours."""
-    hour = datetime.now().hour
+    hour = datetime.now(timezone.utc).astimezone().hour
     if cfg.peak_start <= cfg.peak_end:
         return cfg.peak_start <= hour < cfg.peak_end
     return hour >= cfg.peak_start or hour < cfg.peak_end
@@ -99,7 +99,9 @@ class MultiSourceSpeedTest:
     ) -> tuple[SpeedTestResult, list[ProviderResult]]:
         """Execute providers and return (composite, individual_results)."""
         cfg = load_config()
-        now = datetime.utcnow()
+        from asusroutercontrol._time import utcnow
+
+        now = utcnow()
         is_peak = _is_peak_hour(cfg)
         session_id = uuid.uuid4().hex[:12]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
-from asusroutercontrol.cli import cli
+from asusroutercontrol._cli import cli
 from asusroutercontrol.config import Config
 from asusroutercontrol.models import SpeedTestResult
 from asusroutercontrol.speedtest_providers import ProviderResult
@@ -29,7 +29,7 @@ def test_speedtest_cli_accepts_cachefly_source(
         _fake_run_speed_test_detailed,
     )
     monkeypatch.setattr(
-        "asusroutercontrol.cli.load_config",
+        "asusroutercontrol._cli.load_config",
         lambda: Config(data_dir=tmp_path),
     )
 
@@ -62,7 +62,7 @@ def test_speedtest_cli_accepts_legacy_http_download_alias(
         _fake_run_speed_test_detailed,
     )
     monkeypatch.setattr(
-        "asusroutercontrol.cli.load_config",
+        "asusroutercontrol._cli.load_config",
         lambda: Config(data_dir=tmp_path),
     )
 
@@ -87,7 +87,7 @@ def test_speedtest_cli_reports_unknown_provider_error(
         _fake_run_speed_test_detailed,
     )
     monkeypatch.setattr(
-        "asusroutercontrol.cli.load_config",
+        "asusroutercontrol._cli.load_config",
         lambda: Config(data_dir=tmp_path),
     )
 
