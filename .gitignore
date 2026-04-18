@@ -15,3 +15,7 @@ Screenshot*.png
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+# Archived V1 and Claude variants (reference only; not tracked)
+archive/
+# Runtime logs (menubar, optimizer, launchd)
+logs/

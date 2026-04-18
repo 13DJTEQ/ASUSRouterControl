@@ -71,6 +71,9 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - `asusrouter dashboard` lives in `src/asusroutercontrol/cli/analysis.py` (restored during consolidation).
 - Backed by `analysis/dashboard.py` (`build_isp_client_dashboard`).
 - Options: `--hours/-H`, `--clients`, `--timeline-points`, `--json`, `--export PATH`.
+### Repository structure notes
+- `archive/` (gitignored): contains the two pre-consolidation variants — `ASUSRouterControl_v1_archived/` (original baseline) and `ASUSRouterControl_claude_archived/` (Claude rebuild). Reference only; do not modify. Safe to delete once consolidation is verified.
+- `logs/` (gitignored): runtime output from the menubar, optimizer, and launchd wrappers. Not tracked.
 ## Testing
 
 ### Test infrastructure
