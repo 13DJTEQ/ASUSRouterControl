@@ -10,6 +10,7 @@ Screenshot*.png
 .env
 *.db
 *.sqlite
+.venv
 .venv/
 .ruff_cache/
 .pytest_cache/
