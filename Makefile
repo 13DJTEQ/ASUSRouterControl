@@ -12,6 +12,9 @@ SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.e
 
 # Ensure the in-repo .venv symlink points at the canonical external venv.
 # Kept for compatibility with scripts/tools that reference .venv/bin/...
+# If a stale .venv directory exists (e.g. copied from iCloud, or left behind
+# by an aborted `make setup`), auto-remove it — but only if it actually looks
+# like a venv (has pyvenv.cfg). Anything else is refused to protect real data.
 venv-link:
 	@if [ -L "$(VENV_LINK)" ]; then \
 		target=$$(readlink "$(VENV_LINK)"); \
@@ -19,8 +22,14 @@ venv-link:
 			rm -f "$(VENV_LINK)"; \
 			ln -s "$(VENV_DIR)" "$(VENV_LINK)"; \
 		fi; \
+	elif [ -d "$(VENV_LINK)" ] && [ -f "$(VENV_LINK)/pyvenv.cfg" ]; then \
+		echo "Removing stale $(VENV_LINK) directory (pyvenv.cfg present) and replacing with symlink"; \
+		rm -rf "$(VENV_LINK)"; \
+		ln -s "$(VENV_DIR)" "$(VENV_LINK)"; \
 	elif [ -e "$(VENV_LINK)" ]; then \
-		echo "Refusing to overwrite existing non-symlink $(VENV_LINK)"; exit 1; \
+		echo "Refusing to overwrite existing non-venv $(VENV_LINK) (no pyvenv.cfg)."; \
+		echo "Move or delete it manually, then re-run."; \
+		exit 1; \
 	else \
 		ln -s "$(VENV_DIR)" "$(VENV_LINK)"; \
 	fi
@@ -35,9 +44,12 @@ unhide-site-packages:
 		chflags -R nohidden "$$SITE_PACKAGES" 2>/dev/null || true; \
 	fi
 
+# `setup` is idempotent: `--clear` makes `uv venv` recreate the external venv
+# cleanly whether or not it already exists, and `venv-link` now handles any
+# stale in-repo .venv directory. Safe to re-run after partial or aborted runs.
 setup:
 	mkdir -p "$(dir $(VENV_DIR))"
-	uv venv --python 3.11 "$(VENV_DIR)"
+	uv venv --clear --python 3.11 "$(VENV_DIR)"
 	$(MAKE) venv-link
 	$(VENV_PIP_ENV) uv pip install -e ".[dev,menubar]"
 	# Safety net — venv is outside iCloud so UF_HIDDEN shouldn't apply, but
