@@ -64,9 +64,8 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ### DHCP profiles
 - Device shortcut profiles (MAC → IP → hostname mappings) live in `~/.asusroutercontrol/dhcp_profiles.toml`.
-- Run `asusrouter dhcp profile install` to copy the packaged example file to the user config directory.
-- `dhcp_profiles.py` handles loading (user TOML → packaged defaults fallback) and exposes `load_dhcp_profiles(data_dir)`.
-- `cli.py` calls `_get_dhcp_profiles()` at runtime (lazy, per invocation) — never at module load time.
+- CLI surface: `asusrouter dhcp profile {install,list,show}` — subgroup lives in `src/asusroutercontrol/cli/dhcp.py` (restored from the archived Claude variant during consolidation).
+- `dhcp_profiles.py` handles loading (user TOML → `BUILTIN_PROFILES` fallback) and exposes `load_dhcp_profiles(data_dir)` plus `install_user_profiles(data_dir, overwrite=)`.
 - The packaged example file is `src/asusroutercontrol/dhcp_profiles.example.toml`.
 
 ## Testing

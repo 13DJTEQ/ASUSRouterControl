@@ -13,7 +13,13 @@ from asusroutercontrol.cli import (
     get_datastore,
     run_with_backend,
 )
-from asusroutercontrol.dhcp_profiles import BUILTIN_PROFILES, get_profile_field
+from asusroutercontrol.config import load_config
+from asusroutercontrol.dhcp_profiles import (
+    BUILTIN_PROFILES,
+    get_profile_field,
+    install_user_profiles,
+    load_dhcp_profiles,
+)
 
 __all__ = ["dhcp_group"]
 
@@ -520,4 +526,81 @@ def dhcp_unreserve_denon_second_port(
         mac=mac,
         dry_run=dry_run,
         yes=yes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DHCP profile subgroup (device shortcut TOML management)
+# Restored from archived Claude variant; adapted to V2 dhcp_profiles API.
+# ---------------------------------------------------------------------------
+
+@dhcp_group.group("profile")
+def dhcp_profile_group():
+    """Manage DHCP reservation profiles (device shortcuts)."""
+
+
+@dhcp_profile_group.command("list")
+def dhcp_profile_list():
+    """List all available DHCP reservation profiles."""
+    cfg = load_config()
+    profiles = load_dhcp_profiles(cfg.data_dir)
+    if not profiles:
+        console.print(
+            "[yellow]No profiles found. Run 'asusrouter dhcp profile install' "
+            "to create a profiles file.[/yellow]"
+        )
+        return
+
+    table = Table(
+        title="DHCP Reservation Profiles",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Key", style="bold")
+    table.add_column("Label")
+    table.add_column("MAC")
+    table.add_column("Default IP")
+    table.add_column("Hostname")
+    for key, profile in sorted(profiles.items()):
+        table.add_row(
+            key,
+            profile.label,
+            profile.mac,
+            profile.default_ip,
+            profile.hostname,
+        )
+    console.print(table)
+
+
+@dhcp_profile_group.command("show")
+@click.argument("key")
+def dhcp_profile_show(key: str):
+    """Show details for a single profile by KEY."""
+    cfg = load_config()
+    profile = load_dhcp_profiles(cfg.data_dir).get(key)
+    if not profile:
+        raise click.ClickException(
+            f"Profile not found: {key!r}. Run 'asusrouter dhcp profile list'."
+        )
+    console.print(f"[bold]Profile:[/bold] {profile.key}")
+    console.print(f"  Label:      {profile.label}")
+    console.print(f"  MAC:        {profile.mac}")
+    console.print(f"  Default IP: {profile.default_ip}")
+    console.print(f"  Hostname:   {profile.hostname}")
+
+
+@dhcp_profile_group.command("install")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing user profiles file.",
+)
+def dhcp_profile_install(overwrite: bool):
+    """Install the example profiles file to the user config directory."""
+    cfg = load_config()
+    path = install_user_profiles(cfg.data_dir, overwrite=overwrite)
+    console.print(f"[green]Profiles file installed:[/green] {path}")
+    console.print(
+        "Edit this file to customise your device shortcuts, "
+        "then run 'asusrouter dhcp profile list'."
     )

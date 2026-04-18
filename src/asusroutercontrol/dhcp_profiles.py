@@ -15,8 +15,12 @@ __all__ = [
     "BUILTIN_PROFILES",
     "get_profile",
     "get_profile_field",
+    "install_user_profiles",
     "load_dhcp_profiles",
 ]
+
+_EXAMPLE_TOML = Path(__file__).parent / "dhcp_profiles.example.toml"
+_USER_TOML_NAME = "dhcp_profiles.toml"
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,33 @@ def get_profile(profile_key: str) -> DHCPProfile:
     if profile_key not in profiles:
         raise KeyError(f"Unknown DHCP reservation profile: {profile_key}")
     return profiles[profile_key]
+
+
+def install_user_profiles(
+    data_dir: Path | None = None, *, overwrite: bool = False
+) -> Path:
+    """Copy the packaged example TOML to the user config directory.
+
+    Args:
+        data_dir: Target directory (defaults to ``~/.asusroutercontrol``).
+        overwrite: If True, replace an existing user file.
+
+    Returns:
+        Path to the (existing or newly installed) user profiles file.
+    """
+    import shutil
+
+    if data_dir is None:
+        data_dir = Path.home() / ".asusroutercontrol"
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    dest = data_dir / _USER_TOML_NAME
+
+    if dest.exists() and not overwrite:
+        return dest
+
+    shutil.copy2(_EXAMPLE_TOML, dest)
+    return dest
 
 
 def get_profile_field(profile_key: str, field: str) -> str:
