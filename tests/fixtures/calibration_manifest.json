@@ -1,0 +1,30 @@
+{
+  "thresholds": {},
+  "profiles": {
+    "healthy_baseline": {
+      "fixture": "healthy_baseline.json",
+      "expected_recommendations": [],
+      "forbid_actionable": false
+    },
+    "isp_congestion": {
+      "fixture": "isp_congestion.json",
+      "expected_recommendations": [],
+      "forbid_actionable": false
+    },
+    "thermal_drift": {
+      "fixture": "thermal_drift.json",
+      "expected_recommendations": [],
+      "forbid_actionable": false
+    },
+    "conntrack_pressure": {
+      "fixture": "conntrack_pressure.json",
+      "expected_recommendations": [],
+      "forbid_actionable": false
+    },
+    "wifi_noise_degradation": {
+      "fixture": "wifi_noise_degradation.json",
+      "expected_recommendations": [],
+      "forbid_actionable": false
+    }
+  }
+}
