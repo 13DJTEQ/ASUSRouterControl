@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 
 from asusroutercontrol.models import (
@@ -31,6 +32,97 @@ LATENCY_TARGETS = {
 
 PING_COUNT = 20
 
+_WL_IFNAME_CMD = "nvram show 2>/dev/null | grep -E '^wl[0-9]+(\\.[0-9]+)?_ifname='"
+_WL_IFNAME_RE = re.compile(
+    r"^wl(?P<unit>\d+)(?:\.(?P<subunit>\d+))?_ifname=(?P<iface>\S+)$"
+)
+
+
+@dataclass(frozen=True)
+class _WirelessInterface:
+    iface: str
+    wl_unit: int
+    wl_subunit: int | None
+    snapshot_band: str
+    traffic_band: str
+
+
+def _band_labels_for_wl_unit(unit: int) -> tuple[str, str]:
+    if unit == 0:
+        return "2.4", "2.4GHz"
+    if unit == 1:
+        return "5", "5GHz"
+    if unit == 2:
+        return "6", "6GHz"
+    fallback = f"wl{unit}"
+    return fallback, fallback
+
+
+def _wireless_interface_sort_key(entry: _WirelessInterface) -> tuple[int, bool, int, str]:
+    sub = entry.wl_subunit if entry.wl_subunit is not None else -1
+    return (entry.wl_unit, entry.wl_subunit is not None, sub, entry.iface)
+
+
+def _dedupe_wireless_interfaces(
+    entries: list[_WirelessInterface],
+) -> list[_WirelessInterface]:
+    seen_ifaces: set[str] = set()
+    deduped: list[_WirelessInterface] = []
+    for entry in sorted(entries, key=_wireless_interface_sort_key):
+        if entry.iface in seen_ifaces:
+            continue
+        seen_ifaces.add(entry.iface)
+        deduped.append(entry)
+    return deduped
+
+
+async def _discover_wireless_interfaces(ssh: RouterSSH) -> list[_WirelessInterface]:
+    discovered: list[_WirelessInterface] = []
+    try:
+        response = await ssh.run(_WL_IFNAME_CMD)
+        if response.ok and response.stdout:
+            for raw_line in response.stdout.splitlines():
+                line = raw_line.strip()
+                match = _WL_IFNAME_RE.match(line)
+                if not match:
+                    continue
+                iface = match.group("iface").strip()
+                if not iface:
+                    continue
+                wl_unit = int(match.group("unit"))
+                subunit_raw = match.group("subunit")
+                wl_subunit = int(subunit_raw) if subunit_raw is not None else None
+                snapshot_band, traffic_band = _band_labels_for_wl_unit(wl_unit)
+                discovered.append(
+                    _WirelessInterface(
+                        iface=iface,
+                        wl_unit=wl_unit,
+                        wl_subunit=wl_subunit,
+                        snapshot_band=snapshot_band,
+                        traffic_band=traffic_band,
+                    )
+                )
+    except Exception:
+        log.debug("WiFi interface discovery failed", exc_info=True)
+
+    deduped = _dedupe_wireless_interfaces(discovered)
+    if deduped:
+        return deduped
+
+    fallback: list[_WirelessInterface] = []
+    for wl_unit, iface in ((0, "eth1"), (1, "eth2")):
+        snapshot_band, traffic_band = _band_labels_for_wl_unit(wl_unit)
+        fallback.append(
+            _WirelessInterface(
+                iface=iface,
+                wl_unit=wl_unit,
+                wl_subunit=None,
+                snapshot_band=snapshot_band,
+                traffic_band=traffic_band,
+            )
+        )
+    return fallback
+
 
 async def probe_latency(ssh: RouterSSH) -> list[LatencyProbe]:
     """Ping multiple targets from the router and return latency stats."""
@@ -45,7 +137,6 @@ async def probe_latency(ssh: RouterSSH) -> list[LatencyProbe]:
         except Exception:
             log.exception("Latency probe failed for %s", name)
             results.append(LatencyProbe(timestamp=now, target=name))
-
     return results
 
 
@@ -358,25 +449,31 @@ async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
     """Run WiFi channel survey via wl chanim_stats."""
     now = datetime.utcnow()
     results: list[ChannelSurvey] = []
+    channel_ifaces: list[_WirelessInterface] = []
+    seen_units: set[int] = set()
+    for iface in await _discover_wireless_interfaces(ssh):
+        if iface.wl_unit in seen_units:
+            continue
+        seen_units.add(iface.wl_unit)
+        channel_ifaces.append(iface)
 
-    bands = [
-        ("2.4", "eth1"),
-        ("5", "eth2"),
-    ]
-
-    for band_name, iface in bands:
-        survey = ChannelSurvey(timestamp=now, band=band_name, interface=iface)
+    for iface_info in channel_ifaces:
+        survey = ChannelSurvey(
+            timestamp=now,
+            band=iface_info.snapshot_band,
+            interface=iface_info.iface,
+        )
 
         try:
             # Get current channel
-            r = await ssh.run(f"wl -i {iface} channel 2>/dev/null")
+            r = await ssh.run(f"wl -i {iface_info.iface} channel 2>/dev/null")
             if r.ok and r.stdout:
                 ch_m = re.search(r"current mac channel\s+(\d+)", r.stdout)
                 if ch_m:
                     survey.current_channel = int(ch_m.group(1))
 
             # Channel survey via chanim_stats
-            r = await ssh.run(f"wl -i {iface} chanim_stats 2>/dev/null")
+            r = await ssh.run(f"wl -i {iface_info.iface} chanim_stats 2>/dev/null")
             if r.ok and r.stdout:
                 entries: list[ChannelSurveyEntry] = []
                 for line in r.stdout.splitlines():
@@ -438,7 +535,11 @@ async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
                         )
 
         except Exception:
-            log.exception("WiFi channel survey failed for %s band", band_name)
+            log.exception(
+                "WiFi channel survey failed for interface=%s band=%s",
+                iface_info.iface,
+                iface_info.snapshot_band,
+            )
 
         results.append(survey)
 
@@ -450,22 +551,29 @@ async def probe_wifi(ssh: RouterSSH) -> list[WiFiSnapshot]:
     now = datetime.utcnow()
     results: list[WiFiSnapshot] = []
 
-    bands = [
-        ("2.4", "eth1"),
-        ("5", "eth2"),
-    ]
-
     # Fetch /proc/net/dev once for all interfaces
     iface_bytes = await _read_iface_bytes(ssh)
+    interfaces = await _discover_wireless_interfaces(ssh)
+    snapshots_by_band: dict[str, WiFiSnapshot] = {}
+    seen_macs_by_band: dict[str, set[str]] = {}
+    rssi_by_band: dict[str, list[float]] = {}
 
-    for band_name, iface in bands:
-        snap = WiFiSnapshot(timestamp=now, band=band_name)
+    for iface_info in interfaces:
+        band_name = iface_info.snapshot_band
+        iface = iface_info.iface
+        snap = snapshots_by_band.get(band_name)
+        if snap is None:
+            snap = WiFiSnapshot(timestamp=now, band=band_name)
+            snapshots_by_band[band_name] = snap
+        seen_macs = seen_macs_by_band.setdefault(band_name, set())
 
         try:
             # Client list
             r = await ssh.run(f"wl -i {iface} assoclist 2>/dev/null")
             macs = re.findall(r"assoclist\s+([0-9A-Fa-f:]+)", r.stdout)
-            snap.client_count = len(macs)
+            for mac in macs:
+                seen_macs.add(_normalize_mac(mac))
+            snap.client_count = len(seen_macs)
 
             # RSSI per client
             rssi_vals: list[float] = []
@@ -480,31 +588,45 @@ async def probe_wifi(ssh: RouterSSH) -> list[WiFiSnapshot]:
                     rssi_vals.append(max(float(v) for v in rssi_m))
 
             if rssi_vals:
-                snap.avg_rssi = sum(rssi_vals) / len(rssi_vals)
-                snap.min_rssi = min(rssi_vals)
+                aggregate = rssi_by_band.setdefault(band_name, [])
+                aggregate.extend(rssi_vals)
+                snap.avg_rssi = sum(aggregate) / len(aggregate)
+                snap.min_rssi = min(aggregate)
 
             # Noise floor
             r = await ssh.run(f"wl -i {iface} noise 2>/dev/null")
-            if r.ok and r.stdout:
+            if snap.noise_floor is None and r.ok and r.stdout:
                 noise_m = re.search(r"-?\d+", r.stdout)
                 if noise_m:
                     snap.noise_floor = float(noise_m.group())
 
             # Current channel
             r = await ssh.run(f"wl -i {iface} channel 2>/dev/null")
-            if r.ok and r.stdout:
+            if snap.channel is None and r.ok and r.stdout:
                 ch_m = re.search(r"current mac channel\s+(\S+)", r.stdout)
                 if ch_m:
                     snap.channel = ch_m.group(1)
 
             # Per-interface byte counters (for bandwidth metering)
             if iface in iface_bytes:
-                snap.rx_bytes, snap.tx_bytes = iface_bytes[iface]
+                rx_bytes, tx_bytes = iface_bytes[iface]
+                snap.rx_bytes = (snap.rx_bytes or 0) + rx_bytes
+                snap.tx_bytes = (snap.tx_bytes or 0) + tx_bytes
 
         except Exception:
-            log.exception("WiFi probe failed for %s band", band_name)
+            log.exception(
+                "WiFi probe failed for interface=%s band=%s",
+                iface,
+                band_name,
+            )
 
-        results.append(snap)
+    band_order = {"2.4": 0, "5": 1, "6": 2}
+    results.extend(
+        sorted(
+            snapshots_by_band.values(),
+            key=lambda snap: (band_order.get(snap.band, 99), snap.band),
+        )
+    )
 
     # --- Wired LAN (vlan1) byte counters ---
     wired = WiFiSnapshot(timestamp=now, band="wired")
@@ -546,10 +668,10 @@ async def probe_client_traffic(
     Returns a list of dicts:
         {mac, band, rssi, rx_bytes, tx_bytes}
     """
-    results: list[dict] = []
-    bands = [("2.4GHz", "eth1"), ("5GHz", "eth2")]
-
-    for band_name, iface in bands:
+    results_by_mac: dict[str, dict] = {}
+    for iface_info in await _discover_wireless_interfaces(ssh):
+        band_name = iface_info.traffic_band
+        iface = iface_info.iface
         try:
             r = await ssh.run(f"wl -i {iface} assoclist 2>/dev/null")
             macs = re.findall(r"assoclist\s+([0-9A-Fa-f:]+)", r.stdout)
@@ -574,17 +696,36 @@ async def probe_client_traffic(
                         rssi = max(vals)
 
                 if tx_bytes is not None or rx_bytes is not None:
-                    results.append({
+                    candidate = {
                         "mac": mac,
                         "band": band_name,
                         "rssi": rssi,
                         "rx_bytes": rx_bytes or 0,
                         "tx_bytes": tx_bytes or 0,
-                    })
+                    }
+                    mac_key = _normalize_mac(mac)
+                    existing = results_by_mac.get(mac_key)
+                    if existing is None:
+                        results_by_mac[mac_key] = candidate
+                        continue
+                    existing_score = (
+                        1 if existing.get("rssi") is not None else 0,
+                        int(existing.get("rx_bytes") or 0)
+                        + int(existing.get("tx_bytes") or 0),
+                    )
+                    candidate_score = (
+                        1 if rssi is not None else 0,
+                        candidate["rx_bytes"] + candidate["tx_bytes"],
+                    )
+                    if candidate_score > existing_score:
+                        results_by_mac[mac_key] = candidate
         except Exception:
-            log.exception("Client traffic probe failed for %s", band_name)
-
-    return results
+            log.exception(
+                "Client traffic probe failed for interface=%s band=%s",
+                iface,
+                band_name,
+            )
+    return [results_by_mac[key] for key in sorted(results_by_mac)]
 
 
 _NEIGH_ROW_RE = re.compile(

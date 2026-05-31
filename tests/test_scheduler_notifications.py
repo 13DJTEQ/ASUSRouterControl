@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from asusroutercontrol.config import Config
-from asusroutercontrol.models import SpeedTestResult
-from asusroutercontrol.scheduler import MonitorScheduler
+from asusroutercontrol.models import ConnectionType, Device, SpeedTestResult, TrafficSnapshot
+from asusroutercontrol.scheduler import MonitorScheduler, RuntimeProfile
 
 
 class _Store:
@@ -74,6 +74,159 @@ def _patch_speedtest_schedule(
         "asusroutercontrol.scheduler._next_speedtest_time",
         _fake_next_speedtest_time,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "asusroutercontrol.scheduler.get_router_credentials",
+        lambda: (None, None),
+    )
+    scheduler = MonitorScheduler(store=_Store(), cfg=Config())
+    profile = await scheduler._determine_runtime_profile()
+    assert profile.capability == "degraded-no-credentials"
+    assert profile.operation_mode == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_full_with_router_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    class _FakeSSH:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            return None
+
+        async def run(self, _command: str):
+            return SimpleNamespace(ok=True, stdout="1", stderr="", exit_code=0)
+
+    monkeypatch.setattr(
+        "asusroutercontrol.scheduler.get_router_credentials",
+        lambda: ("admin", "secret"),
+    )
+    monkeypatch.setattr("asusroutercontrol.scheduler.RouterSSH", _FakeSSH)
+    scheduler = MonitorScheduler(store=_Store(), cfg=Config())
+    profile = await scheduler._determine_runtime_profile()
+    assert profile.capability == "full"
+    assert profile.operation_mode == "router"
+    assert captured["hostname"] == scheduler._cfg.router_host
+    assert captured["port"] == scheduler._cfg.ssh_port
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_uses_scheduler_cfg_for_ssh_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeSSH:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            return None
+
+        async def run(self, _command: str):
+            return SimpleNamespace(ok=True, stdout="1", stderr="", exit_code=0)
+
+    monkeypatch.setattr(
+        "asusroutercontrol.scheduler.get_router_credentials",
+        lambda: ("admin", "secret"),
+    )
+    monkeypatch.setattr("asusroutercontrol.scheduler.RouterSSH", _FakeSSH)
+
+    cfg = Config(router_host="10.0.0.9", ssh_port=2222)
+    scheduler = MonitorScheduler(store=_Store(), cfg=cfg)
+    profile = await scheduler._determine_runtime_profile()
+
+    assert profile.capability == "full"
+    assert profile.operation_mode == "router"
+    assert captured["hostname"] == "10.0.0.9"
+    assert captured["port"] == 2222
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_degraded_when_ssh_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailSSH:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def connect(self) -> None:
+            raise RuntimeError("ssh down")
+
+        async def disconnect(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "asusroutercontrol.scheduler.get_router_credentials",
+        lambda: ("admin", "secret"),
+    )
+    monkeypatch.setattr("asusroutercontrol.scheduler.RouterSSH", _FailSSH)
+    scheduler = MonitorScheduler(store=_Store(), cfg=Config())
+    profile = await scheduler._determine_runtime_profile()
+    assert profile.capability == "degraded-no-ssh"
+    assert profile.operation_mode == "unknown"
+
+
+def test_select_task_specs_by_runtime_profile() -> None:
+    scheduler = MonitorScheduler(store=_Store(), cfg=Config())
+
+    selected_full, skipped_full = scheduler._select_task_specs(
+        RuntimeProfile(capability="full", operation_mode="router")
+    )
+    assert {spec.name for spec in selected_full} == {
+        "speedtest",
+        "probe",
+        "client-traffic",
+        "poll",
+        "prune",
+        "config",
+        "recommend",
+    }
+    assert skipped_full == []
+
+    selected_ssh_down, skipped_ssh_down = scheduler._select_task_specs(
+        RuntimeProfile(capability="degraded-no-ssh", operation_mode="unknown")
+    )
+    assert {spec.name for spec in selected_ssh_down} == {
+        "poll",
+        "prune",
+        "recommend",
+    }
+    assert {name for name, _reason in skipped_ssh_down} == {
+        "speedtest",
+        "probe",
+        "client-traffic",
+        "config",
+    }
+
+    selected_no_creds, skipped_no_creds = scheduler._select_task_specs(
+        RuntimeProfile(capability="degraded-no-credentials", operation_mode="unknown")
+    )
+    assert {spec.name for spec in selected_no_creds} == {
+        "prune",
+        "recommend",
+    }
+    assert {name for name, _reason in skipped_no_creds} == {
+        "speedtest",
+        "probe",
+        "client-traffic",
+        "poll",
+        "config",
+    }
 
 
 @pytest.mark.asyncio
@@ -214,6 +367,77 @@ async def test_client_traffic_cycle_adds_wired_fallback_rows(
     wired_perf = [row for row, _commit in store.device_perf_rows if row.band == "wired"]
     assert wired_perf
     assert wired_perf[0].mac == "00:3E:E1:C9:2C:0B"
+
+@pytest.mark.asyncio
+async def test_poll_cycle_records_presence_rows_for_online_clients() -> None:
+    class _PollPresenceStore:
+        def __init__(self) -> None:
+            self.upserted_devices = []
+            self.device_perf_rows = []
+            self.traffic_rows = []
+            self.commits = 0
+
+        async def upsert_device(self, dev, *, commit: bool = True) -> bool:
+            self.upserted_devices.append((dev, commit))
+            return False
+
+        async def insert_device_perf(self, row, *, commit: bool = True) -> None:
+            self.device_perf_rows.append((row, commit))
+
+        async def insert_traffic(self, row, *, commit: bool = True) -> None:
+            self.traffic_rows.append((row, commit))
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class _Backend:
+        async def connect(self) -> None:
+            return None
+
+        async def get_connected_devices(self) -> list[Device]:
+            return [
+                Device(
+                    mac="00:11:22:33:44:55",
+                    hostname="wired-client",
+                    connection=ConnectionType.WIRED,
+                    is_online=True,
+                ),
+                Device(
+                    mac="AA:BB:CC:DD:EE:01",
+                    hostname="wifi-client",
+                    connection=ConnectionType.WIFI_5G,
+                    band="5GHz",
+                    rssi=-48,
+                    is_online=True,
+                ),
+                Device(
+                    mac="AA:BB:CC:DD:EE:02",
+                    hostname="offline-client",
+                    connection=ConnectionType.WIFI_2G,
+                    band="2.4GHz",
+                    is_online=False,
+                ),
+            ]
+
+        async def get_traffic_stats(self) -> TrafficSnapshot:
+            return TrafficSnapshot(rx_rate_bps=10_000, tx_rate_bps=5_000)
+
+    store = _PollPresenceStore()
+    scheduler = MonitorScheduler(store=store, cfg=Config())
+    await scheduler._run_poll_cycle(_Backend())
+
+    assert len(store.upserted_devices) == 3
+    assert len(store.device_perf_rows) == 2
+    by_mac = {row.mac: row for row, _commit in store.device_perf_rows}
+    assert by_mac["00:11:22:33:44:55"].band == "wired"
+    assert by_mac["AA:BB:CC:DD:EE:01"].band == "5GHz"
+    for row in by_mac.values():
+        assert row.tx_rate_mbps is None
+        assert row.rx_rate_mbps is None
+        assert row.rssi is None
+        assert row.load_pct == 0.0
+    assert store.traffic_rows
+    assert store.commits == 1
 
 
 @pytest.mark.asyncio

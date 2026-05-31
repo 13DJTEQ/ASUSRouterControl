@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 BAND_LINK_RATES: dict[str, float] = {
     "2.4GHz": 150.0,
     "5GHz": 600.0,
+    "6GHz": 1200.0,
     "wired": 1000.0,
 }
 DEFAULT_LINK_RATE = 150.0
