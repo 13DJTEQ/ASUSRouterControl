@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import perf_counter
+from typing import Literal
 
 from asusroutercontrol._time import utcnow
 from asusroutercontrol.config import Config, load_config
+from asusroutercontrol.credentials import get_router_credentials
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import SpeedTestResult
 from asusroutercontrol.probes import (
@@ -74,6 +77,34 @@ def _backoff_seconds(consecutive_failures: int) -> float:
     idx = min(consecutive_failures - MAX_CONSECUTIVE_FAILURES, len(BACKOFF_SCHEDULE) - 1)
     return BACKOFF_SCHEDULE[idx]
 
+RuntimeCapability = Literal[
+    "full",
+    "degraded-no-credentials",
+    "degraded-no-ssh",
+]
+OperationMode = Literal[
+    "router",
+    "access_point",
+    "media_bridge",
+    "repeater",
+    "unknown",
+]
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    capability: RuntimeCapability
+    operation_mode: OperationMode
+
+
+@dataclass(frozen=True)
+class _TaskSpec:
+    name: str
+    runner: Callable[[], Awaitable[None]]
+    requires_credentials: bool = False
+    requires_ssh: bool = False
+    router_mode_only: bool = False
+
 
 class MonitorScheduler:
     """Runs concurrent task loops: speed tests, probes, and device polls."""
@@ -97,10 +128,21 @@ class MonitorScheduler:
         self._perf_log_every = 12
         # Per-loop consecutive failure counters
         self._failures: dict[str, int] = {}
+        self._runtime_profile: RuntimeProfile | None = None
 
     async def run(self) -> None:
         """Start all task loops as cancellable Tasks."""
         self._running = True
+        profile = await self._determine_runtime_profile()
+        self._runtime_profile = profile
+        log.info(
+            "Scheduler preflight: capability=%s operation_mode=%s",
+            profile.capability,
+            profile.operation_mode,
+        )
+        selected, skipped = self._select_task_specs(profile)
+        for loop_name, reason in skipped:
+            log.info("Scheduler preflight skipped %s loop: %s", loop_name, reason)
         log.info(
             "Scheduler started — speed tests at %s, probes every %ds, "
             "client traffic every %ds, polls every %ds",
@@ -110,13 +152,8 @@ class MonitorScheduler:
             self._cfg.poll_interval,
         )
         self._tasks = [
-            asyncio.create_task(self._speedtest_loop(), name="speedtest"),
-            asyncio.create_task(self._probe_loop(), name="probe"),
-            asyncio.create_task(self._client_traffic_loop(), name="client-traffic"),
-            asyncio.create_task(self._poll_loop(), name="poll"),
-            asyncio.create_task(self._prune_loop(), name="prune"),
-            asyncio.create_task(self._config_snapshot_loop(), name="config"),
-            asyncio.create_task(self._recommendation_loop(), name="recommend"),
+            asyncio.create_task(spec.runner(), name=spec.name)
+            for spec in selected
         ]
         try:
             await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -132,6 +169,109 @@ class MonitorScheduler:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+
+    @property
+    def runtime_profile(self) -> RuntimeProfile | None:
+        return self._runtime_profile
+
+    async def _determine_runtime_profile(self) -> RuntimeProfile:
+        username, password = get_router_credentials()
+        if not username or not password:
+            return RuntimeProfile(
+                capability="degraded-no-credentials",
+                operation_mode="unknown",
+            )
+        ssh_ready, op_mode = await self._probe_ssh_capabilities(
+            username=username,
+            password=password,
+        )
+        return RuntimeProfile(
+            capability="full" if ssh_ready else "degraded-no-ssh",
+            operation_mode=op_mode,
+        )
+
+    async def _probe_ssh_capabilities(
+        self,
+        *,
+        username: str,
+        password: str,
+    ) -> tuple[bool, OperationMode]:
+        ssh = RouterSSH(
+            hostname=self._cfg.router_host,
+            port=self._cfg.ssh_port,
+            username=username,
+            password=password,
+            connect_timeout=10.0,
+        )
+        try:
+            await ssh.connect()
+            mode = await self._detect_operation_mode(ssh)
+            return True, mode
+        except Exception:
+            log.warning("Preflight SSH check failed; continuing in degraded-no-ssh mode")
+            return False, "unknown"
+        finally:
+            try:
+                await ssh.disconnect()
+            except Exception:
+                pass
+
+    async def _detect_operation_mode(self, ssh: RouterSSH) -> OperationMode:
+        try:
+            result = await ssh.run("nvram get sw_mode 2>/dev/null")
+        except Exception:
+            return "unknown"
+        if not result.ok:
+            return "unknown"
+        mode_raw = (result.stdout or "").strip()
+        mapping: dict[str, OperationMode] = {
+            "1": "router",
+            "2": "repeater",
+            "3": "access_point",
+            "4": "media_bridge",
+        }
+        return mapping.get(mode_raw, "unknown")
+
+    def _task_specs(self) -> list[_TaskSpec]:
+        return [
+            _TaskSpec(
+                name="speedtest",
+                runner=self._speedtest_loop,
+                router_mode_only=True,
+            ),
+            _TaskSpec(name="probe", runner=self._probe_loop, requires_ssh=True),
+            _TaskSpec(
+                name="client-traffic",
+                runner=self._client_traffic_loop,
+                requires_ssh=True,
+            ),
+            _TaskSpec(name="poll", runner=self._poll_loop, requires_credentials=True),
+            _TaskSpec(name="prune", runner=self._prune_loop),
+            _TaskSpec(name="config", runner=self._config_snapshot_loop, requires_ssh=True),
+            _TaskSpec(name="recommend", runner=self._recommendation_loop),
+        ]
+
+    def _select_task_specs(
+        self,
+        profile: RuntimeProfile,
+    ) -> tuple[list[_TaskSpec], list[tuple[str, str]]]:
+        selected: list[_TaskSpec] = []
+        skipped: list[tuple[str, str]] = []
+        for spec in self._task_specs():
+            if (
+                spec.requires_credentials
+                and profile.capability == "degraded-no-credentials"
+            ):
+                skipped.append((spec.name, "credentials unavailable"))
+                continue
+            if spec.requires_ssh and profile.capability != "full":
+                skipped.append((spec.name, "ssh unavailable"))
+                continue
+            if spec.router_mode_only and profile.operation_mode != "router":
+                skipped.append((spec.name, f"operation_mode={profile.operation_mode}"))
+                continue
+            selected.append(spec)
+        return selected, skipped
 
     def _record_perf_sample(
         self,
@@ -521,35 +661,48 @@ class MonitorScheduler:
         await backend.connect()
         devices = await backend.get_connected_devices()
         now = utcnow()
+        online_count = 0
+        wired_count = 0
+        presence_rows = 0
         for dev in devices:
             await self._store.upsert_device(dev, commit=False)
-            # Record a presence snapshot for wired clients in device_perf_history
-            # so they appear in the LAN Clients submenu.  WiFi per-client throughput
-            # is handled by the client_traffic_loop via wl sta_info byte-counter
-            # deltas; the router API only returns link speed (not throughput) for
-            # wired ports, so we store None rates (displayed as "idle").
-            if dev.is_online and dev.connection == ConnectionType.WIRED:
-                cl = ClientLoad(
-                    timestamp=now,
-                    mac=dev.mac,
-                    hostname=dev.hostname,
-                    band="wired",
-                    rssi=None,
-                    tx_rate_mbps=None,
-                    rx_rate_mbps=None,
-                    load_pct=0.0,
-                    health="🟢",
-                )
-                await self._store.insert_device_perf(cl, commit=False)
+            if not dev.is_online:
+                continue
+            online_count += 1
+            if dev.connection == ConnectionType.WIRED:
+                wired_count += 1
+                presence_band = "wired"
+            elif dev.band:
+                presence_band = dev.band
+            elif dev.connection != ConnectionType.UNKNOWN:
+                presence_band = dev.connection.value
+            else:
+                presence_band = None
+            # Poll loop is presence-only. Throughput telemetry belongs to the
+            # client_traffic_loop, so keep rates and RSSI empty here.
+            cl = ClientLoad(
+                timestamp=now,
+                mac=dev.mac,
+                hostname=dev.hostname,
+                band=presence_band,
+                rssi=None,
+                tx_rate_mbps=None,
+                rx_rate_mbps=None,
+                load_pct=0.0,
+                health="🟢",
+            )
+            await self._store.insert_device_perf(cl, commit=False)
+            presence_rows += 1
         traffic = await backend.get_traffic_stats()
         await self._store.insert_traffic(traffic, commit=False)
         await self._store.commit()
-        wired_count = sum(
-            1 for d in devices if d.is_online and d.connection == ConnectionType.WIRED
-        )
         log.info(
-            "Poll: %d devices (%d wired), RX=%.0f bps",
-            len(devices), wired_count, traffic.rx_rate_bps or 0,
+            "Poll: %d devices (%d online, %d wired), presence_rows=%d RX=%.0f bps",
+            len(devices),
+            online_count,
+            wired_count,
+            presence_rows,
+            traffic.rx_rate_bps or 0,
         )
 
     # --- Daily Data Pruning ---
