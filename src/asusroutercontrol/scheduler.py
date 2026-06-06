@@ -12,7 +12,7 @@ from time import perf_counter
 from typing import Literal
 
 from asusroutercontrol._time import utcnow
-from asusroutercontrol.config import Config, load_config
+from asusroutercontrol.config import Config, ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import get_router_credentials
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import SpeedTestResult
@@ -117,6 +117,7 @@ class MonitorScheduler:
     ) -> None:
         self._store = store
         self._cfg = cfg or load_config()
+        ensure_runtime_data_dir_isolation(self._cfg, runtime_env=self._cfg.runtime_env)
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self.on_speedtest_complete = on_speedtest_complete

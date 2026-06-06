@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,10 +11,14 @@ from dotenv import load_dotenv
 
 _DEFAULT_SPEEDTEST_TIMES = tuple(range(24))
 _DEFAULT_CDN_TARGETS = ("cachefly", "cloudfront", "fastly")
+_RUNTIME_ENV_VAR = "ASUSROUTERCONTROL_RUNTIME_ENV"
+_PROD_RUNTIME_ENV = "prod"
+_RUNTIME_ENV_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
 class Config:
+    runtime_env: str = _PROD_RUNTIME_ENV
     router_backend: str = "merlin"  # merlin | freshtomato
     router_host: str = "router.asus.com"
     router_port: int = 80
@@ -40,6 +45,42 @@ class Config:
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+
+def normalize_runtime_environment(environment: str | None) -> str:
+    env = (environment or _PROD_RUNTIME_ENV).strip().lower()
+    if env == "production":
+        env = _PROD_RUNTIME_ENV
+    if not env:
+        env = _PROD_RUNTIME_ENV
+    if not _RUNTIME_ENV_PATTERN.fullmatch(env):
+        raise ValueError("Runtime environment must match [a-z0-9][a-z0-9._-]*")
+    return env
+
+
+def production_data_dir() -> Path:
+    return (Path.home() / ".asusroutercontrol").expanduser()
+
+
+def default_data_dir_for_runtime(environment: str) -> Path:
+    env = normalize_runtime_environment(environment)
+    if env == _PROD_RUNTIME_ENV:
+        return production_data_dir()
+    return (Path.home() / f".asusroutercontrol.{env}").expanduser()
+
+
+def ensure_runtime_data_dir_isolation(
+    cfg: Config,
+    *,
+    runtime_env: str | None = None,
+) -> None:
+    env = normalize_runtime_environment(runtime_env or cfg.runtime_env)
+    data_dir = cfg.data_dir.expanduser()
+    if env != _PROD_RUNTIME_ENV and data_dir.resolve() == production_data_dir().resolve():
+        raise ValueError(
+            f"Runtime environment '{env}' cannot use production DATA_DIR "
+            f"({production_data_dir()}). Set DATA_DIR to an environment-scoped path."
+        )
 
 
 def _parse_int_tuple(val: str, default: tuple[int, ...]) -> tuple[int, ...]:
@@ -70,7 +111,10 @@ def _resolve_env_file(explicit_env_file: str | Path | None) -> Path | None:
     return Path(candidate).expanduser()
 
 
-def load_config(env_file: str | Path | None = None) -> Config:
+def load_config(
+    env_file: str | Path | None = None,
+    runtime_env: str | None = None,
+) -> Config:
     dotenv_path = _resolve_env_file(env_file)
     if dotenv_path is None:
         load_dotenv()
@@ -79,8 +123,13 @@ def load_config(env_file: str | Path | None = None) -> Config:
             raise FileNotFoundError(f"Config env file not found: {dotenv_path}")
         load_dotenv(dotenv_path=str(dotenv_path))
     load_dotenv()
-    data_dir = Path(os.environ.get("DATA_DIR", "~/.asusroutercontrol")).expanduser()
-    return Config(
+    resolved_runtime_env = normalize_runtime_environment(
+        runtime_env or os.environ.get(_RUNTIME_ENV_VAR)
+    )
+    default_data_dir = default_data_dir_for_runtime(resolved_runtime_env)
+    data_dir = Path(os.environ.get("DATA_DIR", str(default_data_dir))).expanduser()
+    cfg = Config(
+        runtime_env=resolved_runtime_env,
         router_backend=os.environ.get("ROUTER_BACKEND", "merlin").strip().lower(),
         router_host=os.environ.get("ROUTER_HOST", "router.asus.com"),
         router_port=int(os.environ.get("ROUTER_PORT", "80")),
@@ -117,3 +166,5 @@ def load_config(env_file: str | Path | None = None) -> Config:
             "NOTIFY_ON_SPEEDTEST", "true"
         ).lower() in ("true", "1", "yes"),
     )
+    ensure_runtime_data_dir_isolation(cfg, runtime_env=resolved_runtime_env)
+    return cfg
