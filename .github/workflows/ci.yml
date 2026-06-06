@@ -2,10 +2,30 @@ name: CI
 
 on:
   push:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "scripts/validate.sh"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "scripts/validate.sh"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
 
 jobs:
-  validate:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -14,12 +34,78 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint
+        run: python3 -m ruff check src tests
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run validation
+      - name: Unit tests
+        run: python3 -m pytest
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install build
+
+      - name: Build package artifacts
+        run: python3 -m build
+
+      - name: Install wheel and run smoke checks
+        run: |
+          pip install dist/*.whl
+          python3 -m asusroutercontrol.cli --help
+
+  validate:
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - test
+      - package-smoke
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Canonical full validation
         run: bash scripts/validate.sh
