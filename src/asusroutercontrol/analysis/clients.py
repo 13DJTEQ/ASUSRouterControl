@@ -88,22 +88,50 @@ def _row_rank(row: dict) -> tuple[int, float, str]:
         str(row.get("timestamp") or ""),
     )
 
+def _band_bucket(band: str | None) -> str:
+    """Normalise a band string to '2.4', '5', '6', 'wired', or 'other'.
+
+    Matching is case-insensitive and strips surrounding whitespace so
+    values like ``' 5ghz '`` or ``'WIRED'`` are handled safely.
+    """
+    if band is None:
+        return "other"
+    key = band.strip().lower()
+    if key in ("2.4ghz", "2.4"):
+        return "2.4"
+    if key in ("5ghz", "5"):
+        return "5"
+    if key in ("6ghz", "6"):
+        return "6"
+    if key == "wired":
+        return "wired"
+    return "other"
+
+
 def _is_wired_band(value: object) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() == "wired"
 
 
-def format_client_load_display(load_pct: float | int | None) -> str:
-    """Format client load for menu display with explicit idle semantics."""
+def format_client_load_display(
+    load_pct: float | int | None,
+    has_signal: bool = True,
+) -> str:
+    """Format client load for menu display with explicit idle semantics.
+
+    When *has_signal* is ``False`` the client is presence-only (associated but
+    no measured tx/rx/RSSI).  We display ``"—"`` instead of ``"idle"`` so
+    operators can distinguish "no data" from "genuinely idle".
+    """
     if load_pct is None:
-        return "n/a"
+        return "—" if not has_signal else "n/a"
     try:
         value = float(load_pct)
     except (TypeError, ValueError):
-        return "n/a"
+        return "—" if not has_signal else "n/a"
     if value <= 0:
-        return "idle"
+        return "—" if not has_signal else "idle"
     if value < 10:
         return f"{value:.1f}%"
     return f"{value:.0f}%"

@@ -41,7 +41,7 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
-from asusroutercontrol.analysis.clients import format_client_load_display
+from asusroutercontrol.analysis.clients import _band_bucket, format_client_load_display
 from asusroutercontrol.config import load_config
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
@@ -168,17 +168,6 @@ def _connection_status(
         _elevate("🟡")
 
     return worst
-
-
-def _band_bucket(band: str | None) -> str:
-    """Normalise a band string to '2.4', '5', 'wired', or 'other'."""
-    if band in ("2.4GHz", "2.4"):
-        return "2.4"
-    if band in ("5GHz", "5"):
-        return "5"
-    if band == "wired":
-        return "wired"
-    return "other"
 
 
 def _launchd_service_loaded(label: str) -> bool:
@@ -417,6 +406,13 @@ class AppDelegate(NSObject):
         self._mi_clients_wifi5.setSubmenu_(self._clients_wifi5_submenu)
         self._mi_clients_wifi5.setEnabled_(True)
 
+        # WiFi 6GHz Clients submenu
+        self._mi_clients_wifi6 = _add_info(menu, "📶 WiFi 6GHz Clients")
+        self._clients_wifi6_submenu = NSMenu.new()
+        self._clients_wifi6_submenu.setAutoenablesItems_(False)
+        self._mi_clients_wifi6.setSubmenu_(self._clients_wifi6_submenu)
+        self._mi_clients_wifi6.setEnabled_(True)
+
         # LAN Wired Clients submenu
         self._mi_clients_lan = _add_info(menu, "🔌 LAN Clients")
         self._clients_lan_submenu = NSMenu.new()
@@ -450,6 +446,8 @@ class AppDelegate(NSObject):
         client_trends: dict,
     ) -> list[str]:
         """Fill a client submenu; return list of saturated client names."""
+        from asusroutercontrol.analysis.clients import _row_has_signal
+
         submenu.removeAllItems()
         saturated: list[str] = []
         if not clients:
@@ -463,6 +461,7 @@ class AppDelegate(NSObject):
             raw_load = cl.get("load_pct")
             load = float(raw_load) if raw_load is not None else 0.0
             rssi = cl.get("rssi")
+            sig = _row_has_signal(cl)
             health = "🟢"
             if rssi is not None and rssi < -75:
                 health = "🔴"
@@ -470,6 +469,8 @@ class AppDelegate(NSObject):
                 health = "🔴"
             elif load >= 50:
                 health = "🟡"
+            elif not sig:
+                health = "⚪"  # presence-only — no measured data
             tx_s = f"{tx:.0f}" if tx else "—"
             rx_s = f"{rx:.0f}" if rx else "—"
             trend_avg = client_trends.get(mac)
@@ -479,7 +480,7 @@ class AppDelegate(NSObject):
             else:
                 trend = ""
             trend_s = f" {trend}" if trend else ""
-            load_s = format_client_load_display(raw_load)
+            load_s = format_client_load_display(raw_load, has_signal=sig)
             rssi_s = f"  {rssi} dBm" if rssi is not None else ""
             title = f"{health} {name}  ↓{rx_s} ↑{tx_s} Mbps  ({load_s}{trend_s}){rssi_s}"
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -682,8 +683,11 @@ class AppDelegate(NSObject):
             try:
                 from asusroutercontrol.analysis.clients import get_client_load_summary
                 result["client_loads"] = await get_client_load_summary(store)
-            except Exception:
+                result["client_loads_error"] = None
+            except Exception as exc:
+                log.warning("Client load summary failed: %s", exc, exc_info=True)
                 result["client_loads"] = []
+                result["client_loads_error"] = str(exc) or "unknown error"
 
             # Per-client load trends (1h avg from device_perf_history)
             try:
@@ -918,29 +922,53 @@ class AppDelegate(NSObject):
         client_loads = data.get("client_loads", [])
         client_trends = data.get("client_trends", {})
 
-        wifi24 = [c for c in client_loads if _band_bucket(c.get("band")) == "2.4"]
-        wifi5  = [c for c in client_loads if _band_bucket(c.get("band")) == "5"]
-        lan    = [c for c in client_loads if _band_bucket(c.get("band")) == "wired"]
+        # Surface diagnostic state when client data is unavailable
+        cl_err = data.get("client_loads_error")
+        saturated: list[str] = []
+        if cl_err:
+            for sub in (
+                self._clients_wifi24_submenu,
+                self._clients_wifi5_submenu,
+                self._clients_wifi6_submenu,
+                self._clients_lan_submenu,
+            ):
+                sub.removeAllItems()
+                _add_info(sub, f"⚠️ {cl_err[:80]}")
+            self._mi_clients_wifi24.setTitle_("📶 WiFi 2.4GHz ⚠️")
+            self._mi_clients_wifi5.setTitle_("📶 WiFi 5GHz ⚠️")
+            self._mi_clients_wifi6.setTitle_("📶 WiFi 6GHz ⚠️")
+            self._mi_clients_lan.setTitle_("🔌 LAN ⚠️")
+        else:
+            wifi24 = [c for c in client_loads if _band_bucket(c.get("band")) == "2.4"]
+            wifi5  = [c for c in client_loads if _band_bucket(c.get("band")) == "5"]
+            wifi6  = [c for c in client_loads if _band_bucket(c.get("band")) == "6"]
+            lan    = [c for c in client_loads if _band_bucket(c.get("band")) == "wired"]
 
-        saturated = self._populate_client_submenu(
-            self._clients_wifi24_submenu, wifi24, client_trends
-        )
-        saturated += self._populate_client_submenu(
-            self._clients_wifi5_submenu, wifi5, client_trends
-        )
-        saturated += self._populate_client_submenu(
-            self._clients_lan_submenu, lan, client_trends
-        )
+            saturated.extend(self._populate_client_submenu(
+                self._clients_wifi24_submenu, wifi24, client_trends
+            ))
+            saturated.extend(self._populate_client_submenu(
+                self._clients_wifi5_submenu, wifi5, client_trends
+            ))
+            saturated.extend(self._populate_client_submenu(
+                self._clients_wifi6_submenu, wifi6, client_trends
+            ))
+            saturated.extend(self._populate_client_submenu(
+                self._clients_lan_submenu, lan, client_trends
+            ))
 
-        self._mi_clients_wifi24.setTitle_(
-            f"📶 WiFi 2.4GHz ({len(wifi24)})" if wifi24 else "📶 WiFi 2.4GHz Clients"
-        )
-        self._mi_clients_wifi5.setTitle_(
-            f"📶 WiFi 5GHz ({len(wifi5)})" if wifi5 else "📶 WiFi 5GHz Clients"
-        )
-        self._mi_clients_lan.setTitle_(
-            f"🔌 LAN ({len(lan)})" if lan else "🔌 LAN Clients"
-        )
+            self._mi_clients_wifi24.setTitle_(
+                f"📶 WiFi 2.4GHz ({len(wifi24)})" if wifi24 else "📶 WiFi 2.4GHz Clients"
+            )
+            self._mi_clients_wifi5.setTitle_(
+                f"📶 WiFi 5GHz ({len(wifi5)})" if wifi5 else "📶 WiFi 5GHz Clients"
+            )
+            self._mi_clients_wifi6.setTitle_(
+                f"📶 WiFi 6GHz ({len(wifi6)})" if wifi6 else "📶 WiFi 6GHz Clients"
+            )
+            self._mi_clients_lan.setTitle_(
+                f"🔌 LAN ({len(lan)})" if lan else "🔌 LAN Clients"
+            )
 
         # Saturation notification (cooldown: max once per 10 min)
         if saturated:
