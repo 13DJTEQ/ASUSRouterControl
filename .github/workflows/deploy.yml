@@ -1,0 +1,230 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Immutable release identifier (for example: 20260606.1 or git SHA)"
+        required: true
+        type: string
+      artifact_ref:
+        description: "Artifact path/URI to install for this release"
+        required: true
+        type: string
+      deploy_root:
+        description: "Runner-local deployment root path"
+        required: false
+        default: "~/.asusroutercontrol/deployments"
+        type: string
+      db_path:
+        description: "Runner-local SQLite DB path for snapshot/restore hooks"
+        required: false
+        default: "~/.asusroutercontrol/router.db"
+        type: string
+      service_name:
+        description: "Optional launchd service label to restart/check"
+        required: false
+        default: ""
+        type: string
+      dev_env_file:
+        description: "Optional absolute path to dev env file on runner"
+        required: false
+        default: ""
+        type: string
+      prod_env_file:
+        description: "Optional absolute path to prod env file on runner"
+        required: false
+        default: ""
+        type: string
+      dev_health_command:
+        description: "Optional dev health command"
+        required: false
+        default: ""
+        type: string
+      prod_health_command:
+        description: "Optional prod health command"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Run deployment scripts in dry-run mode"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy_dev:
+    name: Deploy to dev
+    runs-on: [self-hosted, macOS]
+    environment: dev
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Make deploy scripts executable
+        run: chmod +x scripts/deploy/*.sh
+
+      - name: Install immutable release artifact
+        run: |
+          cmd=(
+            bash scripts/deploy/install_release.sh
+            --release-id "${{ inputs.release_id }}"
+            --artifact "${{ inputs.artifact_ref }}"
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Pre-deploy DB snapshot (dev)
+        id: dev_backup
+        run: |
+          cmd=(
+            bash scripts/deploy/db_backup.sh
+            --env dev
+            --release-id "${{ inputs.release_id }}"
+            --db-path "${{ inputs.db_path }}"
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Activate release in dev
+        run: |
+          cmd=(
+            bash scripts/deploy/activate_env.sh
+            --env dev
+            --release-id "${{ inputs.release_id }}"
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ -n "${{ inputs.service_name }}" ]]; then
+            cmd+=(--service "${{ inputs.service_name }}")
+          fi
+          if [[ -n "${{ inputs.dev_env_file }}" ]]; then
+            cmd+=(--env-file "${{ inputs.dev_env_file }}")
+          fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Post-deploy health check (dev)
+        run: |
+          cmd=(
+            bash scripts/deploy/health_check.sh
+            --env dev
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ -n "${{ inputs.service_name }}" ]]; then
+            cmd+=(--service "${{ inputs.service_name }}")
+          fi
+          if [[ -n "${{ inputs.dev_env_file }}" ]]; then
+            cmd+=(--env-file "${{ inputs.dev_env_file }}")
+          fi
+          if [[ -n "${{ inputs.dev_health_command }}" ]]; then
+            cmd+=(--health-command "${{ inputs.dev_health_command }}")
+          fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+  deploy_prod:
+    name: Promote validated release to prod
+    needs: [deploy_dev]
+    runs-on: [self-hosted, macOS]
+    environment: prod
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Make deploy scripts executable
+        run: chmod +x scripts/deploy/*.sh
+
+      - name: Pre-deploy DB snapshot (prod)
+        id: prod_backup
+        run: |
+          cmd=(
+            bash scripts/deploy/db_backup.sh
+            --env prod
+            --release-id "${{ inputs.release_id }}"
+            --db-path "${{ inputs.db_path }}"
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Promote immutable release dev -> prod
+        run: |
+          cmd=(
+            bash scripts/deploy/promote_release.sh
+            --source-env dev
+            --target-env prod
+            --release-id "${{ inputs.release_id }}"
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ -n "${{ inputs.service_name }}" ]]; then
+            cmd+=(--service "${{ inputs.service_name }}")
+          fi
+          if [[ -n "${{ inputs.prod_env_file }}" ]]; then
+            cmd+=(--target-env-file "${{ inputs.prod_env_file }}")
+          fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Post-deploy health check (prod)
+        id: prod_health
+        run: |
+          cmd=(
+            bash scripts/deploy/health_check.sh
+            --env prod
+            --deploy-root "${{ inputs.deploy_root }}"
+          )
+          if [[ -n "${{ inputs.service_name }}" ]]; then
+            cmd+=(--service "${{ inputs.service_name }}")
+          fi
+          if [[ -n "${{ inputs.prod_env_file }}" ]]; then
+            cmd+=(--env-file "${{ inputs.prod_env_file }}")
+          fi
+          if [[ -n "${{ inputs.prod_health_command }}" ]]; then
+            cmd+=(--health-command "${{ inputs.prod_health_command }}")
+          fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"
+
+      - name: Roll back prod on failed health check
+        if: failure() && steps.prod_health.outcome == 'failure'
+        run: |
+          cmd=(
+            bash scripts/deploy/rollback.sh
+            --env prod
+            --deploy-root "${{ inputs.deploy_root }}"
+            --db-path "${{ inputs.db_path }}"
+            --backup-file "${{ steps.prod_backup.outputs.backup_file }}"
+          )
+          if [[ -n "${{ inputs.service_name }}" ]]; then
+            cmd+=(--service "${{ inputs.service_name }}")
+          fi
+          if [[ -n "${{ inputs.prod_env_file }}" ]]; then
+            cmd+=(--env-file "${{ inputs.prod_env_file }}")
+          fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            cmd+=(--dry-run)
+          fi
+          "${cmd[@]}"

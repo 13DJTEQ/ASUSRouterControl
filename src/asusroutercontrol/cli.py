@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from asusroutercontrol.config import load_config
+from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
     delete_legacy_credentials,
     get_router_credentials,
@@ -2040,6 +2040,13 @@ def _validate_env_file(env_file: Path | None) -> Path | None:
     return env_file
 
 
+def _guard_runtime_data_dir(cfg, *, runtime_env: str, context: str) -> None:
+    try:
+        ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
+    except ValueError as exc:
+        raise click.ClickException(f"{context}: {exc}") from exc
+
+
 @cli.group()
 def menubar():
     """Manage the AsusRouterMonitor menubar applet."""
@@ -2080,7 +2087,12 @@ def menubar_install(deploy_environment: str, env_file: Path | None):
     deploy_environment = _normalize_service_environment(deploy_environment)
     env_file = _validate_env_file(env_file)
 
-    cfg = load_config(env_file=env_file)
+    cfg = load_config(env_file=env_file, runtime_env=deploy_environment)
+    _guard_runtime_data_dir(
+        cfg,
+        runtime_env=deploy_environment,
+        context="Refusing to install menubar service",
+    )
     cfg.ensure_dirs()
 
     base_label = "com.asusroutermonitor"
@@ -2344,6 +2356,7 @@ def menubar_doctor(deploy_environment: str, env_file: Path | None, fix: bool):
     # 4. Can import objc?
     if python_bin.exists():
         import_env = dict(os.environ)
+        import_env["ASUSROUTERCONTROL_RUNTIME_ENV"] = deploy_environment
         if env_file is not None:
             import_env["ASUSROUTERCONTROL_ENV_FILE"] = str(env_file)
         import_check = subprocess.run(
@@ -2361,7 +2374,12 @@ def menubar_doctor(deploy_environment: str, env_file: Path | None, fix: bool):
             issues += 1
 
     # 5. Check stderr log for recent crash patterns
-    cfg = load_config(env_file=env_file)
+    cfg = load_config(env_file=env_file, runtime_env=deploy_environment)
+    _guard_runtime_data_dir(
+        cfg,
+        runtime_env=deploy_environment,
+        context="Runtime isolation check failed",
+    )
     err_log = cfg.data_dir / "menubar.err.log"
     if err_log.exists():
         tail = err_log.read_text()[-2000:]

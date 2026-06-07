@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from asusroutercontrol.config import Config, load_config
+from asusroutercontrol.config import (
+    Config,
+    default_data_dir_for_runtime,
+    load_config,
+    production_data_dir,
+)
 
 
 class TestConfigDefaults:
@@ -41,6 +46,32 @@ class TestConfigDefaults:
 
 
 class TestConfigFromEnv:
+    def test_runtime_env_defaults_to_prod(self, env_clean):
+        cfg = load_config()
+        assert cfg.runtime_env == "prod"
+
+    def test_runtime_env_from_env_var(self, env_clean, monkeypatch):
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        cfg = load_config()
+        assert cfg.runtime_env == "dev"
+        assert cfg.data_dir == default_data_dir_for_runtime("dev")
+
+    def test_runtime_env_production_alias_normalizes_to_prod(self, env_clean, monkeypatch):
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "production")
+        cfg = load_config()
+        assert cfg.runtime_env == "prod"
+        assert cfg.data_dir == production_data_dir()
+
+    def test_runtime_env_invalid_raises(self, env_clean, monkeypatch):
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "bad env!")
+        with pytest.raises(ValueError, match="Runtime environment must match"):
+            load_config()
+
+    def test_non_prod_runtime_rejects_prod_data_dir(self, env_clean, monkeypatch):
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setenv("DATA_DIR", str(production_data_dir()))
+        with pytest.raises(ValueError, match="cannot use production DATA_DIR"):
+            load_config()
     def test_router_backend_env(self, env_clean, monkeypatch):
         monkeypatch.setenv("ROUTER_BACKEND", "freshtomato")
         cfg = load_config()

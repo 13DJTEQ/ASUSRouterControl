@@ -25,24 +25,28 @@ If required dev tools are missing, it exits with an actionable install command.
 ## CI/CD pipeline
 
 ### CI (`.github/workflows/ci.yml`)
-- Triggers on `pull_request` and `push` for `develop` and `master`.
-- Runs canonical validation (`bash scripts/validate.sh`).
-- Builds and uploads immutable package artifacts (`sdist` + wheel).
-- Runs a macOS smoke job that imports the menubar runtime.
+- Triggers on `push`, `pull_request`, and manual `workflow_dispatch` when workflow/source paths change.
+- Runs staged jobs: `lint`, `test`, and `package-smoke` in parallel.
+- Runs canonical validation (`bash scripts/validate.sh`) only after all staged jobs pass.
+- Uses concurrency cancellation (`ci-${workflow}-${ref}`) to avoid stale duplicate runs.
 
 ### CD (`.github/workflows/deploy.yml`)
 - Manual `workflow_dispatch` deployment that promotes a single built artifact from `dev` to `prod`.
 - `deploy_dev` installs and validates the release in a dev-scoped launchd service.
 - `deploy_prod` is environment-gated and promotes the exact validated release to prod.
 - Includes rollback hook (`scripts/deploy/rollback.sh`) if prod health checks fail.
+- Defaults to `dry_run: true` and requires explicit opt-out for live promotion.
 
 ### Required GitHub/release setup
-- Create `develop` and protect both `develop` and `master` with required CI checks.
+- Protect the production branch (currently `master`) with required CI checks.
 - Configure GitHub Environments:
   - `dev` (optional reviewer gate)
   - `prod` (required reviewers for approval gate)
 - Register a self-hosted macOS runner with labels `[self-hosted, macOS]` for deployment jobs.
 - Provide absolute runner-local paths for dev/prod env files when triggering `Deploy`.
+- Use immutable `release_id` + `artifact_ref` values for promotion; do not rebuild between `dev` and `prod`.
+
+See `docs/runbooks/cicd-operations.md` for an end-to-end promotion and rollback procedure.
 
 ### Local deployment helpers
 ```bash

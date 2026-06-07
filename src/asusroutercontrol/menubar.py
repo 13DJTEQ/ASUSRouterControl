@@ -42,7 +42,7 @@ from AppKit import (
 from PyObjCTools import AppHelper
 
 from asusroutercontrol.analysis.clients import format_client_load_display
-from asusroutercontrol.config import load_config
+from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -258,8 +258,9 @@ class AppDelegate(NSObject):
 
     def applicationDidFinishLaunching_(self, notification):
         log.info("AsusRouterMonitor starting")
-
-        self._cfg = load_config()
+        runtime_env = _runtime_environment()
+        self._cfg = load_config(runtime_env=runtime_env)
+        ensure_runtime_data_dir_isolation(self._cfg, runtime_env=runtime_env)
         self._cfg.ensure_dirs()
         self._db_path = self._cfg.data_dir / "router.db"
         self._log_path = self._cfg.data_dir / "scheduler.log"
@@ -1214,7 +1215,7 @@ def main() -> None:
         # Also try to write to the log file for post-mortem diagnostics
         try:
             from asusroutercontrol.config import load_config as _lc
-            _cfg = _lc()
+            _cfg = _lc(runtime_env=_runtime_environment())
             _cfg.ensure_dirs()
             with open(_cfg.data_dir / "scheduler.log", "a") as f:
                 from datetime import datetime as _dt
@@ -1222,7 +1223,9 @@ def main() -> None:
         except Exception:
             pass
         sys.exit(78)  # EX_CONFIG
-
+    runtime_env = _runtime_environment()
+    cfg = load_config(runtime_env=runtime_env)
+    ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
     cfg = load_config()
     cfg.ensure_dirs()
     log_path = cfg.data_dir / "scheduler.log"
