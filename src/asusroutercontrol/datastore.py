@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -247,6 +247,11 @@ class DataStore:
         except Exception:
             # Safe no-op if no active transaction.
             pass
+
+    @staticmethod
+    def _utcnow() -> datetime:
+        """Non-deprecated UTC now, naive for SQLite ISO-string compat."""
+        return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     def _is_unknown_label(value: str | None) -> bool:
@@ -900,22 +905,15 @@ class DataStore:
     async def get_client_loads(self, *, hours: int = 1, limit: int = 500) -> list[dict]:
         """Return latest per-client load rows within the window.
 
-        Prefers device_perf_history because it persists per-sample transport band.
-        Falls back to client_traffic for legacy rows.
+        Merges device_perf_history and client_traffic via UNION ALL,
+        preferring device_perf_history per MAC (NOT EXISTS dedup).
+        Measured rows rank above presence-only; MAC tiebreaker for
+        deterministic ordering.
         """
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
-        signal_expr_perf = (
-            "CASE WHEN dph.tx_rate_mbps IS NOT NULL OR dph.rx_rate_mbps IS NOT NULL "
-            "OR dph.rssi IS NOT NULL "
-            "THEN 1 ELSE 0 END"
-        )
-        signal_expr_traffic = (
-            "CASE WHEN ct.tx_rate_mbps IS NOT NULL OR ct.rx_rate_mbps IS NOT NULL "
-            "OR ct.rssi IS NOT NULL "
-            "THEN 1 ELSE 0 END"
-        )
-        preferred_band_expr = (
+        cutoff = self._utcnow() - timedelta(hours=max(1, hours))
+        cutoff_iso = cutoff.isoformat()
+        perf_band_expr = (
             "CASE "
             "WHEN dph.band IS NOT NULL AND TRIM(dph.band) <> '' "
             "AND LOWER(TRIM(dph.band)) NOT IN ('unknown', 'none', 'null') "
@@ -928,7 +926,7 @@ class DataStore:
             "THEN d.connection "
             "ELSE NULL END"
         )
-        fallback_band_expr = (
+        traffic_band_expr = (
             "CASE "
             "WHEN d.connection = 'wired' THEN 'wired' "
             "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
@@ -938,53 +936,49 @@ class DataStore:
             "THEN d.connection "
             "ELSE NULL END"
         )
+        signal_expr = (
+            "CASE WHEN tx_rate_mbps IS NOT NULL OR rx_rate_mbps IS NOT NULL "
+            "OR rssi IS NOT NULL "
+            "THEN 1 ELSE 0 END"
+        )
         async with db.execute(
-            "WITH ranked AS ("
-            " SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps, "
-            " dph.rssi, dph.load_pct, d.hostname, "
-            f"{preferred_band_expr} AS band, "
-            f"{signal_expr_perf} AS has_signal, "
-            " ROW_NUMBER() OVER ("
-            " PARTITION BY dph.mac "
-            f" ORDER BY {signal_expr_perf} DESC, dph.timestamp DESC"
-            " ) AS row_rank "
+            "WITH combined AS ("
+            " SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps,"
+            " dph.rssi, dph.load_pct, d.hostname,"
+            f" {perf_band_expr} AS band,"
+            " 1 AS source_priority"
             " FROM device_perf_history dph"
             " LEFT JOIN devices d ON dph.mac = d.mac"
             " WHERE dph.timestamp >= ?"
-            ") "
-            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct, "
-            "hostname, band, has_signal "
-            "FROM ranked "
-            "WHERE row_rank = 1 "
-            "ORDER BY has_signal DESC, load_pct DESC, timestamp DESC"
-            " LIMIT ?",
-            (cutoff.isoformat(), limit),
-        ) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-        if rows:
-            return rows
-
-        async with db.execute(
-            "WITH ranked AS ("
-            " SELECT ct.mac, ct.timestamp, ct.tx_rate_mbps, ct.rx_rate_mbps, "
-            " ct.rssi, ct.load_pct, d.hostname, "
-            f"{fallback_band_expr} AS band, "
-            f"{signal_expr_traffic} AS has_signal, "
-            " ROW_NUMBER() OVER ("
-            " PARTITION BY ct.mac "
-            f" ORDER BY {signal_expr_traffic} DESC, ct.timestamp DESC"
-            " ) AS row_rank "
+            " UNION ALL"
+            " SELECT ct.mac, ct.timestamp, ct.tx_rate_mbps, ct.rx_rate_mbps,"
+            " ct.rssi, ct.load_pct, d.hostname,"
+            f" {traffic_band_expr} AS band,"
+            " 0 AS source_priority"
             " FROM client_traffic ct"
             " LEFT JOIN devices d ON ct.mac = d.mac"
             " WHERE ct.timestamp >= ?"
+            " AND NOT EXISTS ("
+            "  SELECT 1 FROM device_perf_history x"
+            "  WHERE x.mac = ct.mac AND x.timestamp >= ?"
+            " )"
+            "), ranked AS ("
+            " SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps,"
+            " rssi, load_pct, hostname, band,"
+            f" {signal_expr} AS has_signal,"
+            " ROW_NUMBER() OVER ("
+            "  PARTITION BY mac"
+            f"  ORDER BY source_priority DESC, {signal_expr} DESC, timestamp DESC"
+            " ) AS row_rank"
+            " FROM combined"
             ") "
-            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct, "
-            "hostname, band, has_signal "
-            "FROM ranked "
-            "WHERE row_rank = 1 "
-            "ORDER BY has_signal DESC, load_pct DESC, timestamp DESC"
+            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct,"
+            " hostname, band, has_signal"
+            " FROM ranked"
+            " WHERE row_rank = 1"
+            " ORDER BY has_signal DESC, load_pct DESC, timestamp DESC, mac ASC"
             " LIMIT ?",
-            (cutoff.isoformat(), limit),
+            (cutoff_iso, cutoff_iso, cutoff_iso, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
     async def get_client_load_rollups_between(
@@ -996,23 +990,13 @@ class DataStore:
     ) -> list[dict]:
         """Return per-client rollups in a bounded window.
 
-        Prefers device_perf_history for richer per-sample signal/band data.
-        Falls back to client_traffic when no device_perf_history rows exist
-        in the requested window.
+        Merges device_perf_history and client_traffic via UNION ALL,
+        preferring device_perf_history per MAC (NOT EXISTS dedup).
+        Deterministic ordering via MAC tiebreaker.
         """
         db = self._conn()
         bounded_limit = max(1, limit)
-        signal_expr_perf = (
-            "CASE WHEN dph.tx_rate_mbps IS NOT NULL OR dph.rx_rate_mbps IS NOT NULL "
-            "OR dph.rssi IS NOT NULL "
-            "THEN 1 ELSE 0 END"
-        )
-        signal_expr_traffic = (
-            "CASE WHEN ct.tx_rate_mbps IS NOT NULL OR ct.rx_rate_mbps IS NOT NULL "
-            "OR ct.rssi IS NOT NULL "
-            "THEN 1 ELSE 0 END"
-        )
-        preferred_band_expr = (
+        perf_band_expr = (
             "CASE "
             "WHEN dph.band IS NOT NULL AND TRIM(dph.band) <> '' "
             "AND LOWER(TRIM(dph.band)) NOT IN ('unknown', 'none', 'null') "
@@ -1025,7 +1009,7 @@ class DataStore:
             "THEN d.connection "
             "ELSE NULL END"
         )
-        fallback_band_expr = (
+        traffic_band_expr = (
             "CASE "
             "WHEN d.connection = 'wired' THEN 'wired' "
             "WHEN d.band IS NOT NULL AND TRIM(d.band) <> '' "
@@ -1035,65 +1019,56 @@ class DataStore:
             "THEN d.connection "
             "ELSE NULL END"
         )
+        signal_expr = (
+            "CASE WHEN tx_rate_mbps IS NOT NULL OR rx_rate_mbps IS NOT NULL "
+            "OR rssi IS NOT NULL "
+            "THEN 1 ELSE 0 END"
+        )
         async with db.execute(
-            "WITH perf AS ("
-            " SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps, "
-            " dph.rssi, dph.load_pct, d.hostname, "
-            f"{preferred_band_expr} AS band, "
-            f"{signal_expr_perf} AS has_signal, "
-            " ROW_NUMBER() OVER ("
-            " PARTITION BY dph.mac "
-            f" ORDER BY {signal_expr_perf} DESC, dph.timestamp DESC"
-            " ) AS row_rank, "
-            " COUNT(*) OVER (PARTITION BY dph.mac) AS sample_count, "
-            f" SUM({signal_expr_perf}) OVER (PARTITION BY dph.mac) AS signal_samples, "
-            " AVG(dph.load_pct) OVER (PARTITION BY dph.mac) AS avg_load_pct, "
-            " MAX(dph.load_pct) OVER (PARTITION BY dph.mac) AS peak_load_pct "
+            "WITH combined AS ("
+            " SELECT dph.mac, dph.timestamp, dph.tx_rate_mbps, dph.rx_rate_mbps,"
+            " dph.rssi, dph.load_pct, d.hostname,"
+            f" {perf_band_expr} AS band,"
+            " 1 AS source_priority"
             " FROM device_perf_history dph"
             " LEFT JOIN devices d ON dph.mac = d.mac"
             " WHERE dph.timestamp >= ? AND dph.timestamp <= ?"
-            ") "
-            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct, "
-            "hostname, band, has_signal, sample_count, signal_samples, "
-            "sample_count - signal_samples AS placeholder_samples, "
-            "avg_load_pct, peak_load_pct "
-            "FROM perf "
-            "WHERE row_rank = 1 "
-            "ORDER BY has_signal DESC, avg_load_pct DESC, timestamp DESC "
-            "LIMIT ?",
-            (start_ts, end_ts, bounded_limit),
-        ) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-        if rows:
-            return rows
-
-        async with db.execute(
-            "WITH traffic AS ("
-            " SELECT ct.mac, ct.timestamp, ct.tx_rate_mbps, ct.rx_rate_mbps, "
-            " ct.rssi, ct.load_pct, d.hostname, "
-            f"{fallback_band_expr} AS band, "
-            f"{signal_expr_traffic} AS has_signal, "
-            " ROW_NUMBER() OVER ("
-            " PARTITION BY ct.mac "
-            f" ORDER BY {signal_expr_traffic} DESC, ct.timestamp DESC"
-            " ) AS row_rank, "
-            " COUNT(*) OVER (PARTITION BY ct.mac) AS sample_count, "
-            f" SUM({signal_expr_traffic}) OVER (PARTITION BY ct.mac) AS signal_samples, "
-            " AVG(ct.load_pct) OVER (PARTITION BY ct.mac) AS avg_load_pct, "
-            " MAX(ct.load_pct) OVER (PARTITION BY ct.mac) AS peak_load_pct "
+            " UNION ALL"
+            " SELECT ct.mac, ct.timestamp, ct.tx_rate_mbps, ct.rx_rate_mbps,"
+            " ct.rssi, ct.load_pct, d.hostname,"
+            f" {traffic_band_expr} AS band,"
+            " 0 AS source_priority"
             " FROM client_traffic ct"
             " LEFT JOIN devices d ON ct.mac = d.mac"
             " WHERE ct.timestamp >= ? AND ct.timestamp <= ?"
+            " AND NOT EXISTS ("
+            "  SELECT 1 FROM device_perf_history x"
+            "  WHERE x.mac = ct.mac"
+            "  AND x.timestamp >= ? AND x.timestamp <= ?"
+            " )"
+            "), ranked AS ("
+            " SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps,"
+            " rssi, load_pct, hostname, band,"
+            f" {signal_expr} AS has_signal,"
+            " ROW_NUMBER() OVER ("
+            "  PARTITION BY mac"
+            f"  ORDER BY source_priority DESC, {signal_expr} DESC, timestamp DESC"
+            " ) AS row_rank,"
+            " COUNT(*) OVER (PARTITION BY mac) AS sample_count,"
+            f" SUM({signal_expr}) OVER (PARTITION BY mac) AS signal_samples,"
+            " AVG(load_pct) OVER (PARTITION BY mac) AS avg_load_pct,"
+            " MAX(load_pct) OVER (PARTITION BY mac) AS peak_load_pct"
+            " FROM combined"
             ") "
-            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct, "
-            "hostname, band, has_signal, sample_count, signal_samples, "
-            "sample_count - signal_samples AS placeholder_samples, "
-            "avg_load_pct, peak_load_pct "
-            "FROM traffic "
-            "WHERE row_rank = 1 "
-            "ORDER BY has_signal DESC, avg_load_pct DESC, timestamp DESC "
-            "LIMIT ?",
-            (start_ts, end_ts, bounded_limit),
+            "SELECT mac, timestamp, tx_rate_mbps, rx_rate_mbps, rssi, load_pct,"
+            " hostname, band, has_signal, sample_count, signal_samples,"
+            " sample_count - signal_samples AS placeholder_samples,"
+            " avg_load_pct, peak_load_pct"
+            " FROM ranked"
+            " WHERE row_rank = 1"
+            " ORDER BY has_signal DESC, avg_load_pct DESC, timestamp DESC, mac ASC"
+            " LIMIT ?",
+            (start_ts, end_ts, start_ts, end_ts, start_ts, end_ts, bounded_limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
@@ -1101,7 +1076,7 @@ class DataStore:
         self, mac: str, *, hours: int = 24, limit: int = 500
     ) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = self._utcnow() - timedelta(hours=max(1, hours))
         preferred_band_expr = (
             "CASE "
             "WHEN dph.band IS NOT NULL AND TRIM(dph.band) <> '' "
@@ -1191,7 +1166,7 @@ class DataStore:
         Returns {mac: avg_load_pct}.
         """
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = self._utcnow() - timedelta(hours=max(1, hours))
         async with db.execute(
             "SELECT mac, AVG(load_pct) as avg_load"
             " FROM device_perf_history"
@@ -1205,7 +1180,7 @@ class DataStore:
     async def get_client_load_window_stats(self, *, hours: int = 1) -> dict:
         """Return aggregate diagnostics for client_traffic rows in a recent window."""
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = self._utcnow() - timedelta(hours=max(1, hours))
         async with db.execute(
             "SELECT COUNT(*) AS samples,"
             " SUM(CASE WHEN tx_rate_mbps IS NOT NULL OR rx_rate_mbps IS NOT NULL"
