@@ -37,6 +37,7 @@ class Config:
     client_traffic_interval: int = 60  # 1 min
     poll_interval: int = 300     # 5 min
     notify_on_speedtest: bool = True  # notify when scheduled speed test completes
+    probe_client_cap: int = 20  # max clients per-interface for RSSI/traffic probes (0=unlimited)
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -116,4 +117,5 @@ def load_config(env_file: str | Path | None = None) -> Config:
         notify_on_speedtest=os.environ.get(
             "NOTIFY_ON_SPEEDTEST", "true"
         ).lower() in ("true", "1", "yes"),
+        probe_client_cap=int(os.environ.get("PROBE_CLIENT_CAP", "20")),
     )

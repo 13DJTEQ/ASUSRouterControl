@@ -65,6 +65,9 @@ POLL_CYCLE_TIMEOUT = 120.0
 CONFIG_CYCLE_TIMEOUT = 120.0
 SPEEDTEST_CYCLE_TIMEOUT = 300.0
 
+# How often to re-probe SSH when running in degraded-no-ssh mode (seconds)
+SSH_RECOVERY_INTERVAL = 300.0
+
 # Backoff: after N consecutive failures, sleep longer before retrying
 MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_SCHEDULE = (60, 120, 300)  # seconds
@@ -129,6 +132,7 @@ class MonitorScheduler:
         # Per-loop consecutive failure counters
         self._failures: dict[str, int] = {}
         self._runtime_profile: RuntimeProfile | None = None
+        self._skipped_specs: list[_TaskSpec] = []
 
     async def run(self) -> None:
         """Start all task loops as cancellable Tasks."""
@@ -141,6 +145,11 @@ class MonitorScheduler:
             profile.operation_mode,
         )
         selected, skipped = self._select_task_specs(profile)
+        self._skipped_specs = [
+            spec
+            for spec in self._task_specs()
+            if spec.name in {name for name, _reason in skipped}
+        ]
         for loop_name, reason in skipped:
             log.info("Scheduler preflight skipped %s loop: %s", loop_name, reason)
         log.info(
@@ -155,6 +164,14 @@ class MonitorScheduler:
             asyncio.create_task(spec.runner(), name=spec.name)
             for spec in selected
         ]
+        # If SSH was unavailable at startup, run a recovery loop that
+        # periodically re-probes and starts the skipped tasks on success.
+        if profile.capability == "degraded-no-ssh":
+            self._tasks.append(
+                asyncio.create_task(
+                    self._ssh_recovery_loop(), name="ssh-recovery"
+                )
+            )
         try:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         finally:
@@ -215,6 +232,56 @@ class MonitorScheduler:
                 await ssh.disconnect()
             except Exception:
                 pass
+
+    async def _ssh_recovery_loop(self) -> None:
+        """Periodically re-probe SSH when in degraded-no-ssh mode.
+
+        On success, update the runtime profile and start previously-skipped
+        SSH-gated task loops so the scheduler self-heals without restart.
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(SSH_RECOVERY_INTERVAL)
+                if not self._running:
+                    break
+                profile = self._runtime_profile
+                if profile is None or profile.capability != "degraded-no-ssh":
+                    log.info("SSH recovery: no longer degraded, exiting loop")
+                    return
+
+                new_profile = await self._determine_runtime_profile()
+                if new_profile.capability != "full":
+                    log.info(
+                        "SSH recovery probe: still %s", new_profile.capability
+                    )
+                    continue
+
+                # SSH is now reachable — promote profile and start skipped tasks
+                self._runtime_profile = new_profile
+                log.info(
+                    "SSH recovery: promoted to capability=%s operation_mode=%s",
+                    new_profile.capability,
+                    new_profile.operation_mode,
+                )
+                newly_eligible, _ = self._select_task_specs(new_profile)
+                newly_eligible_names = {spec.name for spec in newly_eligible}
+                for spec in self._skipped_specs:
+                    if spec.name in newly_eligible_names:
+                        task = asyncio.create_task(
+                            spec.runner(), name=spec.name
+                        )
+                        self._tasks.append(task)
+                        log.info(
+                            "SSH recovery: started previously-skipped %s loop",
+                            spec.name,
+                        )
+                self._skipped_specs = [
+                    s for s in self._skipped_specs
+                    if s.name not in newly_eligible_names
+                ]
+                return  # recovery complete
+        except asyncio.CancelledError:
+            log.info("SSH recovery loop cancelled")
 
     async def _detect_operation_mode(self, ssh: RouterSSH) -> OperationMode:
         try:
@@ -402,6 +469,7 @@ class MonitorScheduler:
 
     async def _run_probes_cycle(self) -> None:
         """Single probe cycle — extracted so it can be wrapped in wait_for."""
+        client_cap = self._cfg.probe_client_cap
         async with RouterSSH() as ssh:
             latency_results = await probe_latency(ssh)
             for probe in latency_results:
@@ -410,7 +478,7 @@ class MonitorScheduler:
             sys_snap = await probe_system(ssh)
             await self._store.insert_system_snapshot(sys_snap, commit=False)
 
-            wifi_snaps = await probe_wifi(ssh)
+            wifi_snaps = await probe_wifi(ssh, client_cap=client_cap)
             for ws in wifi_snaps:
                 prev = await self._store.get_latest_wifi_snapshot(ws.band)
                 if prev and prev.get("rx_bytes") is not None:
@@ -465,16 +533,21 @@ class MonitorScheduler:
 
     async def _run_client_traffic_cycle(self) -> None:
         async with RouterSSH() as ssh:
-            await self._collect_client_traffic(ssh)
+            await self._collect_client_traffic(ssh, client_cap=self._cfg.probe_client_cap)
         await self._store.commit()
 
-    async def _collect_client_traffic(self, ssh: RouterSSH) -> None:
+    async def _collect_client_traffic(
+        self,
+        ssh: RouterSSH,
+        *,
+        client_cap: int = 20,
+    ) -> None:
         """Probe per-client byte counters, compute rate deltas, store loads."""
         from asusroutercontrol.analysis.clients import BAND_LINK_RATES, DEFAULT_LINK_RATE
         from asusroutercontrol.models import ClientLoad, ConnectionType, Device
 
         try:
-            snapshots = await probe_client_traffic(ssh)
+            snapshots = await probe_client_traffic(ssh, client_cap=client_cap)
         except Exception:
             log.exception("Client traffic probe failed")
             return

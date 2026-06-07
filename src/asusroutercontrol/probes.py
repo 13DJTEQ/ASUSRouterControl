@@ -31,6 +31,7 @@ LATENCY_TARGETS = {
 }
 
 PING_COUNT = 20
+DEFAULT_CLIENT_CAP = 20
 
 _WL_IFNAME_CMD = "nvram show 2>/dev/null | grep -E '^wl[0-9]+(\\.[0-9]+)?_ifname='"
 _WL_IFNAME_RE = re.compile(
@@ -546,8 +547,16 @@ async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
     return results
 
 
-async def probe_wifi(ssh: RouterSSH) -> list[WiFiSnapshot]:
-    """Capture per-band WiFi client count, signal strength, noise floor, and byte counters."""
+async def probe_wifi(
+    ssh: RouterSSH,
+    *,
+    client_cap: int = DEFAULT_CLIENT_CAP,
+) -> list[WiFiSnapshot]:
+    """Capture per-band WiFi client count, signal strength, noise floor, and byte counters.
+
+    Args:
+        client_cap: Max clients per-interface for RSSI probing. 0 means unlimited.
+    """
     now = datetime.utcnow()
     results: list[WiFiSnapshot] = []
 
@@ -577,7 +586,13 @@ async def probe_wifi(ssh: RouterSSH) -> list[WiFiSnapshot]:
 
             # RSSI per client
             rssi_vals: list[float] = []
-            for mac in macs[:20]:  # Cap to avoid slow probe on many clients
+            capped_macs = macs if (client_cap <= 0) else macs[:client_cap]
+            if len(macs) > len(capped_macs):
+                log.warning(
+                    "probe_wifi: interface=%s band=%s truncated %d→%d clients (cap=%d)",
+                    iface, band_name, len(macs), len(capped_macs), client_cap,
+                )
+            for mac in capped_macs:
                 r2 = await ssh.run(
                     f"wl -i {iface} sta_info {mac} 2>/dev/null | grep 'per antenna rssi'"
                 )
@@ -662,8 +677,13 @@ async def _read_iface_bytes(ssh: RouterSSH) -> dict[str, tuple[int, int]]:
 
 async def probe_client_traffic(
     ssh: RouterSSH,
+    *,
+    client_cap: int = DEFAULT_CLIENT_CAP,
 ) -> list[dict]:
     """Collect per-client byte counters via ``wl sta_info`` for each WiFi band.
+
+    Args:
+        client_cap: Max clients per-interface for traffic probing. 0 means unlimited.
 
     Returns a list of dicts:
         {mac, band, rssi, rx_bytes, tx_bytes}
@@ -675,8 +695,14 @@ async def probe_client_traffic(
         try:
             r = await ssh.run(f"wl -i {iface} assoclist 2>/dev/null")
             macs = re.findall(r"assoclist\s+([0-9A-Fa-f:]+)", r.stdout)
+            capped_macs = macs if (client_cap <= 0) else macs[:client_cap]
+            if len(macs) > len(capped_macs):
+                log.warning(
+                    "probe_client_traffic: interface=%s band=%s truncated %d→%d clients (cap=%d)",
+                    iface, band_name, len(macs), len(capped_macs), client_cap,
+                )
 
-            for mac in macs[:20]:
+            for mac in capped_macs:
                 r2 = await ssh.run(f"wl -i {iface} sta_info {mac} 2>/dev/null")
                 if not r2.ok:
                     continue
