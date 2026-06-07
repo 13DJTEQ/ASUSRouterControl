@@ -204,8 +204,6 @@ def test_format_client_rate_display_invalid_values() -> None:
     assert format_client_rate_display(-0.1) == "—"
     assert format_client_rate_display(float("inf")) == "—"
     assert format_client_rate_display(float("nan")) == "—"
-
-
 @pytest.mark.asyncio
 async def test_get_client_load_summary_prioritizes_signal_rows() -> None:
     class _Store:
