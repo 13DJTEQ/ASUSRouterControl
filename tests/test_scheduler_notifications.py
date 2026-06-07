@@ -277,7 +277,7 @@ async def test_probe_loop_batches_writes(monkeypatch: pytest.MonkeyPatch) -> Non
     async def _fake_probe_system(_ssh):
         return object()
 
-    async def _fake_probe_wifi(_ssh):
+    async def _fake_probe_wifi(_ssh, **_kw):
         return [SimpleNamespace(band="2.4")]
 
     monkeypatch.setattr("asusroutercontrol.scheduler.RouterSSH", _FakeSSH)
@@ -324,7 +324,7 @@ async def test_client_traffic_cycle_adds_wired_fallback_rows(
             self.upserted_devices.append((dev, commit))
             return False
 
-    async def _fake_probe_client_traffic(_ssh):
+    async def _fake_probe_client_traffic(_ssh, **_kw):
         return [{
             "mac": "aa:aa:aa:aa:aa:01",
             "band": "5GHz",
