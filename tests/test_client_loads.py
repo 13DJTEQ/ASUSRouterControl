@@ -8,7 +8,9 @@ from asusroutercontrol.analysis.clients import (
     LOAD_CRIT_PCT,
     LOAD_WARN_PCT,
     RSSI_WEAK_DBM,
+    _band_bucket,
     _health_dot,
+    _row_has_signal,
     compute_client_loads,
     format_client_load_display,
     get_client_load_summary,
@@ -159,11 +161,28 @@ def test_client_load_defaults() -> None:
 
 
 def test_format_client_load_display_precision_and_idle() -> None:
+    """Backward-compat: has_signal defaults to True."""
     assert format_client_load_display(None) == "n/a"
     assert format_client_load_display(0.0) == "idle"
     assert format_client_load_display(0.4) == "0.4%"
     assert format_client_load_display(9.9) == "9.9%"
     assert format_client_load_display(10.0) == "10%"
+
+
+def test_format_client_load_display_presence_only() -> None:
+    """Unmeasured/presence-only → '—' instead of 'idle'."""
+    assert format_client_load_display(None, has_signal=False) == "—"
+    assert format_client_load_display(0.0, has_signal=False) == "—"
+    assert format_client_load_display(0, has_signal=False) == "—"
+    # Non-zero load still shows percentage regardless of has_signal
+    assert format_client_load_display(5.0, has_signal=False) == "5.0%"
+    assert format_client_load_display(25.0, has_signal=False) == "25%"
+
+
+def test_format_client_load_display_measured_idle() -> None:
+    """Explicitly measured zero → 'idle'."""
+    assert format_client_load_display(0.0, has_signal=True) == "idle"
+    assert format_client_load_display(0, has_signal=True) == "idle"
 
 
 @pytest.mark.asyncio
@@ -201,6 +220,78 @@ async def test_get_client_load_summary_prioritizes_signal_rows() -> None:
     by_mac = {r["mac"]: r for r in rows}
     assert by_mac["AA:AA:AA:AA:AA:01"]["tx_rate_mbps"] == 2.5
     assert by_mac["AA:AA:AA:AA:AA:02"]["load_pct"] == 0.0
+
+# --- _band_bucket ---
+
+
+def test_band_bucket_canonical_values() -> None:
+    assert _band_bucket("2.4GHz") == "2.4"
+    assert _band_bucket("5GHz") == "5"
+    assert _band_bucket("6GHz") == "6"
+    assert _band_bucket("wired") == "wired"
+    assert _band_bucket("2.4") == "2.4"
+    assert _band_bucket("5") == "5"
+    assert _band_bucket("6") == "6"
+
+
+def test_band_bucket_case_insensitive() -> None:
+    assert _band_bucket("5ghz") == "5"
+    assert _band_bucket("5GHZ") == "5"
+    assert _band_bucket("2.4ghz") == "2.4"
+    assert _band_bucket("WIRED") == "wired"
+    assert _band_bucket("6Ghz") == "6"
+    assert _band_bucket("6GHZ") == "6"
+
+
+def test_band_bucket_strips_whitespace() -> None:
+    assert _band_bucket(" 5GHz ") == "5"
+    assert _band_bucket("  wired  ") == "wired"
+    assert _band_bucket(" 6 ") == "6"
+
+
+def test_band_bucket_none_and_unknown() -> None:
+    assert _band_bucket(None) == "other"
+    assert _band_bucket("") == "other"
+    assert _band_bucket("bluetooth") == "other"
+
+
+# --- _row_has_signal ---
+
+
+def test_row_has_signal_with_tx_rx() -> None:
+    assert _row_has_signal({"tx_rate_mbps": 10.0}) is True
+    assert _row_has_signal({"rx_rate_mbps": 5.0}) is True
+
+
+def test_row_has_signal_with_rssi() -> None:
+    assert _row_has_signal({"rssi": -55}) is True
+
+
+def test_row_has_signal_presence_only() -> None:
+    assert _row_has_signal({"mac": "AA:BB:CC:DD:EE:FF"}) is False
+    assert _row_has_signal({"tx_rate_mbps": None, "rx_rate_mbps": None, "rssi": None}) is False
+
+
+def test_row_has_signal_explicit_flag() -> None:
+    assert _row_has_signal({"has_signal": True}) is True
+    assert _row_has_signal({"has_signal": False}) is False
+    # explicit flag overrides implicit detection
+    assert _row_has_signal({"has_signal": False, "tx_rate_mbps": 10.0}) is False
+
+
+# --- get_client_load_summary error surfacing ---
+
+
+@pytest.mark.asyncio
+async def test_get_client_load_summary_error_propagates() -> None:
+    """get_client_load_summary should let exceptions propagate (not swallow)."""
+    class _BrokenStore:
+        async def get_client_loads(self, *, hours: int = 1):
+            raise RuntimeError("DB connection lost")
+
+    with pytest.raises(RuntimeError, match="DB connection lost"):
+        await get_client_load_summary(_BrokenStore())
+
 
 @pytest.mark.asyncio
 async def test_get_client_load_summary_keeps_wired_row_when_top_n_is_wifi() -> None:

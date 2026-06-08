@@ -6,6 +6,7 @@ The keyring backend is replaced with a simple in-memory dict store.
 
 from __future__ import annotations
 
+import keyring.backends.fail as keyring_fail
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -38,9 +39,31 @@ def mem_keyring(monkeypatch):
     """Patch the keyring module used by credentials.py with an in-memory store."""
     backend = _InMemoryKeyring()
     import asusroutercontrol.credentials as creds_mod
-    monkeypatch.setattr(creds_mod.keyring, "get_password", backend.get_password)
-    monkeypatch.setattr(creds_mod.keyring, "set_password", backend.set_password)
-    monkeypatch.setattr(creds_mod.keyring, "delete_password", backend.delete_password)
+    state = {"backend": backend}
+
+    monkeypatch.setattr(creds_mod.keyring, "get_keyring", lambda: state["backend"])
+
+    def _set_keyring(new_backend):
+        state["backend"] = new_backend
+
+    monkeypatch.setattr(creds_mod.keyring, "set_keyring", _set_keyring)
+    monkeypatch.setattr(
+        creds_mod.keyring,
+        "get_password",
+        lambda service, username: state["backend"].get_password(service, username),
+    )
+    monkeypatch.setattr(
+        creds_mod.keyring,
+        "set_password",
+        lambda service, username, password: state["backend"].set_password(
+            service, username, password
+        ),
+    )
+    monkeypatch.setattr(
+        creds_mod.keyring,
+        "delete_password",
+        lambda service, username: state["backend"].delete_password(service, username),
+    )
     return backend
 
 
@@ -86,6 +109,77 @@ class TestStoreAndGet:
         monkeypatch.setattr(creds_mod.keyring, "set_password", _raise)
         from asusroutercontrol.credentials import store_credential
         assert store_credential("router_password", "value") is False
+
+    def test_store_recovers_from_fail_backend(self, monkeypatch):
+        import asusroutercontrol.credentials as creds_mod
+
+        fallback_backend = _InMemoryKeyring()
+        state = {"backend": keyring_fail.Keyring()}
+
+        monkeypatch.setattr(creds_mod.keyring, "get_keyring", lambda: state["backend"])
+        monkeypatch.setattr(
+            creds_mod.keyring,
+            "set_password",
+            lambda service, username, password: state["backend"].set_password(
+                service, username, password
+            ),
+        )
+        monkeypatch.setattr(
+            creds_mod.keyring,
+            "get_password",
+            lambda service, username: state["backend"].get_password(service, username),
+        )
+
+        def _set_keyring(new_backend):
+            state["backend"] = new_backend
+
+        monkeypatch.setattr(creds_mod.keyring, "set_keyring", _set_keyring)
+        monkeypatch.setattr(
+            creds_mod,
+            "_build_macos_keyring",
+            lambda: fallback_backend,
+        )
+
+        assert creds_mod.store_credential("router_password", "recovered") is True
+        assert creds_mod.get_credential("router_password") == "recovered"
+
+    def test_store_refuses_when_secure_backend_unavailable(self, monkeypatch):
+        import asusroutercontrol.credentials as creds_mod
+
+        state = {"backend": keyring_fail.Keyring()}
+        called = {"set_password": False}
+
+        monkeypatch.setattr(creds_mod.keyring, "get_keyring", lambda: state["backend"])
+        monkeypatch.setattr(
+            creds_mod,
+            "_build_macos_keyring",
+            lambda: (_ for _ in ()).throw(RuntimeError("missing macOS backend")),
+        )
+
+        def _set_password(*_args, **_kwargs):
+            called["set_password"] = True
+
+        monkeypatch.setattr(creds_mod.keyring, "set_password", _set_password)
+
+        assert creds_mod.store_credential("router_password", "value") is False
+        assert called["set_password"] is False
+
+    def test_get_credential_uses_env_when_backend_unavailable(
+        self, monkeypatch
+    ):
+        import asusroutercontrol.credentials as creds_mod
+
+        state = {"backend": keyring_fail.Keyring()}
+
+        monkeypatch.setattr(creds_mod.keyring, "get_keyring", lambda: state["backend"])
+        monkeypatch.setattr(
+            creds_mod,
+            "_build_macos_keyring",
+            lambda: (_ for _ in ()).throw(RuntimeError("missing macOS backend")),
+        )
+        monkeypatch.setenv("ROUTER_PASSWORD", "fromenv")
+
+        assert creds_mod.get_credential("router_password") == "fromenv"
 
 
 # ---------------------------------------------------------------------------

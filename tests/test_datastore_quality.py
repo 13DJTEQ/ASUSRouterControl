@@ -415,6 +415,142 @@ async def test_notification_cooldown_persistence(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_client_loads_merges_both_sources(tmp_path) -> None:
+    """MACs only in client_traffic should appear alongside MACs in device_perf_history."""
+    store = DataStore(tmp_path / "router.db")
+    await store.open()
+    try:
+        now = datetime.utcnow()
+        mac_perf = "BB:BB:BB:BB:BB:01"
+        mac_traffic = "BB:BB:BB:BB:BB:02"
+
+        await store.insert_device_perf(
+            ClientLoad(
+                timestamp=now - timedelta(seconds=10),
+                mac=mac_perf,
+                band="5GHz",
+                tx_rate_mbps=50.0,
+                rx_rate_mbps=20.0,
+                rssi=-45,
+                load_pct=30.0,
+            )
+        )
+        await store.insert_client_load(
+            ClientLoad(
+                timestamp=now - timedelta(seconds=5),
+                mac=mac_traffic,
+                tx_rate_mbps=10.0,
+                rx_rate_mbps=3.0,
+                rssi=-60,
+                load_pct=5.0,
+            )
+        )
+
+        rows = await store.get_client_loads(hours=1, limit=10)
+        macs_returned = {r["mac"] for r in rows}
+        assert mac_perf in macs_returned, "device_perf_history MAC missing"
+        assert mac_traffic in macs_returned, "client_traffic-only MAC missing"
+        assert len(rows) == 2
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_get_client_loads_deterministic_mac_tiebreaker(tmp_path) -> None:
+    """Two MACs with identical signal/load/timestamp sort deterministically by MAC."""
+    store = DataStore(tmp_path / "router.db")
+    await store.open()
+    try:
+        now = datetime.utcnow()
+        mac_a = "CC:CC:CC:CC:CC:01"
+        mac_b = "CC:CC:CC:CC:CC:02"
+        ts = now - timedelta(seconds=10)
+
+        for mac in (mac_a, mac_b):
+            await store.insert_device_perf(
+                ClientLoad(
+                    timestamp=ts,
+                    mac=mac,
+                    band="5GHz",
+                    tx_rate_mbps=25.0,
+                    rx_rate_mbps=10.0,
+                    rssi=-50,
+                    load_pct=15.0,
+                ),
+                commit=False,
+            )
+        await store.commit()
+
+        rows = await store.get_client_loads(hours=1, limit=10)
+        assert len(rows) == 2
+        assert rows[0]["mac"] == mac_a
+        assert rows[1]["mac"] == mac_b
+
+        # Verify idempotent ordering on repeated call
+        rows2 = await store.get_client_loads(hours=1, limit=10)
+        assert [r["mac"] for r in rows] == [r["mac"] for r in rows2]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_get_client_load_rollups_merges_both_sources(tmp_path) -> None:
+    """Rollups should include MACs from both tables with deterministic order."""
+    store = DataStore(tmp_path / "router.db")
+    await store.open()
+    try:
+        now = datetime.utcnow()
+        mac_perf = "DD:DD:DD:DD:DD:01"
+        mac_traffic = "DD:DD:DD:DD:DD:02"
+
+        await store.insert_device_perf(
+            ClientLoad(
+                timestamp=now - timedelta(seconds=15),
+                mac=mac_perf,
+                band="5GHz",
+                tx_rate_mbps=40.0,
+                rx_rate_mbps=15.0,
+                rssi=-48,
+                load_pct=20.0,
+            )
+        )
+        await store.insert_client_load(
+            ClientLoad(
+                timestamp=now - timedelta(seconds=10),
+                mac=mac_traffic,
+                tx_rate_mbps=8.0,
+                rx_rate_mbps=2.0,
+                rssi=-55,
+                load_pct=3.0,
+            )
+        )
+
+        start = (now - timedelta(minutes=5)).isoformat()
+        end = (now + timedelta(minutes=5)).isoformat()
+        rows = await store.get_client_load_rollups_between(
+            start_ts=start, end_ts=end, limit=10
+        )
+        macs_returned = {r["mac"] for r in rows}
+        assert mac_perf in macs_returned, "device_perf_history MAC missing from rollups"
+        assert mac_traffic in macs_returned, "client_traffic-only MAC missing from rollups"
+        assert len(rows) == 2
+        # Signal rows should rank first
+        assert all(r["has_signal"] == 1 for r in rows)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_utcnow_produces_naive_datetime(tmp_path) -> None:
+    """_utcnow returns naive datetime for SQLite ISO-string compatibility."""
+    store = DataStore(tmp_path / "router.db")
+    now = store._utcnow()
+    assert now.tzinfo is None
+    iso = now.isoformat()
+    assert "+" not in iso, "ISO string must be naive (no timezone offset)"
+
+
+@pytest.mark.asyncio
 async def test_speed_metric_series_projection_query(tmp_path) -> None:
     store = DataStore(tmp_path / "router.db")
     await store.open()
