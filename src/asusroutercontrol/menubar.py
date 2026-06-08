@@ -413,6 +413,7 @@ class AppDelegate(NSObject):
         self._clients_wifi6_submenu.setAutoenablesItems_(False)
         self._mi_clients_wifi6.setSubmenu_(self._clients_wifi6_submenu)
         self._mi_clients_wifi6.setEnabled_(True)
+        self._mi_clients_wifi6.setHidden_(True)
 
         # LAN Wired Clients submenu
         self._mi_clients_lan = _add_info(menu, "🔌 LAN Clients")
@@ -922,22 +923,30 @@ class AppDelegate(NSObject):
         # --- Client submenus (split by connectivity type) ---
         client_loads = data.get("client_loads", [])
         client_trends = data.get("client_trends", {})
+        show_wifi6_menu = (
+            any(key in wifi for key in ("6", "6GHz", "6ghz"))
+            or any(_band_bucket(c.get("band")) == "6" for c in client_loads)
+        )
+        self._mi_clients_wifi6.setHidden_(not show_wifi6_menu)
 
         # Surface diagnostic state when client data is unavailable
         cl_err = data.get("client_loads_error")
         saturated: list[str] = []
         if cl_err:
-            for sub in (
+            submenus = [
                 self._clients_wifi24_submenu,
                 self._clients_wifi5_submenu,
-                self._clients_wifi6_submenu,
                 self._clients_lan_submenu,
-            ):
+            ]
+            if show_wifi6_menu:
+                submenus.insert(2, self._clients_wifi6_submenu)
+            for sub in submenus:
                 sub.removeAllItems()
                 _add_info(sub, f"⚠️ {cl_err[:80]}")
             self._mi_clients_wifi24.setTitle_("📶 WiFi 2.4GHz ⚠️")
             self._mi_clients_wifi5.setTitle_("📶 WiFi 5GHz ⚠️")
-            self._mi_clients_wifi6.setTitle_("📶 WiFi 6GHz ⚠️")
+            if show_wifi6_menu:
+                self._mi_clients_wifi6.setTitle_("📶 WiFi 6GHz ⚠️")
             self._mi_clients_lan.setTitle_("🔌 LAN ⚠️")
         else:
             wifi24 = [c for c in client_loads if _band_bucket(c.get("band")) == "2.4"]
@@ -951,9 +960,10 @@ class AppDelegate(NSObject):
             saturated.extend(self._populate_client_submenu(
                 self._clients_wifi5_submenu, wifi5, client_trends
             ))
-            saturated.extend(self._populate_client_submenu(
-                self._clients_wifi6_submenu, wifi6, client_trends
-            ))
+            if show_wifi6_menu:
+                saturated.extend(self._populate_client_submenu(
+                    self._clients_wifi6_submenu, wifi6, client_trends
+                ))
             saturated.extend(self._populate_client_submenu(
                 self._clients_lan_submenu, lan, client_trends
             ))
@@ -964,9 +974,10 @@ class AppDelegate(NSObject):
             self._mi_clients_wifi5.setTitle_(
                 f"📶 WiFi 5GHz ({len(wifi5)})" if wifi5 else "📶 WiFi 5GHz Clients"
             )
-            self._mi_clients_wifi6.setTitle_(
-                f"📶 WiFi 6GHz ({len(wifi6)})" if wifi6 else "📶 WiFi 6GHz Clients"
-            )
+            if show_wifi6_menu:
+                self._mi_clients_wifi6.setTitle_(
+                    f"📶 WiFi 6GHz ({len(wifi6)})" if wifi6 else "📶 WiFi 6GHz Clients"
+                )
             self._mi_clients_lan.setTitle_(
                 f"🔌 LAN ({len(lan)})" if lan else "🔌 LAN Clients"
             )

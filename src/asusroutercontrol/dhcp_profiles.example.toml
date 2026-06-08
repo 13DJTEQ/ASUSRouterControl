@@ -1,0 +1,45 @@
+# DHCP Reservation Profiles for ASUSRouterControl
+#
+# Copy this file to ~/.asusroutercontrol/dhcp_profiles.toml and edit it
+# to add your own device shortcuts.  This file ships with example entries
+# that match a common home lab setup — remove or replace them.
+#
+# Format:
+#   [[profiles]]           — one section per device
+#   key       = "..."      — unique identifier used in CLI commands
+#   label     = "..."      — human-readable display name
+#   mac       = "..."      — device MAC address (aa:bb:cc:dd:ee:ff)
+#   default_ip = "..."     — desired static IP
+#   hostname  = "..."      — optional DNS hostname (dnsmasq-safe)
+
+# ---------------------------------------------------------------------------
+# Example profiles — replace with your own devices
+# ---------------------------------------------------------------------------
+
+[[profiles]]
+key        = "macpro_primary"
+label      = "MacPro12Core primary"
+mac        = "74:1b:b2:f1:c4:31"
+default_ip = "192.168.1.240"
+hostname   = "MacPro12Core"
+
+[[profiles]]
+key        = "denon_second_port"
+label      = "Denon second ethernet port"
+mac        = "00:05:cd:d4:a5:3c"
+default_ip = "192.168.1.241"
+hostname   = "Denon150"
+
+[[profiles]]
+key        = "macpro_lan2"
+label      = "MacPro Ethernet 2"
+mac        = "00:3e:e1:c9:2c:0b"
+default_ip = "192.168.1.242"
+hostname   = "MacPro12Core-LAN2"
+
+[[profiles]]
+key        = "macpro_lan1"
+label      = "MacPro Ethernet 1"
+mac        = "00:3e:e1:c9:2c:0c"
+default_ip = "192.168.1.243"
+hostname   = "MacPro12Core-LAN1"

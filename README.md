@@ -51,10 +51,10 @@ See `docs/runbooks/cicd-operations.md` for an end-to-end promotion and rollback 
 ### Local deployment helpers
 ```bash
 bash scripts/deploy/install_release.sh --artifact dist/<artifact> --release-id <id>
-bash scripts/deploy/activate_env.sh --env dev --release-id <id> --service scheduler --env-file /abs/path/dev.env
-bash scripts/deploy/health_check.sh --env dev --service scheduler --env-file /abs/path/dev.env
-bash scripts/deploy/promote_release.sh --source-env dev --target-env prod --release-id <id> --service scheduler --target-env-file /abs/path/prod.env
-bash scripts/deploy/rollback.sh --env prod --service scheduler --env-file /abs/path/prod.env
+bash scripts/deploy/activate_env.sh --env dev --release-id <id> --service com.asusroutercontrol.scheduler.dev --env-file /abs/path/dev.env
+bash scripts/deploy/health_check.sh --env dev --service com.asusroutercontrol.scheduler.dev --env-file /abs/path/dev.env
+bash scripts/deploy/promote_release.sh --source-env dev --target-env prod --release-id <id> --service com.asusroutercontrol.scheduler --target-env-file /abs/path/prod.env
+bash scripts/deploy/rollback.sh --env prod --service com.asusroutercontrol.scheduler --env-file /abs/path/prod.env
 ```
 
 ## Usage

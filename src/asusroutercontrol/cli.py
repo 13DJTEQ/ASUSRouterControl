@@ -2501,7 +2501,12 @@ def scheduler_install(deploy_environment: str, env_file: Path | None):
     import subprocess
     deploy_environment = _normalize_service_environment(deploy_environment)
     env_file = _validate_env_file(env_file)
-    cfg = load_config(env_file=env_file)
+    cfg = load_config(env_file=env_file, runtime_env=deploy_environment)
+    _guard_runtime_data_dir(
+        cfg,
+        runtime_env=deploy_environment,
+        context="Refusing to install scheduler service",
+    )
     cfg.ensure_dirs()
     base_label = "com.asusroutercontrol.scheduler"
     label = _scoped_launchd_label(base_label, deploy_environment)
