@@ -22,6 +22,13 @@ bash scripts/validate.sh
 The validation script runs lint (`ruff`), tests (`pytest`), and syntax checks (`compileall`).
 If required dev tools are missing, it exits with an actionable install command.
 
+## Memory Palace workflow
+For day-to-day planning, implementation checkpoints, and review summaries, follow:
+- `docs/skills/memory-palace/references/mcp-workflow.md`
+- `docs/skills/memory-palace/references/trigger-samples.md`
+
+This keeps durable task context discoverable across sessions and contributors.
+
 ## CI/CD pipeline
 
 ### CI (`.github/workflows/ci.yml`)
