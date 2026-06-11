@@ -120,6 +120,48 @@ class TestConfigFromEnv:
         cfg = load_config()
         assert cfg.ssh_trust_mode == "strict"
 
+    # Non-prod runtimes should inherit trusted host pins from prod by default.
+    def test_non_prod_uses_prod_known_hosts_when_available(
+        self, env_clean, monkeypatch, tmp_path
+    ):
+        prod_data_dir = tmp_path / ".asusroutercontrol"
+        prod_data_dir.mkdir(parents=True)
+        known_hosts = prod_data_dir / "known_hosts"
+        known_hosts.write_text("[router.asus.com]:1313 ssh-ed25519 AAAATESTKEY\n")
+        monkeypatch.setattr(
+            "asusroutercontrol.config.production_data_dir",
+            lambda: prod_data_dir,
+        )
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "test")
+
+        cfg = load_config()
+
+        assert cfg.runtime_env == "test"
+        assert cfg.ssh_known_hosts_path == known_hosts
+
+    def test_ssh_known_hosts_env_override_takes_precedence(
+        self, env_clean, monkeypatch, tmp_path
+    ):
+        prod_data_dir = tmp_path / ".asusroutercontrol"
+        prod_data_dir.mkdir(parents=True)
+        (prod_data_dir / "known_hosts").write_text(
+            "[router.asus.com]:1313 ssh-ed25519 AAAAPRODKEY\n"
+        )
+        explicit_known_hosts = tmp_path / "explicit_known_hosts"
+        explicit_known_hosts.write_text(
+            "[router.asus.com]:1313 ssh-ed25519 AAAAEXPLICITKEY\n"
+        )
+        monkeypatch.setattr(
+            "asusroutercontrol.config.production_data_dir",
+            lambda: prod_data_dir,
+        )
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "test")
+        monkeypatch.setenv("SSH_KNOWN_HOSTS_PATH", str(explicit_known_hosts))
+
+        cfg = load_config()
+
+        assert cfg.ssh_known_hosts_path == explicit_known_hosts
+
     def test_data_dir_from_env(self, env_clean, monkeypatch, tmp_path):
         monkeypatch.setenv("DATA_DIR", str(tmp_path))
         cfg = load_config()

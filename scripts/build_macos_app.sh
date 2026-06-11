@@ -74,6 +74,7 @@ build_test_app() {
 PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
+export ASUSROUTERCONTROL_RUNTIME_ENV="test"
 
 # TEST launcher priority: run from live source tree first so local changes
 # are always reflected immediately after rebuild.
