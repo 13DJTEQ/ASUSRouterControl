@@ -75,19 +75,20 @@ PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
 
-# Prefer the self-contained binary when available. LaunchServices may apply
-# system-policy restrictions to interpreter paths on external volumes.
+# TEST launcher priority: run from live source tree first so local changes
+# are always reflected immediately after rebuild.
+if [[ -x "\${VENV_PY}" ]]; then
+  export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
+  exec "\${VENV_PY}" -m asusroutercontrol.menubar
+fi
+
+# Fallback to self-contained binary if the development runtime is unavailable.
 if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
   exec "\${SELF_CONTAINED_EXE}"
 fi
 
-if [[ ! -x "\${VENV_PY}" ]]; then
-  /usr/bin/osascript -e 'display alert "ASUSRouterControl cannot start" message "Expected Python runtime not found in project .venv. Run make setup in the project folder."'
-  exit 1
-fi
-
-export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
-exec "\${VENV_PY}" -m asusroutercontrol.menubar
+/usr/bin/osascript -e 'display alert "ASUSRouterControl cannot start" message "No usable runtime found. Run make setup in the project folder or rebuild the production app."'
+exit 1
 EOF
   chmod +x "${launcher}"
 
