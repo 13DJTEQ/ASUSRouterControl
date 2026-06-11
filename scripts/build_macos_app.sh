@@ -74,6 +74,7 @@ build_test_app() {
 PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
+export ASUSROUTERCONTROL_RUNTIME_ENV="test"
 
 # Prefer the self-contained binary when available. LaunchServices may apply
 # system-policy restrictions to interpreter paths on external volumes.

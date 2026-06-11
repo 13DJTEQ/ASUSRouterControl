@@ -70,6 +70,17 @@ def default_data_dir_for_runtime(environment: str) -> Path:
     return (Path.home() / f".asusroutercontrol.{env}").expanduser()
 
 
+def _resolve_ssh_known_hosts_path(runtime_env: str) -> Path | None:
+    explicit = os.environ.get("SSH_KNOWN_HOSTS_PATH")
+    if explicit:
+        return Path(explicit).expanduser()
+    if runtime_env != _PROD_RUNTIME_ENV:
+        prod_known_hosts = production_data_dir() / "known_hosts"
+        if prod_known_hosts.exists():
+            return prod_known_hosts
+    return None
+
+
 def ensure_runtime_data_dir_isolation(
     cfg: Config,
     *,
@@ -143,9 +154,7 @@ def load_config(
             os.environ.get("SSH_HOST_KEY_FINGERPRINT", "").strip() or None
         ),
         ssh_known_hosts_path=(
-            Path(os.environ["SSH_KNOWN_HOSTS_PATH"]).expanduser()
-            if os.environ.get("SSH_KNOWN_HOSTS_PATH")
-            else None
+            _resolve_ssh_known_hosts_path(resolved_runtime_env)
         ),
         soundshield_export_path=Path(
             os.environ.get("SOUNDSHIELD_EXPORT_PATH", str(data_dir / "soundshield_network.json"))
