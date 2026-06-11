@@ -439,6 +439,86 @@ async def test_poll_cycle_records_presence_rows_for_online_clients() -> None:
     assert store.traffic_rows
     assert store.commits == 1
 
+@pytest.mark.asyncio
+async def test_poll_cycle_persists_wired_backend_rates_when_valid() -> None:
+    class _PollStore:
+        def __init__(self) -> None:
+            self.device_perf_rows = []
+            self.traffic_rows = []
+            self.commits = 0
+
+        async def upsert_device(self, _dev, *, commit: bool = True) -> bool:
+            return False
+
+        async def insert_device_perf(self, row, *, commit: bool = True) -> None:
+            self.device_perf_rows.append((row, commit))
+
+        async def insert_traffic(self, row, *, commit: bool = True) -> None:
+            self.traffic_rows.append((row, commit))
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class _Backend:
+        async def connect(self) -> None:
+            return None
+
+        async def get_connected_devices(self) -> list[Device]:
+            return [
+                Device(
+                    mac="00:11:22:33:44:55",
+                    hostname="wired-valid",
+                    connection=ConnectionType.WIRED,
+                    tx_rate_mbps=123.456,
+                    rx_rate_mbps=45.678,
+                    is_online=True,
+                ),
+                Device(
+                    mac="00:11:22:33:44:56",
+                    hostname="wired-invalid",
+                    connection=ConnectionType.WIRED,
+                    tx_rate_mbps=float("nan"),
+                    rx_rate_mbps=20.0,
+                    is_online=True,
+                ),
+                Device(
+                    mac="AA:BB:CC:DD:EE:01",
+                    hostname="wifi-client",
+                    connection=ConnectionType.WIFI_5G,
+                    band="5GHz",
+                    tx_rate_mbps=300.0,
+                    rx_rate_mbps=200.0,
+                    is_online=True,
+                ),
+            ]
+
+        async def get_traffic_stats(self) -> TrafficSnapshot:
+            return TrafficSnapshot(rx_rate_bps=10_000, tx_rate_bps=5_000)
+
+    store = _PollStore()
+    scheduler = MonitorScheduler(store=store, cfg=Config())
+    await scheduler._run_poll_cycle(_Backend())
+
+    by_mac = {row.mac: row for row, _commit in store.device_perf_rows}
+    wired_valid = by_mac["00:11:22:33:44:55"]
+    assert wired_valid.band == "wired"
+    assert wired_valid.tx_rate_mbps == 123.46
+    assert wired_valid.rx_rate_mbps == 45.68
+    assert wired_valid.load_pct == 12.3
+
+    wired_invalid = by_mac["00:11:22:33:44:56"]
+    assert wired_invalid.tx_rate_mbps is None
+    assert wired_invalid.rx_rate_mbps is None
+    assert wired_invalid.load_pct == 0.0
+
+    wifi = by_mac["AA:BB:CC:DD:EE:01"]
+    assert wifi.band == "5GHz"
+    assert wifi.tx_rate_mbps is None
+    assert wifi.rx_rate_mbps is None
+    assert wifi.load_pct == 0.0
+    assert store.traffic_rows
+    assert store.commits == 1
+
 
 @pytest.mark.asyncio
 async def test_speedtest_callback_fires_on_completion(

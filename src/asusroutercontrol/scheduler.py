@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -730,6 +731,7 @@ class MonitorScheduler:
 
     async def _run_poll_cycle(self, backend) -> None:
         """Single poll cycle — extracted so it can be wrapped in wait_for."""
+        from asusroutercontrol.analysis.clients import BAND_LINK_RATES, DEFAULT_LINK_RATE
         from asusroutercontrol.models import ClientLoad, ConnectionType
 
         await backend.connect()
@@ -752,17 +754,46 @@ class MonitorScheduler:
                 presence_band = dev.connection.value
             else:
                 presence_band = None
-            # Poll loop is presence-only. Throughput telemetry belongs to the
-            # client_traffic_loop, so keep rates and RSSI empty here.
+            tx_rate_mbps: float | None = None
+            rx_rate_mbps: float | None = None
+            load_pct = 0.0
+            # Keep wireless poll rows presence-only. For wired rows, persist
+            # backend-provided rates when both tx/rx are finite and non-negative.
+            if dev.connection == ConnectionType.WIRED:
+                tx_rate = dev.tx_rate_mbps
+                rx_rate = dev.rx_rate_mbps
+                if tx_rate is not None and rx_rate is not None:
+                    try:
+                        tx_rate_val = float(tx_rate)
+                        rx_rate_val = float(rx_rate)
+                    except (TypeError, ValueError):
+                        tx_rate_val = None
+                        rx_rate_val = None
+                    if (
+                        tx_rate_val is not None
+                        and rx_rate_val is not None
+                        and math.isfinite(tx_rate_val)
+                        and math.isfinite(rx_rate_val)
+                        and tx_rate_val >= 0
+                        and rx_rate_val >= 0
+                    ):
+                        tx_rate_mbps = round(tx_rate_val, 2)
+                        rx_rate_mbps = round(rx_rate_val, 2)
+                        link_rate = BAND_LINK_RATES.get("wired", DEFAULT_LINK_RATE)
+                        if link_rate > 0:
+                            load_pct = round(
+                                min(100.0, (max(tx_rate_val, rx_rate_val) / link_rate) * 100.0),
+                                1,
+                            )
             cl = ClientLoad(
                 timestamp=now,
                 mac=dev.mac,
                 hostname=dev.hostname,
                 band=presence_band,
                 rssi=None,
-                tx_rate_mbps=None,
-                rx_rate_mbps=None,
-                load_pct=0.0,
+                tx_rate_mbps=tx_rate_mbps,
+                rx_rate_mbps=rx_rate_mbps,
+                load_pct=load_pct,
                 health="🟢",
             )
             await self._store.insert_device_perf(cl, commit=False)
