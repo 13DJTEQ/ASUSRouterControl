@@ -29,8 +29,8 @@ def create_backend(
 
     Args:
         cfg: Loaded :class:`~asusroutercontrol.config.Config` instance.
-        username: Router login username (sourced from Keychain by the caller).
-        password: Router login password (sourced from Keychain by the caller).
+        username: Router login username (sourced by the caller).
+        password: Router login password (sourced by the caller).
 
     Returns:
         A concrete :class:`~asusroutercontrol.backends.base.FirmwareBackend`

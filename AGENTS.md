@@ -23,9 +23,16 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - Treat `guard_action=NOOP|UPDATE|DELETE` as a stop-and-inspect signal; inspect `guard_target_uri` / `guard_target_id` first.
 
 ### Running the app
-- `asusrouter setup` — write router credentials to macOS Keychain (required before most commands).
+- `asusrouter setup` — write router credentials to 1Password via `op` (required before most commands).
 - `asusrouter status` / `asusrouter devices` / `asusrouter monitor` — primary CLI entrypoints.
 - `make run-menubar` (or `python -m asusroutercontrol.menubar`) — run the macOS menu bar app.
+
+## Project build rule (macOS app bundles)
+- Test builds must be generated with `make build-test-app` and output to `testbuilds/` under the repository root.
+- Test app bundle name is `ASUSRouterControl TEST.app` and it must carry a red icon with `TEST` text for immediate visual separation from production.
+- Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
+- Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
+- When failures occur, standard workflow is mandatory: analyze root cause, apply the minimal repair, then relaunch/rerun to verify the failure is resolved.
 
 ## Architecture overview
 
@@ -38,7 +45,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 ### Runtime layers and responsibilities
 - **Configuration & credentials**
   - `config.py` loads non-secret runtime config from env / `.env`.
-  - `credentials.py` handles secure credential retrieval/storage via macOS Keychain (`universal-keychain-*` naming), with legacy migration helpers.
+  - `credentials.py` handles secure credential retrieval/storage via 1Password (`universal-keychain-*` naming), with keychain fallback migration helpers.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
   - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).

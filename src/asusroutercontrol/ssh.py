@@ -1,6 +1,5 @@
 """Async SSH client for router shell access.
-
-Uses the same Keychain credentials as the HTTP backend.
+Uses the same credential manager as the HTTP backend.
 Merlin firmware enables SSH by default on port 22.
 """
 

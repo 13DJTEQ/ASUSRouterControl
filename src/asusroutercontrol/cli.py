@@ -1043,7 +1043,7 @@ def incident_repair_macos(
     if first_failure:
         if is_sudo_auth_failure(first_failure):
             raise click.ClickException(
-                "Local sudo authentication failed. Router keychain credentials do not control "
+                "Local sudo authentication failed. Router credentials do not control "
                 "local sudo; authenticate with local macOS admin sudo first."
             )
         details = first_failure.stderr.strip() or first_failure.stdout.strip() or "unknown"
@@ -1178,7 +1178,7 @@ async def _run_with_backend(coro_factory):
 
 @cli.command()
 def setup():
-    """Store router credentials in macOS Keychain (universal-keychain format)."""
+    """Store router credentials in 1Password (universal-keychain format)."""
     console.print("[bold]ASUSRouterControl Setup[/bold]\n")
 
     username = click.prompt("Router username", default="admin")
@@ -1188,7 +1188,7 @@ def setup():
     ok_pass = store_credential("router_password", password)
 
     if ok_user and ok_pass:
-        console.print("\n[green]Credentials stored in macOS Keychain (universal-keychain).[/green]")
+        console.print("\n[green]Credentials stored in 1Password (universal-keychain).[/green]")
         console.print("Config file: copy .env.example to .env and adjust ROUTER_HOST if needed.")
     else:
         console.print("\n[red]Failed to store credentials.[/red]")
@@ -1202,14 +1202,14 @@ def credentials():
 @credentials.command("migrate")
 @click.option("--dry-run", is_flag=True, help="Show what would be migrated without writing.")
 def credentials_migrate(dry_run: bool):
-    """Migrate legacy com.asusroutercontrol.* entries to universal-keychain format."""
+    """Migrate keychain fallback entries to 1Password canonical storage."""
     import logging
     logging.basicConfig(level=logging.INFO)
 
     migrated = migrate_legacy_credentials(dry_run=dry_run)
     if not migrated:
         console.print(
-            "[dim]Nothing to migrate — all entries already in universal-keychain format.[/dim]"
+            "[dim]Nothing to migrate — canonical entries already exist in 1Password.[/dim]"
         )
         return
     verb = "Would migrate" if dry_run else "Migrated"
@@ -1218,20 +1218,20 @@ def credentials_migrate(dry_run: bool):
     if not dry_run:
         console.print(
             "\n[bold]Run [cyan]asusrouter credentials cleanup[/cyan]"
-            " to remove legacy entries.[/bold]"
+            " to remove keychain fallback entries.[/bold]"
         )
 
 
 @credentials.command("cleanup")
 def credentials_cleanup():
-    """Remove deprecated legacy keychain entries after migration."""
+    """Remove keychain fallback entries after migration to 1Password."""
     removed = delete_legacy_credentials()
     if not removed:
-        console.print("[dim]No legacy entries to remove.[/dim]")
+        console.print("[dim]No keychain fallback entries to remove.[/dim]")
         return
-    for key in removed:
-        console.print(f"  [yellow]Removed[/yellow] com.asusroutercontrol.{key}")
-    console.print("[green]Legacy entries cleaned up.[/green]")
+    for entry in removed:
+        console.print(f"  [yellow]Removed[/yellow] {entry}")
+    console.print("[green]Keychain fallback entries cleaned up.[/green]")
 
 
 @cli.command()

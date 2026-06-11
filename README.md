@@ -9,7 +9,7 @@ pip install -e .
 asusrouter setup
 ```
 
-The `setup` command stores router credentials securely in macOS Keychain.
+The `setup` command stores router credentials securely in 1Password via the `op` CLI.
 Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
 
 ## Developer validation
@@ -81,5 +81,5 @@ asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnec
 
 - **Firmware-agnostic**: Backend abstraction supports Merlin now, FreshTomato later
 - **Backend selection**: `ROUTER_BACKEND` switches between Merlin and FreshTomato implementations
-- **Secure credentials**: macOS Keychain via `keyring` — no plaintext secrets
+- **Secure credentials**: 1Password (`op` CLI) with keychain fallback migration support
 - **SoundShield integration**: JSON export for network-aware audio device discovery
