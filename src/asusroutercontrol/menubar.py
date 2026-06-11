@@ -41,7 +41,11 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
-from asusroutercontrol.analysis.clients import _band_bucket, format_client_load_display
+from asusroutercontrol.analysis.clients import (
+    _band_bucket,
+    format_client_load_display,
+    format_client_rate_display,
+)
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
@@ -473,8 +477,8 @@ class AppDelegate(NSObject):
                 health = "🟡"
             elif not sig:
                 health = "⚪"  # presence-only — no measured data
-            tx_s = f"{tx:.0f}" if tx else "—"
-            rx_s = f"{rx:.0f}" if rx else "—"
+            tx_s = format_client_rate_display(tx)
+            rx_s = format_client_rate_display(rx)
             trend_avg = client_trends.get(mac)
             if trend_avg is not None and load > 0:
                 diff = load - trend_avg

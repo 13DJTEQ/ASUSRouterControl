@@ -1,4 +1,4 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-test-app
 
 VENV_PYTHON := .venv/bin/python
 SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
@@ -39,6 +39,8 @@ rebuild:
 	$(MAKE) unhide-site-packages
 	.venv/bin/python -m ruff check src/
 	.venv/bin/python -m pytest
+build-test-app:
+	bash scripts/build_macos_app.sh --mode test
 
 app: run-menubar
 

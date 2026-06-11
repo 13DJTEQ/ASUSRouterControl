@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 
 from asusroutercontrol.datastore import DataStore
@@ -135,6 +136,25 @@ def format_client_load_display(
     if value < 10:
         return f"{value:.1f}%"
     return f"{value:.0f}%"
+
+
+def format_client_rate_display(rate_mbps: float | int | None) -> str:
+    """Format throughput rate for compact menu display."""
+    if rate_mbps is None:
+        return "—"
+    try:
+        value = float(rate_mbps)
+    except (TypeError, ValueError):
+        return "—"
+    if value < 0 or not math.isfinite(value):
+        return "—"
+    if value == 0:
+        return "0.0"
+    if value < 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if value < 10:
+        return f"{value:.1f}"
+    return f"{value:.0f}"
 
 
 async def get_client_load_summary(store: DataStore) -> list[dict]:

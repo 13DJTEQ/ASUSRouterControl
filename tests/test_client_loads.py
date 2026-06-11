@@ -13,6 +13,7 @@ from asusroutercontrol.analysis.clients import (
     _row_has_signal,
     compute_client_loads,
     format_client_load_display,
+    format_client_rate_display,
     get_client_load_summary,
 )
 from asusroutercontrol.models import ClientLoad, ConnectionType, Device
@@ -183,6 +184,26 @@ def test_format_client_load_display_measured_idle() -> None:
     """Explicitly measured zero → 'idle'."""
     assert format_client_load_display(0.0, has_signal=True) == "idle"
     assert format_client_load_display(0, has_signal=True) == "idle"
+
+
+def test_format_client_rate_display_distinguishes_missing_and_zero() -> None:
+    assert format_client_rate_display(None) == "—"
+    assert format_client_rate_display(0.0) == "0.0"
+    assert format_client_rate_display(0) == "0.0"
+
+
+def test_format_client_rate_display_precision_and_rounding() -> None:
+    assert format_client_rate_display(0.02) == "0.02"
+    assert format_client_rate_display(0.5) == "0.5"
+    assert format_client_rate_display(2.44) == "2.4"
+    assert format_client_rate_display(9.99) == "10.0"
+    assert format_client_rate_display(12.7) == "13"
+
+
+def test_format_client_rate_display_invalid_values() -> None:
+    assert format_client_rate_display(-0.1) == "—"
+    assert format_client_rate_display(float("inf")) == "—"
+    assert format_client_rate_display(float("nan")) == "—"
 
 
 @pytest.mark.asyncio
