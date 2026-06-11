@@ -21,6 +21,7 @@ bash scripts/validate.sh
 
 The validation script runs lint (`ruff`), tests (`pytest`), and syntax checks (`compileall`).
 If required dev tools are missing, it exits with an actionable install command.
+For app-level verification in each development cycle, run `make verify-test-app` to rebuild the TEST app bundle, relaunch it, and perform a runtime smoke-check.
 
 ## Memory Palace workflow
 For day-to-day planning, implementation checkpoints, and review summaries, follow:

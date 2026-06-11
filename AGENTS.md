@@ -29,6 +29,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Project build rule (macOS app bundles)
 - Test builds must be generated with `make build-test-app` and output to `testbuilds/` under the repository root.
+- Every development cycle must run a fresh `make build-test-app` before functionality verification, and verification must use that rebuilt TEST bundle.
 - Test app bundle name is `ASUSRouterControl TEST.app` and it must carry a red icon with `TEST` text for immediate visual separation from production.
 - Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
 - Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
