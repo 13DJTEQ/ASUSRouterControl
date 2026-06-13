@@ -61,7 +61,8 @@ SPEED_DROP_RATIO = 0.70  # notify if < 70% of plan
 LATENCY_WARN_MS = 50.0  # yellow if gateway latency exceeds this
 
 REFRESH_INTERVAL = 60.0  # seconds between menu data refreshes
-_ICON_PREFIX = "✦📡"
+_ICON_PREFIX = "📡"
+_TEST_ICON_PREFIX = "🧪"
 _SPINNER_N_DOTS = 12
 _SPINNER_DOT_RADIUS = 1.6
 _SPINNER_RING_RADIUS = 5.2
@@ -191,6 +192,9 @@ def _runtime_environment() -> str:
     env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod").strip().lower()
     return env or "prod"
 
+def _icon_prefix_for_runtime(runtime_env: str) -> str:
+    return _TEST_ICON_PREFIX if runtime_env != "prod" else _ICON_PREFIX
+
 
 def _menubar_launchd_label() -> str:
     env = _runtime_environment()
@@ -252,6 +256,7 @@ class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, notification):
         log.info("AsusRouterMonitor starting")
         runtime_env = _runtime_environment()
+        self._icon_prefix = _icon_prefix_for_runtime(runtime_env)
         self._cfg = load_config(runtime_env=runtime_env)
         ensure_runtime_data_dir_isolation(self._cfg, runtime_env=runtime_env)
         self._cfg.ensure_dirs()
@@ -274,7 +279,7 @@ class AppDelegate(NSObject):
         self.statusitem = self.statusbar.statusItemWithLength_(
             NSVariableStatusItemLength
         )
-        self.statusitem.button().setTitle_(f"{_ICON_PREFIX} —")
+        self.statusitem.button().setTitle_(f"{self._icon_prefix} —")
 
         self._build_menu()
 
@@ -345,10 +350,10 @@ class AppDelegate(NSObject):
     def startAfterHealthCheck_(self, _):
         """Called on main thread after successful health check."""
         if self._degraded:
-            self.statusitem.button().setTitle_(f"{_ICON_PREFIX} ⚠️")
+            self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚠️")
             self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
         else:
-            self.statusitem.button().setTitle_(f"{_ICON_PREFIX} —")
+            self.statusitem.button().setTitle_(f"{self._icon_prefix} —")
             self._mi_sched_status.setTitle_("Scheduler: ● Running")
         self._ensure_runtime_started()
         log.info("AsusRouterMonitor ready")
@@ -356,7 +361,7 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
         """Router backend unreachable — run in degraded mode and retry health check."""
-        self.statusitem.button().setTitle_(f"{_ICON_PREFIX} ⚠️")
+        self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚠️")
         self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
         self._ensure_runtime_started()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -777,7 +782,7 @@ class AppDelegate(NSObject):
             _dl_bps, _ul_bps,
             gw_loss_pct=_gw_loss, gw_latency_ms=_gw_lat_ms,
         )
-        self.statusitem.button().setTitle_(f"{_ICON_PREFIX} {status_dot}")
+        self.statusitem.button().setTitle_(f"{self._icon_prefix} {status_dot}")
         self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
@@ -1012,7 +1017,7 @@ class AppDelegate(NSObject):
     def _start_spinner(self):
         """Start the menubar icon spinner animation on the main thread."""
         self._spinner_frame = 0
-        self.statusitem.button().setTitle_(f"{_ICON_PREFIX} ⚡")
+        self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚡")
         self._spinner_timer = (
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 _SPINNER_INTERVAL, self, "tickSpinner:", None, True
@@ -1027,7 +1032,7 @@ class AppDelegate(NSObject):
         btn = self.statusitem.button()
         btn.setImage_(None)
         btn.setImagePosition_(NSImageRight)
-        btn.setTitle_(f"{_ICON_PREFIX} —")
+        btn.setTitle_(f"{self._icon_prefix} —")
 
     @objc.typedSelector(b"v@:@")
     def tickSpinner_(self, _):
@@ -1269,7 +1274,7 @@ def main() -> None:
     runtime_env = _runtime_environment()
     cfg = load_config(runtime_env=runtime_env)
     ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
-    cfg = load_config()
+    cfg = load_config(runtime_env=runtime_env)
     cfg.ensure_dirs()
     log_path = cfg.data_dir / "scheduler.log"
     logging.basicConfig(
