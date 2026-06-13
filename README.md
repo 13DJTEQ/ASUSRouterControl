@@ -84,3 +84,11 @@ asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnec
 - **Backend selection**: `ROUTER_BACKEND` switches between Merlin and FreshTomato implementations
 - **Secure credentials**: 1Password (`op` CLI) with keychain fallback migration support
 - **SoundShield integration**: JSON export for network-aware audio device discovery
+
+## Performance metrics source methodology
+
+- **Backend API metrics**: Device inventory and router-level traffic snapshots come from the selected backend. On Merlin, these come from the `asusrouter` API datasets (`CLIENTS`, `NETWORK`) rather than Bandwidth Monitor page scraping.
+- **Per-client throughput metrics**: High-frequency client tx/rx rates are derived from SSH probe byte-counter deltas (primarily `wl sta_info`) across sampling intervals.
+- **WiFi and interface telemetry**: RSSI, channel, noise, client counts, and interface byte counters come from SSH commands (`wl`, `/proc/net/dev`) and are stored as time-series snapshots.
+- **Internet performance metrics**: WAN speed and latency are measured with multi-provider active tests (Ookla, Cloudflare, and CDN HTTP providers), then combined into a confidence-scored composite.
+- **Missing-data handling**: When firmware does not expose a metric (commonly some wired client tx/rx fields), the app records presence/placeholder rows instead of inventing synthetic values.
