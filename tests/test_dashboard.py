@@ -16,6 +16,10 @@ async def test_dashboard_empty_window_returns_empty_sections(tmp_path) -> None:
     try:
         data = await build_isp_client_dashboard(store, hours=2, clients=5, timeline_points=3)
         assert data["isp_performance"]["tests_total"] == 0
+        assert data["latency_health"]["samples"] == 0
+        assert data["wifi_health"]["samples"] == 0
+        assert data["system_health"]["samples"] == 0
+        assert data["router_direct"]["samples"] == 0
         assert data["client_speed_load"]["top_clients"] == []
         assert data["isp_client_timeline"] == []
     finally:
@@ -120,6 +124,10 @@ async def test_dashboard_isp_panel_tracks_mixed_quality_and_timeline_context(tmp
         assert quality["suspect"] == 1
         assert quality["error"] == 1
         assert data["isp_performance"]["avg_confidence"] == 65.0
+        assert "latency_health" in data
+        assert "wifi_health" in data
+        assert "system_health" in data
+        assert "router_direct" in data
 
         timeline = data["isp_client_timeline"]
         assert timeline

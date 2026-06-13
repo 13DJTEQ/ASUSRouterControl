@@ -41,6 +41,163 @@ def _fmt_ms(ms: float | None) -> str:
         return "N/A"
     return f"{ms:.1f} ms"
 
+def _to_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+
+def _pick_numeric(row: dict, aliases: tuple[str, ...]) -> float | None:
+    for alias in aliases:
+        if alias in row:
+            parsed = _to_float(row.get(alias))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+async def _fetch_router_direct_rows(store: DataStore, *, days: int) -> list[dict]:
+    if hasattr(store, "get_router_perf_snapshots"):
+        return await store.get_router_perf_snapshots(days=days)  # type: ignore[attr-defined]
+    if hasattr(store, "get_router_perf_series"):
+        return await store.get_router_perf_series(days=days)  # type: ignore[attr-defined]
+    return []
+
+
+def _metric_stats(values: list[float], *, digits: int = 2) -> dict:
+    if not values:
+        return {"samples": 0}
+    return {
+        "samples": len(values),
+        "avg": round(mean(values), digits),
+        "p95": round(_percentile(values, 95), digits),
+        "max": round(max(values), digits),
+    }
+
+
+def _counter_stats(values: list[float]) -> dict:
+    if not values:
+        return {"samples": 0, "total_delta": 0.0}
+    ordered = sorted(values)
+    return {
+        "samples": len(values),
+        "latest": round(values[-1], 2),
+        "max": round(max(values), 2),
+        "total_delta": round(max(0.0, ordered[-1] - ordered[0]), 2),
+    }
+
+
+def _build_router_direct(router_rows: list[dict]) -> dict:
+    if not router_rows:
+        return {"samples": 0}
+
+    load_1m = [
+        _pick_numeric(row, ("load_1m", "load1", "loadavg_1m"))
+        for row in router_rows
+    ]
+    load_5m = [
+        _pick_numeric(row, ("load_5m", "load5", "loadavg_5m"))
+        for row in router_rows
+    ]
+    load_15m = [
+        _pick_numeric(row, ("load_15m", "load15", "loadavg_15m"))
+        for row in router_rows
+    ]
+    wan_rx_bps = [
+        _pick_numeric(row, ("wan_rx_rate_bps", "wan_rx_bps", "wan_rate_rx_bps"))
+        for row in router_rows
+    ]
+    wan_tx_bps = [
+        _pick_numeric(row, ("wan_tx_rate_bps", "wan_tx_bps", "wan_rate_tx_bps"))
+        for row in router_rows
+    ]
+    lan_rx_bps = [
+        _pick_numeric(row, ("lan_rx_rate_bps", "lan_rx_bps", "lan_rate_rx_bps"))
+        for row in router_rows
+    ]
+    lan_tx_bps = [
+        _pick_numeric(row, ("lan_tx_rate_bps", "lan_tx_bps", "lan_rate_tx_bps"))
+        for row in router_rows
+    ]
+    wan_rx_drops = [
+        _pick_numeric(row, ("wan_rx_drops", "wan_drops_rx"))
+        for row in router_rows
+    ]
+    wan_tx_drops = [
+        _pick_numeric(row, ("wan_tx_drops", "wan_drops_tx"))
+        for row in router_rows
+    ]
+    lan_rx_drops = [
+        _pick_numeric(row, ("lan_rx_drops", "lan_drops_rx"))
+        for row in router_rows
+    ]
+    lan_tx_drops = [
+        _pick_numeric(row, ("lan_tx_drops", "lan_drops_tx"))
+        for row in router_rows
+    ]
+    wan_rx_errors = [
+        _pick_numeric(row, ("wan_rx_errors", "wan_errors_rx"))
+        for row in router_rows
+    ]
+    wan_tx_errors = [
+        _pick_numeric(row, ("wan_tx_errors", "wan_errors_tx"))
+        for row in router_rows
+    ]
+    lan_rx_errors = [
+        _pick_numeric(row, ("lan_rx_errors", "lan_errors_rx"))
+        for row in router_rows
+    ]
+    lan_tx_errors = [
+        _pick_numeric(row, ("lan_tx_errors", "lan_errors_tx"))
+        for row in router_rows
+    ]
+
+    def _clean(values: list[float | None]) -> list[float]:
+        return [v for v in values if v is not None]
+
+    normalized = sorted(
+        router_rows, key=lambda row: str(row.get("timestamp") or "")
+    )
+    latest = normalized[-1] if normalized else {}
+    interfaces = {
+        "wan": latest.get("wan_interface") or latest.get("wan_ifname"),
+        "lan": latest.get("lan_interface") or latest.get("lan_ifname"),
+    }
+    available_fields = sorted({key for row in router_rows for key in row.keys()})
+    return {
+        "samples": len(router_rows),
+        "interfaces": interfaces,
+        "latest_timestamp": latest.get("timestamp"),
+        "load": {
+            "load_1m": _metric_stats(_clean(load_1m), digits=3),
+            "load_5m": _metric_stats(_clean(load_5m), digits=3),
+            "load_15m": _metric_stats(_clean(load_15m), digits=3),
+        },
+        "throughput_bps": {
+            "wan_rx": _metric_stats(_clean(wan_rx_bps), digits=2),
+            "wan_tx": _metric_stats(_clean(wan_tx_bps), digits=2),
+            "lan_rx": _metric_stats(_clean(lan_rx_bps), digits=2),
+            "lan_tx": _metric_stats(_clean(lan_tx_bps), digits=2),
+        },
+        "drops": {
+            "wan_rx": _counter_stats(_clean(wan_rx_drops)),
+            "wan_tx": _counter_stats(_clean(wan_tx_drops)),
+            "lan_rx": _counter_stats(_clean(lan_rx_drops)),
+            "lan_tx": _counter_stats(_clean(lan_tx_drops)),
+        },
+        "errors": {
+            "wan_rx": _counter_stats(_clean(wan_rx_errors)),
+            "wan_tx": _counter_stats(_clean(wan_tx_errors)),
+            "lan_rx": _counter_stats(_clean(lan_rx_errors)),
+            "lan_tx": _counter_stats(_clean(lan_tx_errors)),
+        },
+        "available_fields": available_fields,
+    }
+
 
 async def generate_report(store: DataStore, *, days: int = 7) -> dict:
     """Generate a structured report dict from `days` of data."""
@@ -52,6 +209,7 @@ async def generate_report(store: DataStore, *, days: int = 7) -> dict:
     latency = await store.get_latency_probes(days=days)
     sys_snaps = await store.get_system_snapshots(days=days)
     wifi_snaps = await store.get_wifi_snapshots(days=days)
+    router_direct_rows = await _fetch_router_direct_rows(store, days=days)
     devices = await store.get_all_devices()
 
     # --- 1. Summary + Health Score ---
@@ -74,9 +232,12 @@ async def generate_report(store: DataStore, *, days: int = 7) -> dict:
 
     # --- 7. System Health ---
     report["system"] = _build_system(sys_snaps)
+    report["router_direct"] = _build_router_direct(router_direct_rows)
 
     # --- 8. Anomalies ---
-    report["anomalies"] = _build_anomalies(speed_tests, latency, sys_snaps)
+    report["anomalies"] = _build_anomalies(
+        speed_tests, latency, sys_snaps, report.get("router_direct")
+    )
 
     # --- 9. Provider Comparison ---
     report["provider_comparison"] = _build_provider_comparison(speed_tests)
@@ -360,7 +521,12 @@ def _build_system(sys_snaps) -> dict:
     return result
 
 
-def _build_anomalies(speed_tests, latency, sys_snaps) -> list[str]:
+def _build_anomalies(
+    speed_tests,
+    latency,
+    sys_snaps,
+    router_direct: dict | None = None,
+) -> list[str]:
     anomalies: list[str] = []
 
     # Speed test failures
@@ -393,6 +559,24 @@ def _build_anomalies(speed_tests, latency, sys_snaps) -> list[str]:
         if (s.get("temp_c") or 0) > 90:
             anomalies.append(f"Temperature {s['temp_c']}°C at {s.get('timestamp', '?')}")
             break  # Report once
+    direct = router_direct or {}
+    load_1m_max = (
+        direct.get("load", {})
+        .get("load_1m", {})
+        .get("max")
+    )
+    if isinstance(load_1m_max, (int, float)) and load_1m_max >= 2.0:
+        anomalies.append(f"Router direct load_1m peak elevated ({load_1m_max:.2f})")
+
+    for family in ("drops", "errors"):
+        fam_data = direct.get(family, {})
+        total_delta = 0.0
+        for iface_key in ("wan_rx", "wan_tx", "lan_rx", "lan_tx"):
+            value = _to_float(fam_data.get(iface_key, {}).get("total_delta"))
+            if value:
+                total_delta += value
+        if total_delta > 0:
+            anomalies.append(f"Router direct {family} increased by {int(total_delta)}")
 
     return anomalies
 
@@ -435,6 +619,30 @@ def _build_recommendations(report: dict) -> list[str]:
         recs.append(
             f"{gw['loss_events']} packet loss events → call Spectrum for signal level check"
         )
+    direct = report.get("router_direct", {})
+    load_max = (
+        direct.get("load", {})
+        .get("load_1m", {})
+        .get("max")
+    )
+    if isinstance(load_max, (int, float)) and load_max >= 2.0:
+        recs.append(
+            f"Router direct load peak {load_max:.2f} → inspect CPU-bound services and QoS rules"
+        )
+    for family in ("drops", "errors"):
+        fam_data = direct.get(family, {})
+        total_delta = 0.0
+        for iface_key in ("wan_rx", "wan_tx", "lan_rx", "lan_tx"):
+            value = _to_float(fam_data.get(iface_key, {}).get("total_delta"))
+            if value:
+                total_delta += value
+        if total_delta > 0:
+            recs.append(
+                (
+                    f"Router direct {family} increased ({int(total_delta)}) "
+                    "→ inspect cabling/interface health"
+                )
+            )
 
     if not recs:
         recs.append("No issues detected — network health is good")

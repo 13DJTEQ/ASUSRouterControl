@@ -3178,6 +3178,10 @@ def dashboard(
     else:
         window = data.get("window", {})
         isp = data.get("isp_performance", {})
+        latency_health = data.get("latency_health", {})
+        wifi_health = data.get("wifi_health", {})
+        system_health = data.get("system_health", {})
+        router_direct = data.get("router_direct", {})
         client_panel = data.get("client_speed_load", {})
         timeline = data.get("isp_client_timeline", [])
         quality_counts = isp.get("quality_counts", {})
@@ -3200,6 +3204,14 @@ def dashboard(
         summary.add_row("Avg Ping", _fmt(isp.get("avg_ping_ms"), " ms"))
         summary.add_row("Avg Jitter", _fmt(isp.get("avg_jitter_ms"), " ms"))
         summary.add_row("Avg Confidence", _fmt(isp.get("avg_confidence"), "/100"))
+        summary.add_row("Latency Samples", str(latency_health.get("samples", 0)))
+        summary.add_row("WiFi Samples", str(wifi_health.get("samples", 0)))
+        summary.add_row("System Samples", str(system_health.get("samples", 0)))
+        summary.add_row("Router Direct Samples", str(router_direct.get("samples", 0)))
+        if router_direct.get("samples", 0):
+            summary.add_row("Router Load 1m Peak", _fmt(router_direct.get("load_1m_peak")))
+            summary.add_row("Router Drop Delta", str(router_direct.get("drop_delta_total", 0)))
+            summary.add_row("Router Error Delta", str(router_direct.get("error_delta_total", 0)))
         latest = isp.get("latest_test") or {}
         if latest:
             summary.add_row("Latest Test", str(latest.get("timestamp") or "—"))
