@@ -16,6 +16,7 @@ from rich.table import Table
 
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
+    _active_backend_name,
     delete_legacy_credentials,
     get_router_credentials,
     migrate_legacy_credentials,
@@ -1188,7 +1189,10 @@ def setup():
     ok_pass = store_credential("router_password", password)
 
     if ok_user and ok_pass:
-        console.print("\n[green]Credentials stored in 1Password (universal-keychain).[/green]")
+        backend_name = _active_backend_name()
+        msg = f"\n[green]Credentials stored in {backend_name} "
+        msg += "(universal-keychain).[/green]"
+        console.print(msg)
         console.print("Config file: copy .env.example to .env and adjust ROUTER_HOST if needed.")
     else:
         console.print("\n[red]Failed to store credentials.[/red]")
@@ -1208,8 +1212,9 @@ def credentials_migrate(dry_run: bool):
 
     migrated = migrate_legacy_credentials(dry_run=dry_run)
     if not migrated:
+        name = _active_backend_name()
         console.print(
-            "[dim]Nothing to migrate — canonical entries already exist in 1Password.[/dim]"
+            f"[dim]Nothing to migrate — canonical entries already exist in {name}.[/dim]"
         )
         return
     verb = "Would migrate" if dry_run else "Migrated"

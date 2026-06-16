@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/build_macos_app.sh --mode <test|prod>
+Usage: bash scripts/build_macos_app.sh --mode <dev|prod>
 
 Modes:
-  test  Build ASUSRouterControl TEST.app into ./testbuilds with a red TEST icon.
+  dev   Build ASUSRouterControl DEV.app into ./testbuilds with a red DEV icon.
   prod  Build a self-contained ASUSRouterControl.app and package it as ./dist/ASUSRouterControl.dmg.
 EOF
 }
@@ -30,8 +30,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$MODE" != "test" && "$MODE" != "prod" ]]; then
-  echo "Missing or invalid --mode. Expected test or prod." >&2
+if [[ "$MODE" != "dev" && "$MODE" != "prod" ]]; then
+  echo "Missing or invalid --mode. Expected dev or prod." >&2
   usage
   exit 1
 fi
@@ -40,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_BUILDS_DIR="${PROJECT_ROOT}/testbuilds"
 BUILD_ROOT="${PROJECT_ROOT}/build/macos-app"
-STAGE_DIR="${BUILD_ROOT}/stage-test"
+STAGE_DIR="${BUILD_ROOT}/stage-dev"
 PROD_BUILD_DIR="${BUILD_ROOT}/prod"
 PROD_WORK_DIR="${PROD_BUILD_DIR}/pyinstaller-work"
 PROD_SPEC_DIR="${PROD_BUILD_DIR}/spec"
@@ -53,11 +53,18 @@ if [[ ! -x "${VENV_PY}" ]]; then
   exit 1
 fi
 
-build_test_app() {
-  local app_name="ASUSRouterControl TEST.app"
-  local bundle_id="dev.mediawavetech.asusroutercontrol.test"
-  local display_name="ASUSRouterControl TEST"
-  local icon_icns="${BUILD_ROOT}/Icon-Test.icns"
+build_dev_app() {
+  local app_name="ASUSRouterControl DEV.app"
+  local bundle_id="dev.mediawavetech.asusroutercontrol.dev"
+  local display_name="ASUSRouterControl DEV"
+  local icon_icns="${BUILD_ROOT}/Icon-Dev.icns"
+  local dev_runtime_name="ASUSRouterControlDevRuntime"
+  local dev_runtime_dir="${BUILD_ROOT}/dev-runtime"
+  local dev_runtime_work_dir="${dev_runtime_dir}/pyinstaller-work"
+  local dev_runtime_spec_dir="${dev_runtime_dir}/spec"
+  local dev_runtime_entrypoint="${dev_runtime_dir}/dev_runtime_entrypoint.py"
+  local dev_runtime_app="${dev_runtime_dir}/${dev_runtime_name}.app"
+  local dev_runtime_exe="${dev_runtime_app}/Contents/MacOS/${dev_runtime_name}"
   local app_dir="${STAGE_DIR}/${app_name}"
   local contents_dir="${app_dir}/Contents"
   local macos_dir="${contents_dir}/MacOS"
@@ -69,23 +76,61 @@ build_test_app() {
   rm -rf "${app_dir}"
   mkdir -p "${macos_dir}" "${resources_dir}"
 
+  # Build a DEV-specific self-contained runtime when PyInstaller is available.
+  # This keeps fallback launches aligned with current source behavior.
+  if "${VENV_PY}" -c "import PyInstaller" >/dev/null 2>&1; then
+    rm -rf "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}" "${dev_runtime_app}"
+    mkdir -p "${dev_runtime_dir}" "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}"
+    cat > "${dev_runtime_entrypoint}" <<'EOF'
+from asusroutercontrol.menubar import main
+
+if __name__ == "__main__":
+    main()
+EOF
+    "${VENV_PY}" -m PyInstaller \
+      --noconfirm \
+      --clean \
+      --windowed \
+      --name "${dev_runtime_name}" \
+      --hidden-import AppKit \
+      --hidden-import Foundation \
+      --distpath "${dev_runtime_dir}" \
+      --workpath "${dev_runtime_work_dir}" \
+      --specpath "${dev_runtime_spec_dir}" \
+      --osx-bundle-identifier "dev.mediawavetech.asusroutercontrol.devruntime" \
+      "${dev_runtime_entrypoint}"
+
+    # Ensure inner runtime also declares LSUIElement so macOS treats it as a status-bar app.
+    # Without this, the inner runtime fails scene activation when another LSUIElement app is running.
+    if [[ -f "${dev_runtime_app}/Contents/Info.plist" ]]; then
+      plutil -replace LSUIElement -bool true "${dev_runtime_app}/Contents/Info.plist"
+    fi
+  fi
+
   cat > "${launcher}" <<EOF
 #!/usr/bin/env bash
 PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
+DEV_RUNTIME_EXE="${dev_runtime_exe}"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
-export ASUSROUTERCONTROL_RUNTIME_ENV="test"
-
-# Prefer the self-contained binary when available. LaunchServices may apply
-# system-policy restrictions to interpreter paths on external volumes.
-if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
-  exec "\${SELF_CONTAINED_EXE}"
-fi
-
-# Fallback to source-tree runtime for development workflows.
+export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
+# Prefer source-tree runtime for dev builds so the process remains associated
+# with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then
   export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
-  exec "\${VENV_PY}" -m asusroutercontrol.menubar
+  "\${VENV_PY}" -m asusroutercontrol.menubar
+  venv_exit=\$?
+  if [[ \${venv_exit} -eq 0 ]]; then
+    exit 0
+  fi
+fi
+# Fallback to DEV-specific self-contained runtime built from current source.
+if [[ -x "\${DEV_RUNTIME_EXE}" ]]; then
+  exec "\${DEV_RUNTIME_EXE}"
+fi
+# Final fallback to shared dist runtime.
+if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
+  exec "\${SELF_CONTAINED_EXE}"
 fi
 
 /usr/bin/osascript -e 'display alert "ASUSRouterControl cannot start" message "No usable runtime found. Build the app or run make setup in the project folder."'
@@ -93,7 +138,7 @@ exit 1
 EOF
   chmod +x "${launcher}"
 
-  "${VENV_PY}" "${SCRIPT_DIR}/generate_test_icon.py" --output "${icon_icns}"
+  "${VENV_PY}" "${SCRIPT_DIR}/generate_dev_icon.py" --output "${icon_icns}"
   cp "${icon_icns}" "${resources_dir}/Icon.icns"
 
   cat > "${plist_path}" <<EOF
@@ -130,7 +175,7 @@ EOF
   mkdir -p "${TEST_BUILDS_DIR}"
   rm -rf "${dest_app}"
   cp -R "${app_dir}" "${dest_app}"
-  touch "${dest_app}/Contents/Resources/TEST_BUILD"
+  touch "${dest_app}/Contents/Resources/DEV_BUILD"
 
   echo "Built ${app_name}"
   echo "Output: ${dest_app}"
@@ -199,8 +244,8 @@ EOF
   echo "Built production DMG: ${prod_dmg}"
 }
 
-if [[ "${MODE}" == "test" ]]; then
-  build_test_app
+if [[ "${MODE}" == "dev" ]]; then
+  build_dev_app
 else
   build_prod_dmg
 fi

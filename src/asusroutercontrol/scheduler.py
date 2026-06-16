@@ -129,8 +129,6 @@ class MonitorScheduler:
         # {mac: (rx_bytes, tx_bytes, timestamp)}
         self._client_prev: dict[str, tuple[int, int, datetime]] = {}
         self._perf_samples: dict[str, deque[float]] = {}
-        self._perf_counts: dict[str, int] = {}
-        self._perf_log_every = 12
         # Per-loop consecutive failure counters
         self._failures: dict[str, int] = {}
         self._runtime_profile: RuntimeProfile | None = None
@@ -352,9 +350,8 @@ class MonitorScheduler:
         sample_ms = max(0.0, duration_seconds) * 1000.0
         samples = self._perf_samples.setdefault(metric, deque(maxlen=120))
         samples.append(sample_ms)
-        count = self._perf_counts.get(metric, 0) + 1
-        self._perf_counts[metric] = count
-        if count % self._perf_log_every:
+        count = len(samples)
+        if count % 12:
             return
 
         ordered = sorted(samples)
@@ -689,15 +686,16 @@ class MonitorScheduler:
         from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
 
+        cfg = self._cfg
+        username, password = get_router_credentials()
+        if not username or not password:
+            log.error("No router credentials — poll loop disabled")
+            return
+
+        backend = create_backend(cfg, username=username, password=password)
+
         try:
-            cfg = self._cfg
-            username, password = get_router_credentials()
-            if not username or not password:
-                log.error("No router credentials — poll loop disabled")
-                return
-
-            backend = create_backend(cfg, username=username, password=password)
-
+            await backend.connect()
             while self._running:
                 cycle_start = perf_counter()
                 try:
@@ -719,22 +717,21 @@ class MonitorScheduler:
                     backoff = self._record_failure("poll")
                     if backoff > 0:
                         await asyncio.sleep(backoff)
-                finally:
-                    try:
-                        await backend.disconnect()
-                    except Exception:
-                        pass
 
                 await asyncio.sleep(self._cfg.poll_interval)
         except asyncio.CancelledError:
             log.info("Poll loop cancelled")
+        finally:
+            try:
+                await backend.disconnect()
+            except Exception:
+                log.debug("Backend disconnect error in poll loop", exc_info=True)
 
     async def _run_poll_cycle(self, backend) -> None:
         """Single poll cycle — extracted so it can be wrapped in wait_for."""
         from asusroutercontrol.analysis.clients import BAND_LINK_RATES, DEFAULT_LINK_RATE
         from asusroutercontrol.models import ClientLoad, ConnectionType
 
-        await backend.connect()
         devices = await backend.get_connected_devices()
         now = utcnow()
         online_count = 0

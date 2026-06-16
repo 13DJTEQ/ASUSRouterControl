@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -78,8 +79,8 @@ class MerlinBackend(FirmwareBackend):
         now = datetime.utcnow()
         try:
             data = await router.async_get_data(AsusData.CLIENTS)
-        except Exception:
-            log.exception("Failed to get connected devices")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to get connected devices")
             return []
 
         devices: list[Device] = []
@@ -112,8 +113,8 @@ class MerlinBackend(FirmwareBackend):
         router = self._ensure_connected()
         try:
             data = await router.async_get_data(AsusData.NETWORK)
-        except Exception:
-            log.exception("Failed to get traffic stats")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to get traffic stats")
             return TrafficSnapshot()
 
         if not data or not isinstance(data, dict):
@@ -135,8 +136,8 @@ class MerlinBackend(FirmwareBackend):
             cpu_data = await router.async_get_data(AsusData.CPU)
             if cpu_data and isinstance(cpu_data, dict):
                 info.cpu_usage_percent = cpu_data.get("total", {}).get("usage")
-        except Exception:
-            log.debug("CPU data unavailable")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.debug("CPU data unavailable", exc_info=True)
 
         try:
             ram_data = await router.async_get_data(AsusData.RAM)
@@ -147,16 +148,16 @@ class MerlinBackend(FirmwareBackend):
                 info.ram_used_mb = used / 1024 if used else None
                 if total:
                     info.ram_usage_percent = round((used / total) * 100, 1)
-        except Exception:
-            log.debug("RAM data unavailable")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.debug("RAM data unavailable", exc_info=True)
 
         try:
             fw_data = await router.async_get_data(AsusData.FIRMWARE)
             if fw_data and isinstance(fw_data, dict):
                 info.firmware_version = fw_data.get("current")
                 info.model = fw_data.get("model")
-        except Exception:
-            log.debug("Firmware data unavailable")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.debug("Firmware data unavailable", exc_info=True)
 
         return info
 
@@ -164,8 +165,8 @@ class MerlinBackend(FirmwareBackend):
         router = self._ensure_connected()
         try:
             data = await router.async_get_data(AsusData.WAN)
-        except Exception:
-            log.exception("Failed to get WAN status")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to get WAN status")
             return WANStatus()
 
         if not data or not isinstance(data, dict):
@@ -221,8 +222,8 @@ class MerlinBackend(FirmwareBackend):
         router = self._ensure_connected()
         try:
             data = await router.async_get_data(AsusData.PORT_FORWARDING)
-        except Exception:
-            log.exception("Failed to get port forwarding rules")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to get port forwarding rules")
             return []
         if not data:
             return []
@@ -267,8 +268,8 @@ class MerlinBackend(FirmwareBackend):
 
         try:
             current = await router.async_get_data(AsusData.PORT_FORWARDING)
-        except Exception:
-            log.exception("Failed to fetch current port forwarding rules")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to fetch current port forwarding rules")
             return False
 
         current_rows = [
@@ -282,16 +283,16 @@ class MerlinBackend(FirmwareBackend):
 
         try:
             applied = await router.async_apply_port_forwarding_rules(desired_asus)
-        except Exception:
-            log.exception("Failed to apply port forwarding rules")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to apply port forwarding rules")
             return False
         if not applied:
             return False
 
         try:
             verify = await router.async_get_data(AsusData.PORT_FORWARDING)
-        except Exception:
-            log.exception("Failed to verify port forwarding rules after apply")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.warning("Failed to verify port forwarding rules after apply")
             return True
 
         verify_rows = [

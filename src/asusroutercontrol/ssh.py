@@ -5,6 +5,7 @@ Merlin firmware enables SSH by default on port 22.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -416,7 +417,7 @@ class RouterSSH:
             if not r.ok:
                 log.error("Shell write_file failed: %s", r.stderr)
             return r.ok
-        except Exception:
+        except (asyncssh.Error, OSError, asyncio.TimeoutError):
             log.exception("Failed to write remote file: %s", safe_path)
             return False
 
@@ -434,7 +435,7 @@ class RouterSSH:
             log.debug("SFTP unavailable for file_exists, falling back to test")
             r = await self.run(f"test -f {safe_path}")
             return r.ok
-        except Exception:
+        except (asyncssh.Error, OSError, asyncio.TimeoutError):
             log.exception("Failed to stat remote file: %s", safe_path)
             return False
 

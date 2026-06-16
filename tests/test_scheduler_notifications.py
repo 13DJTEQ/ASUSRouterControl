@@ -672,7 +672,7 @@ def test_scheduler_perf_sample_emits_periodic_baseline_log(
 ) -> None:
     caplog.set_level("INFO")
     scheduler = MonitorScheduler(store=_Store(), cfg=Config())
-    for _ in range(scheduler._perf_log_every):
+    for _ in range(12):
         scheduler._record_perf_sample(
             "unit.test.metric",
             0.010,

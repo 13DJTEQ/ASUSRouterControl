@@ -7,6 +7,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from asusroutercontrol._time import utcnow
+
 
 class ConnectionType(StrEnum):
     WIRED = "wired"
@@ -31,7 +33,7 @@ class Device(BaseModel):
 
 
 class TrafficSnapshot(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     rx_bytes: int = 0
     tx_bytes: int = 0
     rx_rate_bps: float | None = None
@@ -79,7 +81,7 @@ class PortRule(BaseModel):
 class SpeedTestResult(BaseModel):
     """Speed test result — single provider or multi-source composite."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     download_bps: float | None = None
     upload_bps: float | None = None
     ping_ms: float | None = None
@@ -96,7 +98,7 @@ class SpeedTestResult(BaseModel):
 class LatencyProbe(BaseModel):
     """Latency measurement to a single target."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     target: str = ""  # gateway / cloudflare / google
     min_ms: float | None = None
     avg_ms: float | None = None
@@ -109,7 +111,7 @@ class LatencyProbe(BaseModel):
 class SystemSnapshot(BaseModel):
     """Point-in-time router health."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     cpu_pct: float | None = None
     ram_pct: float | None = None
     temp_c: float | None = None
@@ -121,7 +123,7 @@ class SystemSnapshot(BaseModel):
 class WiFiSnapshot(BaseModel):
     """Per-band WiFi health."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     band: str = ""  # "2.4" or "5"
     client_count: int = 0
     avg_rssi: float | None = None
@@ -137,7 +139,7 @@ class WiFiSnapshot(BaseModel):
 class ConfigSnapshot(BaseModel):
     """Point-in-time capture of tracked NVRAM settings."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     source: str = "scheduled"  # scheduled / manual / pre-change / post-change
     nvram_json: str = "{}"  # JSON blob of key→value
     diff_summary: str = ""  # human-readable diff vs previous
@@ -146,7 +148,7 @@ class ConfigSnapshot(BaseModel):
 class ConfigEvent(BaseModel):
     """Discrete router configuration or lifecycle event."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     event_type: str = ""  # reboot / config_change / service_restart / firmware_update
     description: str = ""
     nvram_changes_json: str = "{}"  # JSON of changed keys {key: [old, new]}
@@ -167,7 +169,7 @@ class ServiceEntry(BaseModel):
 class ServiceAudit(BaseModel):
     """Snapshot of running services and resource usage."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     services: list[ServiceEntry] = Field(default_factory=list)
     total_rss_kb: int = 0
     bloat_rss_kb: int = 0
@@ -187,7 +189,7 @@ class SysctlEntry(BaseModel):
 class SysctlSnapshot(BaseModel):
     """Snapshot of TCP/network sysctl tuning state."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     entries: list[SysctlEntry] = Field(default_factory=list)
     optimal_count: int = 0
     total_count: int = 0
@@ -206,7 +208,7 @@ class ChannelSurveyEntry(BaseModel):
 class ChannelSurvey(BaseModel):
     """WiFi channel survey for a single band."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     band: str = ""  # "2.4" or "5"
     interface: str = ""  # e.g. "eth1", "eth2"
     current_channel: int = 0
@@ -218,7 +220,7 @@ class ChannelSurvey(BaseModel):
 class ClientLoad(BaseModel):
     """Per-client traffic load snapshot."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     mac: str
     hostname: str | None = None
     band: str | None = None
@@ -232,7 +234,7 @@ class ClientLoad(BaseModel):
 class RouterSnapshot(BaseModel):
     """Complete point-in-time router state."""
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     system: SystemInfo | None = None
     wan: WANStatus | None = None
     devices: list[Device] = Field(default_factory=list)

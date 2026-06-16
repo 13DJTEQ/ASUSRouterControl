@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+
+import asyncssh
 
 from asusroutercontrol.models import (
     ChannelSurvey,
@@ -103,7 +106,7 @@ async def _discover_wireless_interfaces(ssh: RouterSSH) -> list[_WirelessInterfa
                         traffic_band=traffic_band,
                     )
                 )
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.debug("WiFi interface discovery failed", exc_info=True)
 
     deduped = _dedupe_wireless_interfaces(discovered)
@@ -135,7 +138,7 @@ async def probe_latency(ssh: RouterSSH) -> list[LatencyProbe]:
             r = await ssh.run(f"ping -c {PING_COUNT} -W 5 {ip} 2>&1")
             probe = _parse_ping(r.stdout, name, now)
             results.append(probe)
-        except Exception:
+        except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
             log.exception("Latency probe failed for %s", name)
             results.append(LatencyProbe(timestamp=now, target=name))
     return results
@@ -221,7 +224,7 @@ async def probe_system(ssh: RouterSSH) -> SystemSnapshot:
                 temp_m = re.search(r"([\d.]+)", r.stdout)
                 if temp_m:
                     snap.temp_c = float(temp_m.group(1))
-        except Exception:
+        except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
             log.warning("Temperature probe failed (binary data?), skipping")
 
         # Uptime in seconds
@@ -237,7 +240,7 @@ async def probe_system(ssh: RouterSSH) -> SystemSnapshot:
         if r.ok and r.stdout:
             snap.conntrack_max = int(r.stdout)
 
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.exception("System probe failed")
 
     return snap
@@ -390,7 +393,7 @@ async def probe_services(ssh: RouterSSH) -> ServiceAudit:
         audit.bloat_rss_kb = sum(s.rss_kb for s in bloat_services)
         audit.bloat_count = len(bloat_services)
 
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.exception("Service audit failed")
 
     return audit
@@ -435,7 +438,7 @@ async def probe_sysctl(ssh: RouterSSH) -> SysctlSnapshot:
         snap.total_count = len(entries)
         snap.optimal_count = sum(1 for e in entries if e.is_optimal)
 
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.exception("Sysctl probe failed")
 
     return snap
@@ -535,7 +538,7 @@ async def probe_wifi_channels(ssh: RouterSSH) -> list[ChannelSurvey]:
                             f"vs current {current_entry.utilization_pct:.0f}%"
                         )
 
-        except Exception:
+        except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
             log.exception(
                 "WiFi channel survey failed for interface=%s band=%s",
                 iface_info.iface,
@@ -628,7 +631,7 @@ async def probe_wifi(
                 snap.rx_bytes = (snap.rx_bytes or 0) + rx_bytes
                 snap.tx_bytes = (snap.tx_bytes or 0) + tx_bytes
 
-        except Exception:
+        except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
             log.exception(
                 "WiFi probe failed for interface=%s band=%s",
                 iface,
@@ -670,7 +673,7 @@ async def _read_iface_bytes(ssh: RouterSSH) -> dict[str, tuple[int, int]]:
                 rx_bytes = int(fields[0])
                 tx_bytes = int(fields[8])
                 result[iface_name] = (rx_bytes, tx_bytes)
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.exception("Failed to read /proc/net/dev")
     return result
 
@@ -745,7 +748,7 @@ async def probe_client_traffic(
                     )
                     if candidate_score > existing_score:
                         results_by_mac[mac_key] = candidate
-        except Exception:
+        except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
             log.exception(
                 "Client traffic probe failed for interface=%s band=%s",
                 iface,
@@ -800,7 +803,7 @@ async def probe_wired_clients(
                 bridge_ports[mac] = port
                 if mac in wifi_set:
                     wifi_ports.add(port)
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.debug("Bridge MAC table probe failed", exc_info=True)
 
     neigh_by_mac: dict[str, tuple[str, str | None]] = {}
@@ -823,7 +826,7 @@ async def probe_wired_clients(
                 ip = match.group("ip")
                 mac = _normalize_mac(match.group("mac"))
                 neigh_by_mac[mac] = (ip, state)
-    except Exception:
+    except (asyncssh.Error, OSError, ValueError, asyncio.TimeoutError):
         log.debug("Neighbor table probe failed", exc_info=True)
 
     candidates = set(bridge_ports) | set(neigh_by_mac)

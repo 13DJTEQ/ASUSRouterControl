@@ -136,6 +136,7 @@ async def apply_nvram_setting(
         )
 
     except Exception as e:
+        log.exception("apply_nvram_setting failed for %s", key)
         return ApplyResult(
             key=key, old_value=old_value, new_value=value,
             success=False, service_restarted="",

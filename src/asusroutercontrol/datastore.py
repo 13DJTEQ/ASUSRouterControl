@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,11 @@ _SUSPECT_UPLOAD_BPS = 120_000_000
 _MAX_REASONABLE_LATENCY_MS = 10_000
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS devices (
     mac TEXT PRIMARY KEY,
     ip TEXT,
@@ -198,37 +204,65 @@ class DataStore:
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # WAL mode allows concurrent readers while a writer commits
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._migrate()
         await self._db.commit()
         log.info("DataStore opened: %s", self._db_path)
 
     async def _migrate(self) -> None:
-        """Add columns that may be missing from older databases."""
         db = self._db
         if not db:
             return
-        migrations = [
-            ("speed_tests", "source", "TEXT DEFAULT 'ookla'"),
-            ("speed_tests", "session_id", "TEXT DEFAULT ''"),
-            ("speed_tests", "provider_details_json", "TEXT DEFAULT '{}'"),
-            ("speed_tests", "quality", "TEXT DEFAULT 'ok'"),
-            ("latency_probes", "quality", "TEXT DEFAULT 'ok'"),
-            ("wifi_snapshots", "rx_bytes", "INTEGER"),
-            ("wifi_snapshots", "tx_bytes", "INTEGER"),
-            ("wifi_snapshots", "rx_rate_bps", "REAL"),
-            ("wifi_snapshots", "tx_rate_bps", "REAL"),
+        # Determine current version
+        try:
+            row = await (await db.execute("SELECT MAX(version) FROM schema_version")).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        current = (row[0] or 0) if row else 0
+
+        migrations: list[tuple[int, str]] = [
+            (1, "ALTER TABLE speed_tests ADD COLUMN source TEXT DEFAULT 'ookla';"),
+            (2, "ALTER TABLE speed_tests ADD COLUMN session_id TEXT DEFAULT '';"),
+            (3, "ALTER TABLE speed_tests ADD COLUMN provider_details_json TEXT DEFAULT '{}';"),
+            (4, "ALTER TABLE speed_tests ADD COLUMN quality TEXT DEFAULT 'ok';"),
+            (5, "ALTER TABLE latency_probes ADD COLUMN quality TEXT DEFAULT 'ok';"),
+            (6, "ALTER TABLE wifi_snapshots ADD COLUMN rx_bytes INTEGER;"),
+            (7, "ALTER TABLE wifi_snapshots ADD COLUMN tx_bytes INTEGER;"),
+            (8, "ALTER TABLE wifi_snapshots ADD COLUMN rx_rate_bps REAL;"),
+            (9, "ALTER TABLE wifi_snapshots ADD COLUMN tx_rate_bps REAL;"),
         ]
-        for table, col, col_def in migrations:
+
+        for version, sql in migrations:
+            if version <= current:
+                continue
             try:
+                await db.execute(sql)
                 await db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {col} {col_def}"
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (version, datetime.now(tz=timezone.utc).isoformat()),
                 )
-                log.info("Migrated: %s.%s", table, col)
-            except Exception:
-                pass  # Column already exists
+                log.info("Applied migration %d: %s", version, sql)
+            except sqlite3.OperationalError as exc:
+                err_msg = str(exc).lower()
+                if "duplicate column name" in err_msg or "already exists" in err_msg:
+                    # Already applied outside of version tracking; mark it
+                    await db.execute(
+                        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                        (version, datetime.now(tz=timezone.utc).isoformat()),
+                    )
+                    log.info("Migration %d already applied; marked in schema_version", version)
+                else:
+                    log.exception("Migration %d failed: %s", version, sql)
+                    raise
 
     async def close(self) -> None:
         if self._db:
+            try:
+                await self._db.execute("PRAGMA optimize")
+            except Exception:
+                log.debug("PRAGMA optimize failed on close", exc_info=True)
             await self._db.close()
 
     def _conn(self) -> aiosqlite.Connection:
@@ -246,7 +280,7 @@ class DataStore:
             await db.rollback()
         except Exception:
             # Safe no-op if no active transaction.
-            pass
+            log.debug("Rollback no-op (no active transaction)", exc_info=True)
 
     @staticmethod
     def _utcnow() -> datetime:
@@ -839,6 +873,7 @@ class DataStore:
             try:
                 return datetime.fromisoformat(ts)
             except Exception:
+                log.debug("Failed to parse notification timestamp %r", ts, exc_info=True)
                 return None
 
     async def set_notification_last_sent(

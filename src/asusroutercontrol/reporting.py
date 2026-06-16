@@ -89,7 +89,7 @@ async def generate_report(store: DataStore, *, days: int = 7) -> dict:
         report["sla"] = await analyze_isp_sla(store, days=days)
         report["config_impact"] = await correlate_config_performance(store, days=days)
     except Exception:
-        log.warning("Failed to generate trends/SLA/config-impact sections")
+        log.warning("Failed to generate trends/SLA/config-impact sections", exc_info=True)
         report["trends"] = {}
         report["sla"] = {}
         report["config_impact"] = []

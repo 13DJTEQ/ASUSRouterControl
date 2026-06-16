@@ -428,7 +428,8 @@ class CloudflareProvider:
                     f"{_CF_DOWN}?bytes=0", timeout=aiohttp.ClientTimeout(total=10)
                 ) as r:
                     return r.status == 200
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.debug("Cloudflare availability check failed", exc_info=True)
             return False
 
     async def run(self) -> ProviderResult:
@@ -497,8 +498,8 @@ class CloudflareProvider:
                     async with session.get(f"{_CF_BASE}/meta") as resp:
                         if resp.status == 200:
                             meta = await resp.json(content_type=None)
-                except Exception:
-                    pass
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                    log.debug("Cloudflare metadata fetch failed", exc_info=True)
 
                 colo = str(meta.get("colo", "")).strip()
                 server = f"Cloudflare {colo}" if colo else "Cloudflare"
@@ -542,8 +543,8 @@ class CloudflareProvider:
             elapsed = time.monotonic() - t0 - srv
             if elapsed > 0:
                 return len(data) * 8 / elapsed
-        except Exception:
-            pass
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            log.debug("Cloudflare timed download failed", exc_info=True)
         return None
 
     async def _timed_upload(self, session: aiohttp.ClientSession, size: int) -> float | None:
@@ -580,12 +581,14 @@ class CDNHttpProvider:
             async with aiohttp.ClientSession() as s:
                 async with s.head(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                     return r.status < 500
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError):
+            log.debug("CDN HTTP HEAD availability check failed", exc_info=True)
             try:
                 async with aiohttp.ClientSession() as s:
                     async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         return r.status < 500
-            except Exception:
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError):
+                log.debug("CDN HTTP GET availability check failed", exc_info=True)
                 return False
 
     async def run(self) -> ProviderResult:
@@ -654,7 +657,7 @@ class CDNHttpProvider:
                         "meta": meta,
                     },
                 )
-        except Exception as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             log.exception("CDN HTTP provider error (%s)", self._target.name)
             return ProviderResult(provider=self.name, cdn_target=self._target.name, error=str(exc))
 
@@ -670,7 +673,8 @@ class CDNHttpProvider:
                     srv = _parse_server_timing(dict(resp.headers))
                 elapsed = time.monotonic() - t0 - srv
                 vals.append(max(0, elapsed * 1000))
-            except Exception:
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                log.debug("CDN latency measurement failed", exc_info=True)
                 continue
         return vals
 
@@ -731,8 +735,8 @@ class CDNHttpProvider:
                 return (total_bytes * 8 / elapsed), headers
         except asyncio.TimeoutError:
             return None, {}
-        except Exception:
-            log.warning("CDN HTTP download failed for %s", url)
+        except (aiohttp.ClientError, OSError):
+            log.debug("CDN HTTP download failed for %s", url)
             return None, {}
         return None, {}
 

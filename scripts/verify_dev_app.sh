@@ -3,14 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TEST_APP="${PROJECT_ROOT}/testbuilds/ASUSRouterControl TEST.app"
-TEST_LAUNCHER="${TEST_APP}/Contents/MacOS/asusroutercontrol-launcher"
-TEST_LAUNCH_LOG="${PROJECT_ROOT}/testbuilds/verify-test-app.launch.log"
-TEST_DB_PATH="${HOME}/.asusroutercontrol.test/router.db"
-TEST_LOG_PATH="${HOME}/.asusroutercontrol.test/scheduler.log"
-TIMEOUT_SECONDS="${VERIFY_TEST_APP_TIMEOUT_SECONDS:-120}"
-FRESHNESS_SECONDS="${VERIFY_TEST_APP_FRESHNESS_SECONDS:-180}"
-LAUNCH_TIMEOUT_SECONDS="${VERIFY_TEST_APP_LAUNCH_TIMEOUT_SECONDS:-12}"
+DEV_APP="${PROJECT_ROOT}/testbuilds/ASUSRouterControl DEV.app"
+DEV_LAUNCHER="${DEV_APP}/Contents/MacOS/asusroutercontrol-launcher"
+DEV_LAUNCH_LOG="${PROJECT_ROOT}/testbuilds/verify-dev-app.launch.log"
+DEV_DB_PATH="${VERIFY_DEV_APP_DB_PATH:-${HOME}/.asusroutercontrol.dev/router.db}"
+DEV_LOG_PATH="${VERIFY_DEV_APP_LOG_PATH:-${HOME}/.asusroutercontrol.dev/scheduler.log}"
+TIMEOUT_SECONDS="${VERIFY_DEV_APP_TIMEOUT_SECONDS:-120}"
+FRESHNESS_SECONDS="${VERIFY_DEV_APP_FRESHNESS_SECONDS:-180}"
+LAUNCH_TIMEOUT_SECONDS="${VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS:-12}"
 
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -21,15 +21,15 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-echo "[verify-test-app 1/3] Building TEST app bundle"
-bash "${SCRIPT_DIR}/build_macos_app.sh" --mode test
+echo "[verify-dev-app 1/3] Building DEV app bundle"
+bash "${SCRIPT_DIR}/build_macos_app.sh" --mode dev
 
-if [[ ! -d "${TEST_APP}" ]]; then
-  echo "Expected TEST app bundle missing: ${TEST_APP}" >&2
+if [[ ! -d "${DEV_APP}" ]]; then
+  echo "Expected DEV app bundle missing: ${DEV_APP}" >&2
   exit 1
 fi
 
-echo "[verify-test-app 2/3] Relaunching TEST app"
+echo "[verify-dev-app 2/3] Relaunching DEV app"
 "${PYTHON_BIN}" - <<'PY'
 import os
 import signal
@@ -37,7 +37,7 @@ import subprocess
 import time
 
 
-def _test_runtime_pids() -> list[int]:
+def _dev_runtime_pids() -> list[int]:
     out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
     pids: list[int] = []
     for line in out.splitlines():
@@ -53,20 +53,20 @@ def _test_runtime_pids() -> list[int]:
         except ValueError:
             continue
         cmd_l = cmd.lower()
-        is_test_env = "ASUSROUTERCONTROL_RUNTIME_ENV=test" in cmd
+        is_dev_env = "ASUSROUTERCONTROL_RUNTIME_ENV=dev" in cmd
         is_router_proc = "asusroutercontrol" in cmd_l
-        is_test_app_path = "ASUSRouterControl TEST.app" in cmd
-        if (is_test_env and is_router_proc) or is_test_app_path:
+        is_dev_app_path = "ASUSRouterControl DEV.app" in cmd
+        if (is_dev_env and is_router_proc) or is_dev_app_path:
             pids.append(pid)
     return sorted(set(pids))
 
 
-pids = _test_runtime_pids()
+pids = _dev_runtime_pids()
 if not pids:
-    print("No existing TEST runtime process found.")
+    print("No existing DEV runtime process found.")
     raise SystemExit(0)
 
-print(f"Stopping existing TEST runtime PIDs: {', '.join(str(p) for p in pids)}")
+print(f"Stopping existing DEV runtime PIDs: {', '.join(str(p) for p in pids)}")
 for pid in pids:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -75,14 +75,14 @@ for pid in pids:
 
 deadline = time.time() + 8.0
 while time.time() < deadline:
-    remaining = [pid for pid in _test_runtime_pids() if pid in pids]
+    remaining = [pid for pid in _dev_runtime_pids() if pid in pids]
     if not remaining:
         raise SystemExit(0)
     time.sleep(0.25)
 
-remaining = [pid for pid in _test_runtime_pids() if pid in pids]
+remaining = [pid for pid in _dev_runtime_pids() if pid in pids]
 if remaining:
-    print(f"Force-stopping lingering TEST runtime PIDs: {', '.join(str(p) for p in remaining)}")
+    print(f"Force-stopping lingering DEV runtime PIDs: {', '.join(str(p) for p in remaining)}")
     for pid in remaining:
         try:
             os.kill(pid, signal.SIGKILL)
@@ -90,18 +90,18 @@ if remaining:
             pass
 PY
 
-open -n "${TEST_APP}"
+open -n "${DEV_APP}"
 
-if ! VERIFY_TEST_APP_LAUNCH_TIMEOUT_SECONDS="${LAUNCH_TIMEOUT_SECONDS}" \
+if ! VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS="${LAUNCH_TIMEOUT_SECONDS}" \
 "${PYTHON_BIN}" - <<'PY'
 import os
 import subprocess
 import time
 
-timeout_seconds = int(os.environ["VERIFY_TEST_APP_LAUNCH_TIMEOUT_SECONDS"])
+timeout_seconds = int(os.environ["VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS"])
 
 
-def _test_process_running() -> bool:
+def _dev_process_running() -> bool:
     try:
         out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
     except subprocess.CalledProcessError:
@@ -116,7 +116,7 @@ def _test_process_running() -> bool:
         cmd = parts[1]
         cmd_l = cmd.lower()
         if (
-            "asusroutercontrol_runtime_env=test" in cmd_l
+            "asusroutercontrol_runtime_env=dev" in cmd_l
             and "asusroutercontrol" in cmd_l
         ):
             return True
@@ -127,34 +127,34 @@ deadline = time.time() + timeout_seconds
 seen_at: float | None = None
 while time.time() < deadline:
     now = time.time()
-    if _test_process_running():
+    if _dev_process_running():
         if seen_at is None:
             seen_at = now
         elif now - seen_at >= 2.0:
-            print("TEST runtime detected after open launch (stable).")
+            print("DEV runtime detected after open launch (stable).")
             raise SystemExit(0)
     else:
         seen_at = None
     time.sleep(0.5)
 
-print("No TEST runtime detected after open launch attempt.")
+print("No DEV runtime detected after open launch attempt.")
 raise SystemExit(1)
 PY
 then
-  echo "Falling back to direct launcher execution: ${TEST_LAUNCHER}"
-  if [[ ! -x "${TEST_LAUNCHER}" ]]; then
-    echo "Missing or non-executable launcher: ${TEST_LAUNCHER}" >&2
+  echo "Falling back to direct launcher execution: ${DEV_LAUNCHER}"
+  if [[ ! -x "${DEV_LAUNCHER}" ]]; then
+    echo "Missing or non-executable launcher: ${DEV_LAUNCHER}" >&2
     exit 1
   fi
-  mkdir -p "$(dirname "${TEST_LAUNCH_LOG}")"
-  nohup "${TEST_LAUNCHER}" >"${TEST_LAUNCH_LOG}" 2>&1 &
+  mkdir -p "$(dirname "${DEV_LAUNCH_LOG}")"
+  nohup "${DEV_LAUNCHER}" >"${DEV_LAUNCH_LOG}" 2>&1 &
 fi
 
-echo "[verify-test-app 3/3] Running smoke-check"
-VERIFY_TEST_APP_TIMEOUT_SECONDS="${TIMEOUT_SECONDS}" \
-VERIFY_TEST_APP_FRESHNESS_SECONDS="${FRESHNESS_SECONDS}" \
-VERIFY_TEST_APP_DB_PATH="${TEST_DB_PATH}" \
-VERIFY_TEST_APP_LOG_PATH="${TEST_LOG_PATH}" \
+echo "[verify-dev-app 3/3] Running smoke-check"
+VERIFY_DEV_APP_TIMEOUT_SECONDS="${TIMEOUT_SECONDS}" \
+VERIFY_DEV_APP_FRESHNESS_SECONDS="${FRESHNESS_SECONDS}" \
+VERIFY_DEV_APP_DB_PATH="${DEV_DB_PATH}" \
+VERIFY_DEV_APP_LOG_PATH="${DEV_LOG_PATH}" \
 "${PYTHON_BIN}" - <<'PY'
 import os
 import sqlite3
@@ -162,10 +162,10 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
-timeout_seconds = int(os.environ["VERIFY_TEST_APP_TIMEOUT_SECONDS"])
-freshness_seconds = int(os.environ["VERIFY_TEST_APP_FRESHNESS_SECONDS"])
-db_path = os.environ["VERIFY_TEST_APP_DB_PATH"]
-log_path = os.environ["VERIFY_TEST_APP_LOG_PATH"]
+timeout_seconds = int(os.environ["VERIFY_DEV_APP_TIMEOUT_SECONDS"])
+freshness_seconds = int(os.environ["VERIFY_DEV_APP_FRESHNESS_SECONDS"])
+db_path = os.environ["VERIFY_DEV_APP_DB_PATH"]
+log_path = os.environ["VERIFY_DEV_APP_LOG_PATH"]
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -180,7 +180,7 @@ def _parse_iso(ts: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _test_process_running() -> bool:
+def _dev_process_running() -> bool:
     try:
         out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
     except subprocess.CalledProcessError:
@@ -195,7 +195,7 @@ def _test_process_running() -> bool:
         cmd = parts[1]
         cmd_l = cmd.lower()
         if (
-            "asusroutercontrol_runtime_env=test" in cmd_l
+            "asusroutercontrol_runtime_env=dev" in cmd_l
             and "asusroutercontrol" in cmd_l
         ):
             return True
@@ -234,6 +234,7 @@ def _db_snapshot() -> tuple[str | None, int, int]:
     finally:
         conn.close()
 
+
 def _log_snapshot() -> tuple[str | None, bool]:
     if not os.path.exists(log_path):
         return None, False
@@ -250,7 +251,7 @@ last_log_ts: str | None = None
 last_log_fresh = False
 
 while time.time() < deadline:
-    running = _test_process_running()
+    running = _dev_process_running()
     ts, wired_rows, wired_with_rates = _db_snapshot()
     log_ts, log_fresh = _log_snapshot()
     last_ts = ts
@@ -265,10 +266,10 @@ while time.time() < deadline:
     )
     if running and (fresh or log_fresh):
         if fresh:
-            print(f"Smoke-check PASS: TEST runtime active; latest device_perf_history row at {ts}")
+            print(f"Smoke-check PASS: DEV runtime active; latest device_perf_history row at {ts}")
             print(f"Recent wired rows: {wired_rows}; with tx/rx rates: {wired_with_rates}")
         else:
-            print("Smoke-check PASS: TEST runtime active with fresh scheduler activity (no fresh telemetry rows yet).")
+            print("Smoke-check PASS: DEV runtime active with fresh scheduler activity (no fresh telemetry rows yet).")
             print(f"Latest scheduler.log timestamp: {log_ts}")
             print(f"Latest device_perf_history timestamp: {ts}")
         if wired_rows > 0 and wired_with_rates == 0:
@@ -276,8 +277,8 @@ while time.time() < deadline:
         raise SystemExit(0)
     time.sleep(2.0)
 
-running = _test_process_running()
-print("Smoke-check FAIL: TEST runtime did not reach healthy state before timeout.")
+running = _dev_process_running()
+print("Smoke-check FAIL: DEV runtime did not reach healthy state before timeout.")
 print(f"- process_running={running}")
 print(f"- latest_device_perf_history_timestamp={last_ts}")
 print(f"- recent_wired_rows={last_wired_rows}")
@@ -287,4 +288,4 @@ print(f"- recent_scheduler_log_activity={last_log_fresh}")
 raise SystemExit(1)
 PY
 
-echo "[verify-test-app] Completed successfully."
+echo "[verify-dev-app] Completed successfully."

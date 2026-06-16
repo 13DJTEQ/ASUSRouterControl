@@ -256,6 +256,7 @@ class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, notification):
         log.info("AsusRouterMonitor starting")
         runtime_env = _runtime_environment()
+        self._runtime_env = runtime_env
         self._icon_prefix = _icon_prefix_for_runtime(runtime_env)
         self._cfg = load_config(runtime_env=runtime_env)
         ensure_runtime_data_dir_isolation(self._cfg, runtime_env=runtime_env)
@@ -276,10 +277,10 @@ class AppDelegate(NSObject):
         self._spinner_frame = 0
 
         self.statusbar = NSStatusBar.systemStatusBar()
-        self.statusitem = self.statusbar.statusItemWithLength_(
-            NSVariableStatusItemLength
-        )
-        self.statusitem.button().setTitle_(f"{self._icon_prefix} —")
+        self.statusitem = self.statusbar.statusItemWithLength_(NSVariableStatusItemLength)
+        if hasattr(self.statusitem, "setVisible_"):
+            self.statusitem.setVisible_(True)
+        self._set_status_icon("Starting")
 
         self._build_menu()
 
@@ -289,6 +290,14 @@ class AppDelegate(NSObject):
         ).start()
 
         log.info("AsusRouterMonitor starting (health check in progress)")
+
+    def _set_status_icon(self, state: str) -> None:
+        btn = self.statusitem.button()
+        btn.setImage_(None)
+        btn.setImagePosition_(NSImageRight)
+        btn.setTitle_(self._icon_prefix)
+        env_label = "DEV" if self._runtime_env != "prod" else "PROD"
+        btn.setToolTip_(f"ASUSRouterControl {env_label} — {state}")
 
     def _startup_health_check(self):
         """Check router backend reachability before starting scheduler."""
@@ -311,7 +320,7 @@ class AppDelegate(NSObject):
                 try:
                     await backend.disconnect()
                 except Exception:
-                    pass
+                    log.debug("Backend disconnect error in health check", exc_info=True)
 
         async def _check_ssh():
             ssh = RouterSSH(connect_timeout=10.0)
@@ -350,10 +359,10 @@ class AppDelegate(NSObject):
     def startAfterHealthCheck_(self, _):
         """Called on main thread after successful health check."""
         if self._degraded:
-            self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚠️")
+            self._set_status_icon("Degraded")
             self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
         else:
-            self.statusitem.button().setTitle_(f"{self._icon_prefix} —")
+            self._set_status_icon("Running")
             self._mi_sched_status.setTitle_("Scheduler: ● Running")
         self._ensure_runtime_started()
         log.info("AsusRouterMonitor ready")
@@ -361,7 +370,7 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
         """Router backend unreachable — run in degraded mode and retry health check."""
-        self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚠️")
+        self._set_status_icon("Degraded (retrying health)")
         self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
         self._ensure_runtime_started()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -535,7 +544,7 @@ class AppDelegate(NSObject):
                 log.info("Scheduler started from menubar app")
                 loop.run_until_complete(self._sched.run())
             except Exception:
-                log.exception("Scheduler thread crashed")
+                log.debug("Scheduler thread crashed", exc_info=True)
             finally:
                 self._sched_loop = None
 
@@ -704,6 +713,7 @@ class AppDelegate(NSObject):
             try:
                 result["client_trends"] = await store.get_client_load_trends(hours=1)
             except Exception:
+                log.debug("Client trends lookup failed", exc_info=True)
                 result["client_trends"] = {}
 
             # Trend arrows (best-effort, skip if not enough data)
@@ -712,6 +722,7 @@ class AppDelegate(NSObject):
                 trends = await analyze_trends(store, days=7)
                 result["trends"] = trends
             except Exception:
+                log.debug("Trend analysis failed", exc_info=True)
                 result["trends"] = {}
 
             return result
@@ -782,7 +793,12 @@ class AppDelegate(NSObject):
             _dl_bps, _ul_bps,
             gw_loss_pct=_gw_loss, gw_latency_ms=_gw_lat_ms,
         )
-        self.statusitem.button().setTitle_(f"{self._icon_prefix} {status_dot}")
+        status_label = {
+            "🟢": "Connection healthy",
+            "🟡": "Connection degraded",
+            "🔴": "Connection alert",
+        }.get(status_dot, "Connection status unknown")
+        self._set_status_icon(status_label)
         self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
@@ -835,7 +851,7 @@ class AppDelegate(NSObject):
                         else " 🔴"
                     )
                 except Exception:
-                    pass
+                    log.debug("Failed to parse provider_details_json", exc_info=True)
             self._mi_speed.setTitle_(
                 f"↓ {dl_s} Mbps {dl_arrow}  ↑ {ul_s} Mbps {ul_arrow}{conf_dot}".strip()
             )
@@ -1017,7 +1033,11 @@ class AppDelegate(NSObject):
     def _start_spinner(self):
         """Start the menubar icon spinner animation on the main thread."""
         self._spinner_frame = 0
-        self.statusitem.button().setTitle_(f"{self._icon_prefix} ⚡")
+        self.statusitem.button().setTitle_(self._icon_prefix)
+        env_label = "DEV" if self._runtime_env != "prod" else "PROD"
+        self.statusitem.button().setToolTip_(
+            f"ASUSRouterControl {env_label} — Running speed test"
+        )
         self._spinner_timer = (
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 _SPINNER_INTERVAL, self, "tickSpinner:", None, True
@@ -1029,10 +1049,7 @@ class AppDelegate(NSObject):
         if self._spinner_timer:
             self._spinner_timer.invalidate()
             self._spinner_timer = None
-        btn = self.statusitem.button()
-        btn.setImage_(None)
-        btn.setImagePosition_(NSImageRight)
-        btn.setTitle_(f"{self._icon_prefix} —")
+        self._set_status_icon("Running")
 
     @objc.typedSelector(b"v@:@")
     def tickSpinner_(self, _):
