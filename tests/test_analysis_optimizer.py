@@ -21,11 +21,13 @@ class _TrendStore:
         latency_rows: list[dict] | None = None,
         wifi_rows: list[dict] | None = None,
         system_rows: list[dict] | None = None,
+        router_rows: list[dict] | None = None,
     ) -> None:
         self._speed_rows = speed_rows or []
         self._latency_rows = latency_rows or []
         self._wifi_rows = wifi_rows or []
         self._system_rows = system_rows or []
+        self._router_rows = router_rows or []
 
     async def get_speed_tests(self, *, days: int = 30, source: str | None = None) -> list[dict]:
         return self._speed_rows
@@ -44,6 +46,9 @@ class _TrendStore:
 
     async def get_system_snapshots(self, *, days: int = 30) -> list[dict]:
         return self._system_rows
+
+    async def get_router_perf_snapshots(self, *, days: int = 30) -> list[dict]:
+        return self._router_rows
 
 
 class _SuggestStore:
@@ -311,3 +316,26 @@ async def test_generate_recommendations_flags_noise_floor_issue(
 
     recs = await generate_recommendations(object(), days=30)
     assert any("noise floor" in r.get("description", "").lower() for r in recs)
+
+
+@pytest.mark.asyncio
+async def test_analyze_trends_includes_router_direct_metrics_when_available() -> None:
+    now = datetime.utcnow()
+    router_rows: list[dict] = []
+    for i in range(8):
+        router_rows.append(
+            {
+                "timestamp": (now - timedelta(hours=6 * i)).isoformat(),
+                "load_1m": 0.5 + (i * 0.05),
+                "wan_rx_drops": 10 + i,
+                "wan_tx_drops": 2 + i,
+                "wan_rx_errors": i,
+                "wan_tx_errors": i,
+            }
+        )
+    store = _TrendStore(router_rows=router_rows)
+    trends = await analyze_trends(store, days=30)
+    assert "router_load_1m" in trends
+    assert "router_wan_rx_drops" in trends
+    assert "router_wan_tx_drops" in trends
+    assert "router_wan_rx_errors" in trends

@@ -132,6 +132,19 @@ def _ts_to_epoch(iso: str) -> float:
     return datetime.fromisoformat(iso).timestamp()
 
 
+
+def _pick_metric_value(row: dict, aliases: tuple[str, ...]) -> float | None:
+    for alias in aliases:
+        value = row.get(alias)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _derive_peak_hours(hourly_speed: dict[int, list[float]]) -> list[int]:
     """Infer likely congestion hours from worst throughput bins."""
     means = {h: mean(vals) for h, vals in hourly_speed.items() if vals}
@@ -193,6 +206,41 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
             {"timestamp": r["timestamp"], metric: r.get(metric)}
             for r in rows if r.get(metric) is not None
         ]
+
+    async def _router_direct_metric_rows(
+        output_metric_name: str,
+        metric_aliases: tuple[str, ...],
+    ) -> list[dict]:
+        if hasattr(store, "get_router_perf_metric_series"):
+            for alias in metric_aliases:
+                try:
+                    rows = await store.get_router_perf_metric_series(  # type: ignore[attr-defined]
+                        days=days,
+                        metric=alias,
+                    )
+                    normalized: list[dict] = []
+                    for row in rows:
+                        if row.get(alias) is None:
+                            continue
+                        normalized.append(
+                            {"timestamp": row["timestamp"], output_metric_name: row.get(alias)}
+                        )
+                    return normalized
+                except Exception:
+                    continue
+            return []
+        rows: list[dict] = []
+        if hasattr(store, "get_router_perf_snapshots"):
+            rows = await store.get_router_perf_snapshots(days=days)  # type: ignore[attr-defined]
+        elif hasattr(store, "get_router_perf_series"):
+            rows = await store.get_router_perf_series(days=days)  # type: ignore[attr-defined]
+        extracted: list[dict] = []
+        for row in rows:
+            parsed = _pick_metric_value(row, metric_aliases)
+            if parsed is None:
+                continue
+            extracted.append({"timestamp": row["timestamp"], output_metric_name: parsed})
+        return extracted
 
     # --- Speed trend ---
     dl_rows = await _speed_metric_rows("download_bps")
@@ -449,6 +497,53 @@ async def analyze_trends(store: DataStore, *, days: int = 30) -> dict:
             "r_squared": round(r2, 3),
             "avg_pct": round(mean(ys), 1),
             "peak_pct": round(max(ys), 1),
+            "samples": len(ys),
+            "raw_samples": len(raw_ys),
+            "outliers_removed": len(raw_ys) - len(ys),
+        }
+
+    # --- Router-direct trend coverage ---
+    direct_metric_aliases: dict[str, tuple[str, ...]] = {
+        "router_load_1m": ("load_1m", "load1", "loadavg_1m"),
+        "router_wan_rx_bps": ("wan_rx_rate_bps", "wan_rx_bps", "wan_rate_rx_bps"),
+        "router_wan_tx_bps": ("wan_tx_rate_bps", "wan_tx_bps", "wan_rate_tx_bps"),
+        "router_lan_rx_bps": ("lan_rx_rate_bps", "lan_rx_bps", "lan_rate_rx_bps"),
+        "router_lan_tx_bps": ("lan_tx_rate_bps", "lan_tx_bps", "lan_rate_tx_bps"),
+        "router_wan_rx_drops": ("wan_rx_drops", "wan_drops_rx"),
+        "router_wan_tx_drops": ("wan_tx_drops", "wan_drops_tx"),
+        "router_lan_rx_drops": ("lan_rx_drops", "lan_drops_rx"),
+        "router_lan_tx_drops": ("lan_tx_drops", "lan_drops_tx"),
+        "router_wan_rx_errors": ("wan_rx_errors", "wan_errors_rx"),
+        "router_wan_tx_errors": ("wan_tx_errors", "wan_errors_tx"),
+        "router_lan_rx_errors": ("lan_rx_errors", "lan_errors_rx"),
+        "router_lan_tx_errors": ("lan_tx_errors", "lan_errors_tx"),
+    }
+    for metric_name, aliases in direct_metric_aliases.items():
+        rows = await _router_direct_metric_rows(metric_name, aliases)
+        points = [
+            (_ts_to_epoch(row["timestamp"]), row.get(metric_name))
+            for row in rows
+            if row.get(metric_name) is not None
+        ]
+        if len(points) < 3:
+            continue
+        raw_xs, raw_ys = zip(*points)
+        xs, ys = _iqr_filter(list(raw_xs), [float(y) for y in raw_ys])  # type: ignore[arg-type]
+        slope, _, r2 = _linreg(xs, ys)
+        per_week = slope * 604800
+        threshold = 1.0 if "bps" in metric_name else 0.2
+        if "drops" in metric_name or "errors" in metric_name:
+            arrow = _trend_arrow(-per_week, threshold)
+        elif "load" in metric_name:
+            arrow = _trend_arrow(-per_week, 0.1)
+        else:
+            arrow = _trend_arrow(per_week, threshold)
+        result[metric_name] = {
+            "direction": arrow,
+            "arrow": arrow,
+            "slope_per_week": round(per_week, 3),
+            "r_squared": round(r2, 3),
+            "avg": round(mean(ys), 3),
             "samples": len(ys),
             "raw_samples": len(raw_ys),
             "outliers_removed": len(raw_ys) - len(ys),

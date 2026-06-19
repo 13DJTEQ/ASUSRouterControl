@@ -37,6 +37,15 @@ def test_dashboard_cli_json_and_export(monkeypatch, tmp_path) -> None:
                 "avg_confidence": 80.0,
                 "latest_test": {"timestamp": "2026-04-03T00:00:00"},
             },
+            "latency_health": {"samples": 3, "targets": {"gateway": {"samples": 3}}},
+            "wifi_health": {"samples": 2, "bands": {"5": {"samples": 2}}},
+            "system_health": {"samples": 2, "cpu_avg_pct": 17.5},
+            "router_direct": {
+                "samples": 2,
+                "load_1m_peak": 0.9,
+                "drop_delta_total": 0.0,
+                "error_delta_total": 0.0,
+            },
             "client_speed_load": {
                 "clients_total": 1,
                 "clients_with_signal": 1,
@@ -84,3 +93,7 @@ def test_dashboard_cli_json_and_export(monkeypatch, tmp_path) -> None:
 
     payload = json.loads(export_path.read_text())
     assert payload["isp_performance"]["tests_total"] == 2
+    assert payload["latency_health"]["samples"] == 3
+    assert payload["wifi_health"]["samples"] == 2
+    assert payload["system_health"]["samples"] == 2
+    assert payload["router_direct"]["samples"] == 2
