@@ -1,0 +1,171 @@
+# =============================================================================
+# factory-implement.yml — ASUSRouterControl Cloud Software Factory
+# =============================================================================
+# ASSUMED RUNTIME (matches plan v2.1 §10 default): Oz (Warp's cloud factory).
+# To swap to a self-hosted runner:
+#   1. Change `runs-on: ubuntu-latest` -> `runs-on: [self-hosted, macOS]`
+#   2. Ensure `oz` CLI + `gh` CLI + `gitleaks` are present on the runner.
+#   3. Move OZ_API_KEY from secrets to runner env-file (self-hosted runners
+#      cannot read repo-level secrets by default).
+#
+# COMPOSITION NOTE: This workflow deliberately does NOT run scripts/validate.sh
+# itself; that's the job of .github/workflows/ci.yml which runs on every PR.
+# The factory opens a draft PR -> CI runs ruff/pytest/compileall -> the factory
+# watches CI status via `gh pr checks` and reacts.
+# =============================================================================
+
+name: factory-implement
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to implement (must already be labeled ready-to-implement)."
+        required: true
+        type: string
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+  actions: read           # needed to query run status via gh
+
+concurrency:
+  group: factory-implement-${{ github.event.issue.number }}
+  cancel-in-progress: true  # newer run supersedes (per plan v2.1 §4)
+
+jobs:
+  implement:
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.label.name == 'ready-to-implement')
+    runs-on: ubuntu-latest            # OZ-CLOUD DEFAULT; swap to [self-hosted, macOS] for local.
+    timeout-minutes: 30
+    env:
+      FACTORY_ENABLED: ${{ vars.FACTORY_ENABLED }}
+      OZ_API_KEY:      ${{ secrets.OZ_API_KEY }}
+      GH_TOKEN:        ${{ secrets.FACTORY_BOT_TOKEN }}
+      FACTORY_AGENT_NAME: "factory-implement-bot"
+      FACTORY_LOCK_RUN_ID: ${{ github.run_id }}
+      MAX_LOC:         ${{ vars.MAX_LOC_BUDGET }}
+      MAX_FILES:       ${{ vars.MAX_FILES_BUDGET }}
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gate on FACTORY_ENABLED
+        id: gate
+        run: |
+          if [[ "${FACTORY_ENABLED}" != "true" ]]; then
+            echo "skip_reason=FACTORY_ENABLED is not 'true'" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "skip_reason=" >> "${GITHUB_OUTPUT}"
+
+      - name: Skip if gated off
+        if: steps.gate.outputs.skip_reason != ''
+        run: |
+          echo "Factory disabled; skipping implement run for issue ${ISSUE_NUMBER}."
+
+      - name: Confirm ready-to-implement label
+        if: steps.gate.outputs.skip_reason == ''
+        id: ready
+        run: |
+          if [[ "${{ github.event_name }}" == "issues" ]]; then
+            label="${{ github.event.label.name }}"
+          else
+            label="ready-to-implement"
+          fi
+          if [[ "${label}" != "ready-to-implement" ]]; then
+            echo "ready=false:label=${label}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "ready=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Skip when label not ready
+        if: steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready != 'true'
+        run: |
+          echo "Skipping implement: label was not ready-to-implement."
+
+      - name: Gitleaks pre-scan
+        if: steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready == 'true'
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install oz CLI
+        if: steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready == 'true'
+        run: |
+          if ! command -v oz >/dev/null 2>&1; then
+            curl -fsSL https://warp.dev/oz/install.sh | bash
+            echo "$HOME/.oz/bin" >> "$GITHUB_PATH"
+          fi
+          oz version
+
+      - name: Acquire issue lock
+        if: steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready == 'true'
+        id: acquire_lock
+        run: |
+          set -euo pipefail
+          mkdir -p docs/factory
+          bash scripts/factory_acquire_lock.sh "${ISSUE_NUMBER}" \
+            --agent "${FACTORY_AGENT_NAME}" \
+            --ttl-minutes 30 || {
+              code=$?
+              echo "acquire_lock_failed exit_code=${code}" >&2
+              if [[ "${code}" == "1" ]]; then
+                echo "::error::Active lock held by another run; will retry next labeled event."
+              fi
+              exit 0  # never abort GH Action on lock conflict; let next labeled event retry
+            }
+
+      - name: Run implement Skill via Oz
+        if: steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready == 'true'
+        id: run_implement
+        env:
+          MAX_LOC_VAL: ${{ steps.budget.outputs.max_loc || '250' }}
+        run: |
+          set -euo pipefail
+          oz agent run \
+            --skill ./skills/implement \
+            --input issue_number="${ISSUE_NUMBER}" \
+            --input triage_marker_comment_id="$(gh issue view "${ISSUE_NUMBER}" --json comments -q '[.comments[] | select(.body | test("triage:v2 "))] | first | .id // empty')" \
+            --input max_loc="${MAX_LOC:-250}" \
+            --input max_files="${MAX_FILES:-6}" \
+            --input max_cost_usd="5.00" \
+            --input model_tier=cloud \
+            --output-json > implement_result.json
+          cat implement_result.json
+
+      - name: Release lock on success
+        if: always() && steps.gate.outputs.skip_reason == '' && steps.ready.outputs.ready == 'true'
+        run: |
+          bash scripts/factory_release_lock.sh "${ISSUE_NUMBER}" \
+            --run-id "${FACTORY_LOCK_RUN_ID}" || true
+
+      - name: Log factory run cost
+        if: always()
+        run: |
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cost=$(jq -r '.cost_usd // 0' implement_result.json 2>/dev/null || echo "0")
+          echo "${ts},implement,${ISSUE_NUMBER},${cost}" >> docs/factory/runs.csv
+
+      - name: Post issue summary on outcome
+        if: always() && steps.run_implement.conclusion == 'success'
+        run: |
+          pr_url=$(jq -r '.pr_url // "no_pr_opened"' implement_result.json)
+          outcome=$(jq -r '.outcome // "unknown"' implement_result.json)
+          cat > summary.md <<EOF
+          **Factory implement**: ${outcome}
+          **PR**: ${pr_url}
+          **Run**: ${{ github.run_id }}
+          **Cost**: \$$(jq -r '.cost_usd // 0' implement_result.json)
+          **Duration**: $(jq -r '.duration_s // 0' implement_result.json)s
+          **Tests**: $(jq -r '.test_results.passed // 0' implement_result.json) passed, $(jq -r '.test_results.failed // 0' implement_result.json) failed, $(jq -r '.test_results.new_tests_added // 0' implement_result.json) new
+          EOF
+          gh issue comment "${ISSUE_NUMBER}" --body "$(cat summary.md)" || true

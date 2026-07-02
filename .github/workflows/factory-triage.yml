@@ -1,0 +1,170 @@
+# =============================================================================
+# factory-triage.yml — ASUSRouterControl Cloud Software Factory
+# =============================================================================
+# ASSUMED RUNTIME (matches plan v2.1 §10 default): Oz (Warp's cloud factory).
+# To swap to a self-hosted runner:
+#   1. Change `runs-on: ubuntu-latest` -> `runs-on: [self-hosted, macOS]`
+#   2. Replace the `Install oz CLI` step with `pip install oz-cli` OR ensure
+#      `oz` is already on PATH in the runner image.
+#   3. Move OZ_API_KEY from secrets to env-file-passed secret (self-hosted
+#      runners often forbid repo-level secrets).
+#
+# COMPOSITION NOTE: This workflow complements .github/workflows/ci.yml and
+# deploy.yml. It does NOT duplicate validation; CI still runs ruff + pytest
+# + compileall on PRs opened by the factory-implement workflow.
+# =============================================================================
+
+name: factory-triage
+
+on:
+  issues:
+    types: [opened, edited]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Manual re-triage issue number (1+)."
+        required: true
+        type: string
+      force:
+        description: "Re-run even if triage marker exists (breaks idempotency)."
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: factory-triage-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest            # OZ-CLOUD DEFAULT; swap to [self-hosted, macOS] if local.
+    timeout-minutes: 10
+    env:
+      FACTORY_ENABLED: ${{ vars.FACTORY_ENABLED }}
+      OZ_API_KEY:      ${{ secrets.OZ_API_KEY }}
+      GH_TOKEN:        ${{ secrets.FACTORY_BOT_TOKEN }}
+      FACTORY_AGENT_NAME: "factory-triage-bot"
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gate on FACTORY_ENABLED
+        id: gate
+        run: |
+          if [[ "${FACTORY_ENABLED}" != "true" ]]; then
+            echo "skip_reason=FACTORY_ENABLED is not 'true'" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "skip_reason=" >> "${GITHUB_OUTPUT}"
+
+      - name: Bot-eligible gate
+        if: steps.gate.outputs.skip_reason == ''
+        id: eligible
+        run: |
+          if [[ "${{ github.event_name }}" == "issues" ]]; then
+            body="${{ github.event.issue.body }}"
+          else
+            body=""
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "eligible=manual_dispatch" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${body}" == *"[bot-eligible]"* ]]; then
+            echo "eligible=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Skip non-eligible issues
+        if: steps.gate.outputs.skip_reason == '' && steps.eligible.outputs.eligible == 'false'
+        run: |
+          echo "Factory skipped: body missing the bot-eligible marker."
+
+      - name: Gitleaks pre-scan
+        if: steps.gate.outputs.skip_reason == '' && steps.eligible.outputs.eligible != 'false'
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install oz CLI
+        if: steps.gate.outputs.skip_reason == '' && steps.eligible.outputs.eligible != 'false'
+        run: |
+          if ! command -v oz >/dev/null 2>&1; then
+            curl -fsSL https://warp.dev/oz/install.sh | bash
+            echo "$HOME/.oz/bin" >> "$GITHUB_PATH"
+          fi
+          oz version
+
+      - name: Run triage Skill
+        if: steps.gate.outputs.skip_reason == '' && steps.eligible.outputs.eligible != 'false'
+        id: run_triage
+        env:
+          ISSUE_TITLE:  ${{ github.event.issue.title }}
+          ISSUE_BODY:   ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/factory
+          oz agent run \
+            --skill ./skills/triage \
+            --input issue_number="${ISSUE_NUMBER}" \
+            --input issue_title="${ISSUE_TITLE}" \
+            --input issue_body="${ISSUE_BODY}" \
+            --input repo_root="." \
+            --input model_tier=local \
+            --max-cost-usd 0.05 \
+            --output-json > triage_result.json
+          cat triage_result.json
+
+      - name: Apply triage label (best-effort)
+        if: steps.run_triage.outputs != '' && steps.run_triage.conclusion == 'success'
+        env:
+          LABEL: ${{ steps.run_triage.outputs.label }}
+        run: |
+          if [[ -z "${LABEL:-}" || "${LABEL}" == "null" ]]; then
+            echo "triage_skipped:no_label_decision"
+            exit 0
+          fi
+          gh issue edit "${ISSUE_NUMBER}" --add-label "${LABEL}"
+
+      - name: Post idempotent marker + summary
+        if: steps.run_triage.outputs != '' && steps.run_triage.conclusion == 'success'
+        run: |
+          set -euo pipefail
+          label=$(jq -r '.label' triage_result.json)
+          risk=$(jq -r '.risk_class' triage_result.json)
+          conf=$(jq -r '.confidence' triage_result.json)
+          loc=$(jq -r '.scope_estimate.loc_added_estimate' triage_result.json)
+          files=$(jq -r '.scope_estimate.files_likely_touched | join(",")' triage_result.json)
+          macos=$(jq -r '.macos_app_rebuild_required' triage_result.json)
+          reasoning=$(jq -r '.reasoning_short' triage_result.json)
+          marker="<!-- triage:v2 label=${label} risk=${risk} confidence=${conf} scope=${files}:~${loc} macos=${macos} -->"
+          gh issue comment "${ISSUE_NUMBER}" --body "${marker}"
+
+          cat > summary.md <<EOF
+          **Triage**: \`${label}\` (risk: ${risk}, confidence: ${conf})
+          **Scope**: ~${loc} LOC across ${files}
+          **macOS rebuild required**: ${macos}
+          **Reasoning**: ${reasoning}
+
+          cc @maintainers — review and re-label if wrong.
+          EOF
+          gh issue comment "${ISSUE_NUMBER}" --body "$(cat summary.md)"
+
+      - name: Log factory run cost
+        if: always()
+        run: |
+          mkdir -p docs/factory
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cost=$(jq -r '.cost_usd // 0' triage_result.json 2>/dev/null || echo "0")
+          echo "${ts},triage,${ISSUE_NUMBER},${cost}" >> docs/factory/runs.csv
+          # Always: ensure gitignored storage path is created if absent.
+          mkdir -p .factory/eval || true

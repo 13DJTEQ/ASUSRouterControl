@@ -1,0 +1,129 @@
+# ASUSRouterControl factory config
+#
+# This file is the canonical defaults for the cloud software factory.
+# It is loaded by both the triage Skill and the implement Skill.
+# Per-skill overrides live in skills/triage/overrides.yaml (future).
+#
+# Defaults align with .factory/config.yaml_asus_default from plan v2.1 §3.
+# Any change here MUST be reflected in the Obsidian plan at:
+# ~/Documents/ObsidianVault/Projects/ASUSRouterControl-Factory/v2.1-plan.md
+
+factory:
+  enabled: false                          # opt-in via repo variable FACTORY_ENABLED=true
+  bot_eligible_marker: "[bot-eligible]"    # body must contain this token for triage to fire
+  pilot_repo: ASUSRouterControl
+  version: "2.1"
+
+budgets:
+  max_loc_per_implement: 250              # bumped from 200; ASUS code is denser
+  max_files_per_implement: 6
+  max_cost_usd_per_triage: 0.05
+  max_cost_usd_per_implement: 5.00
+  max_cost_usd_per_implement_macos: 7.00  # higher cap; macOS build is slow
+  max_cost_usd_weekly: 75.00
+  token_budget_per_triage_input: 4000
+  token_budget_per_triage_output: 500
+
+allowlist_globs:
+  - "src/asusroutercontrol/**/*.py"
+  - "tests/**/*.py"
+  - "docs/**/*.md"
+
+# Forbidden_glob enforcement happens BEFORE the model sees the file list.
+# Even prompt injection cannot read or write these paths.
+forbidden_globs:
+  - "src/asusroutercontrol/credentials.py"
+  - "src/asusroutercontrol/ssh.py"
+  - "**/.env*"
+  - "**/secrets/**"
+  - "**/credentials/**"
+  - "**/1password/**"
+  - "**/*keychain*"
+  - "pyproject.toml"
+  - "uv.lock"
+  - ".github/workflows/**"
+  - "Makefile"
+  - "scripts/build_macos_app.sh"
+  - "scripts/verify_dev_app.sh"
+
+# Risk paths derived from triage/SKILL.md §1.
+risk_paths:
+  critical:
+    - "src/asusroutercontrol/credentials.py"
+    - "src/asusroutercontrol/ssh.py"
+    - "pyproject.toml"
+    - "uv.lock"
+    - ".github/workflows/**"
+  high:
+    - "src/asusroutercontrol/backends/**"
+    - "src/asusroutercontrol/models.py"
+    - "src/asusroutercontrol/datastore.py"
+  medium:
+    - "src/asusroutercontrol/analyzer.py"
+    - "src/asusroutercontrol/optimizer.py"
+    - "src/asusroutercontrol/reporting.py"
+    - "src/asusroutercontrol/probes.py"
+    - "src/asusroutercontrol/dhcp_*.py"
+    - "src/asusroutercontrol/speedtest*.py"
+  low:
+    - "tests/**"
+    - "docs/**"
+
+# macOS app layer: menubar-touching PRs require make build-dev-app + make verify-dev-app
+macos_app_layer:
+  enabled: true
+  trigger_files:
+    - "src/asusroutercontrol/menubar.py"
+    - "scripts/build_macos_app.sh"
+    - "scripts/verify_dev_app.sh"
+  requires_human_review: true
+  auto_run_verify: true
+  verify_command: "make build-dev-app && make verify-dev-app"
+  verify_pass_marker: "smoke_check_ok"
+  pr_label: "factory+macos-app"
+
+branch_protection:
+  require_human_review: true
+  minimum_approvals: 1
+  require_codeowners: true
+  draft_only: true              # factory never opens non-draft PRs
+
+storage:
+  factory_db_path: ".factory/factory.db"
+  factory_db_gitignored: true
+  weekly_export_path: "docs/factory/weekly-{ISO_YEAR}-W{ISO_WEEK}.csv"
+  weekly_export_committed: true
+
+cost_controls:
+  default_triage_model: "local_ollama_qwen2.5-coder-7b"
+  escalation_triage_model: "claude-haiku"
+  default_implement_model: "claude-code-cloud"
+  prompt_cache:
+    repo_tree_hash_ttl_s: 86400
+    recent_commits_ttl_s: 3600
+
+observability_alerts:
+  weekly_cost_usd_ceiling: 75.00
+  flip_flop_rate_ceiling_pct: 10
+  flip_flop_window_size: 20
+  macos_verify_failure_rate_ceiling_pct: 25
+
+labels:
+  ready_to_implement:
+    color: "0E8A16"
+    description: "Factory may auto-PR this. Triage marker present."
+  ready_to_spec:
+    color: "FBCA04"
+    description: "Needs spec before implementation. v2 work."
+  needs_info:
+    color: "D93F0B"
+    description: "Body lacks acceptance criteria, file paths, or repro."
+  wait_to_implement:
+    color: "BFD4F2"
+    description: "Parked. Human signal required to advance."
+  needs_human:
+    color: "B60205"
+    description: "Critical risk or factory refused. Human must act."
+
+commit_message_template: "factory: implement #{issue_number} - {title}"
+provenance_footer: "Co-Authored-By: Factory-Bot <factory-bot@warp.dev>"
