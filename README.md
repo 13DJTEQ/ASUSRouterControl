@@ -82,6 +82,35 @@ asusrouter aimesh nodes      # List all mesh nodes with status
 asusrouter aimesh topology   # Show node topology map
 ```
 
+## Web Dashboard
+
+Browse telemetry data in a browser via the built-in FastAPI dashboard.
+
+### Quick start
+```bash
+pip install -e ".[web]"
+asusrouter web                # starts on http://127.0.0.1:8080
+asusrouter web --port 9090    # custom port
+asusrouter web --reload       # dev mode with auto-reload
+```
+
+### API endpoints
+- `GET /api/` — dashboard homepage (HTMX + Alpine.js)
+- `GET /api/isp-performance?hours=24` — ISP speed test data
+- `GET /api/client-load?hours=1` — client device load
+- `GET /api/devices` — connected devices
+- `GET /api/health?hours=24` — router health score (0–100, grade A–F)
+
+### Docker
+```bash
+docker compose up -d          # build and run on port 8080
+```
+Mount your data directory to expose collected telemetry:
+```yaml
+volumes:
+  - ~/.asusroutercontrol:/data
+```
+
 ## Architecture
 
 ### Overview
@@ -126,7 +155,8 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 
 ### Dependencies
 - **Core**: `asusrouter>=1.21`, `aiohttp`, `keyring`, `pydantic>=2.0`, `click`, `aiosqlite`, `rich`, `asyncssh`
-- **Dev**: `pytest`, `pytest-asyncio`, `ruff`
+- **Dev**: `pytest`, `pytest-asyncio`, `ruff`, `httpx`
+- **Web**: `fastapi`, `uvicorn[standard]`, `jinja2`
 - **Menubar**: `pyobjc-core`, `pyobjc-framework-cocoa`
 
 ## Market Validity Assessment

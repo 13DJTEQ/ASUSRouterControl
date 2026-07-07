@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASUSRouterControl Dashboard</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="https://unpkg.com/alpinejs@3.13.5/dist/cdn.min.js" defer></script>
+    <style>
+        :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e1e4eb; --muted: #8b8fa3; --accent: #4f8cff; --green: #34d399; --yellow: #fbbf24; --red: #f87171; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 1.5rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+        h2 { font-size: 1.1rem; color: var(--muted); margin-bottom: 0.75rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; }
+        .stat { font-size: 2rem; font-weight: 700; }
+        .stat.green { color: var(--green); }
+        .stat.yellow { color: var(--yellow); }
+        .stat.red { color: var(--red); }
+        .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.5rem; border-bottom: 1px solid var(--border); }
+        td { padding: 0.5rem; border-bottom: 1px solid var(--border); }
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .badge.ok { background: rgba(52,211,153,0.15); color: var(--green); }
+        .badge.suspect { background: rgba(251,191,36,0.15); color: var(--yellow); }
+        .badge.error { background: rgba(248,113,113,0.15); color: var(--red); }
+        .refresh-btn { background: var(--accent); color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+        .refresh-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+        <h1>ASUSRouterControl Dashboard</h1>
+        <button class="refresh-btn" onclick="htmx.ajax('GET', '/api/health', {target:'#health-panel', swap:'innerHTML'})">Refresh</button>
+    </div>
+
+    <!-- Health Score -->
+    <div id="health-panel" hx-get="/api/health" hx-trigger="load" hx-swap="innerHTML">
+        <div class="grid">
+            <div class="card"><span class="label">Loading...</span></div>
+        </div>
+    </div>
+
+    <!-- HTMX template for health panel -->
+    <template id="health-tpl">
+        <div class="grid">
+            <div class="card">
+                <h2>Router Health</h2>
+                <div class="stat" x-data x-text="score"></div>
+                <span class="label">Grade: <span x-data x-text="grade"></span></span>
+            </div>
+        </div>
+    </template>
+
+    <!-- ISP Performance -->
+    <div class="card" style="margin-bottom:1rem;"
+         hx-get="/api/isp-performance" hx-trigger="load" hx-swap="innerHTML">
+        <h2>ISP Performance</h2>
+        <span class="label">Loading...</span>
+    </div>
+
+    <!-- Devices -->
+    <div class="card" style="margin-bottom:1rem;"
+         hx-get="/api/devices" hx-trigger="load" hx-swap="innerHTML">
+        <h2>Connected Devices</h2>
+        <span class="label">Loading...</span>
+    </div>
+
+    <!-- Client Load -->
+    <div class="card"
+         hx-get="/api/client-load" hx-trigger="load" hx-swap="innerHTML">
+        <h2>Client Load</h2>
+        <span class="label">Loading...</span>
+    </div>
+
+    <script>
+        // HTMX response handlers to render JSON into cards
+        document.body.addEventListener('htmx:afterSwap', function(evt) {
+            const target = evt.detail.target;
+            const id = target.id || target.getAttribute('hx-get');
+            try {
+                const data = JSON.parse(target.innerHTML);
+                if (id === 'health-panel') renderHealth(target, data);
+                else if (id && id.includes('isp-performance')) renderISP(target, data);
+                else if (id && id.includes('devices')) renderDevices(target, data);
+                else if (id && id.includes('client-load')) renderClients(target, data);
+            } catch(e) { /* initial loading state */ }
+        });
+
+        function renderHealth(el, d) {
+            const color = d.score >= 90 ? 'green' : d.score >= 75 ? 'yellow' : 'red';
+            let details = Object.entries(d.details || {}).map(([k,v]) =>
+                `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+            el.innerHTML = `<div class="grid">
+                <div class="card"><h2>Router Health</h2>
+                    <div class="stat ${color}">${d.score}</div>
+                    <span class="label">Grade ${d.grade} &middot; ${d.window_hours}h window</span>
+                </div>
+                <div class="card"><h2>Details</h2>
+                    <table><tr><th>Metric</th><th>Value</th></tr>${details}</table>
+                </div>
+                <div class="card"><h2>Samples</h2>
+                    <table><tr><th>Source</th><th>Count</th></tr>
+                    ${Object.entries(d.samples||{}).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('')}
+                    </table>
+                </div>
+            </div>`;
+        }
+
+        function renderISP(el, d) {
+            const q = d.quality_counts || {};
+            el.innerHTML = `<h2>ISP Performance</h2>
+                <div class="grid" style="margin-top:0.75rem">
+                    <div><span class="label">Tests</span><div class="stat">${d.tests_total||0}</div></div>
+                    <div><span class="label">Avg Download</span><div class="stat">${d.avg_download_mbps||'—'} Mbps</div></div>
+                    <div><span class="label">Avg Upload</span><div class="stat">${d.avg_upload_mbps||'—'} Mbps</div></div>
+                    <div><span class="label">Avg Ping</span><div class="stat">${d.avg_ping_ms||'—'} ms</div></div>
+                </div>
+                <div style="margin-top:0.5rem">
+                    <span class="badge ok">OK ${q.ok||0}</span>
+                    <span class="badge suspect">Suspect ${q.suspect||0}</span>
+                    <span class="badge error">Error ${q.error||0}</span>
+                </div>`;
+        }
+
+        function renderDevices(el, d) {
+            const rows = (d.devices||[]).slice(0,20).map(dev =>
+                `<tr><td>${dev.hostname||'—'}</td><td>${dev.ip||'—'}</td><td style="font-family:monospace">${dev.mac}</td><td>${dev.connection||'—'}</td></tr>`
+            ).join('');
+            el.innerHTML = `<h2>Connected Devices (${d.count||0})</h2>
+                <table style="margin-top:0.5rem"><tr><th>Hostname</th><th>IP</th><th>MAC</th><th>Connection</th></tr>${rows}</table>`;
+        }
+
+        function renderClients(el, d) {
+            const rows = (d.clients||[]).slice(0,15).map(c =>
+                `<tr><td>${c.hostname||c.mac||'—'}</td><td>${c.load_pct||'—'}%</td><td>${c.tx_rate_mbps||'—'}</td><td>${c.rssi||'—'}</td></tr>`
+            ).join('');
+            el.innerHTML = `<h2>Client Load (${d.count||0} clients)</h2>
+                <table style="margin-top:0.5rem"><tr><th>Device</th><th>Load</th><th>TX (Mbps)</th><th>RSSI</th></tr>${rows}</table>`;
+        }
+    </script>
+</body>
+</html>
