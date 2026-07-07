@@ -77,6 +77,9 @@ asusrouter dhcp reserve-macpro --dry-run
 asusrouter dhcp reserve-denon-second-port --dry-run
 asusrouter monitor    # Continuous monitoring (Phase 2)
 asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnect diagnosis
+asusrouter aimesh status     # AiMesh health summary
+asusrouter aimesh nodes      # List all mesh nodes with status
+asusrouter aimesh topology   # Show node topology map
 ```
 
 ## Architecture
@@ -101,6 +104,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 **SSH & Probes**
 - `ssh.py` — async SSH with host-key trust modes (`strict`, `tofu_confirm`, `tofu_auto`)
 - `probes.py` — NVRAM snapshots, WiFi/client telemetry, latency via SSH commands
+- `aimesh.py` — AiMesh mesh network monitoring via `AsusData.AIMESH` and `AsusData.NODE_INFO`
 
 **Persistence**
 - `datastore.py` — async SQLite (`aiosqlite`) with schema migrations, retention pruning, notification cooldowns
