@@ -1,6 +1,6 @@
 # ASUSRouterControl User Guide
 
-CLI management and analysis tool for the ASUS RT-AC68U running AsusWRT-Merlin.
+CLI management and analysis tool for all AsusWRT routers running stock AsusWRT or AsusWRT-Merlin firmware.
 
 ---
 

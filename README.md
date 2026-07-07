@@ -1,6 +1,6 @@
 # ASUSRouterControl
 
-Management and analysis tool for ASUS RT-AC68U routers running stock AsusWRT or AsusWRT-Merlin firmware.
+Management and analysis tool for all AsusWRT routers running stock AsusWRT or AsusWRT-Merlin firmware.
 
 ## Setup
 
@@ -77,6 +77,38 @@ asusrouter dhcp reserve-macpro --dry-run
 asusrouter dhcp reserve-denon-second-port --dry-run
 asusrouter monitor    # Continuous monitoring (Phase 2)
 asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnect diagnosis
+asusrouter aimesh status     # AiMesh health summary
+asusrouter aimesh nodes      # List all mesh nodes with status
+asusrouter aimesh topology   # Show node topology map
+```
+
+## Web Dashboard
+
+Browse telemetry data in a browser via the built-in FastAPI dashboard.
+
+### Quick start
+```bash
+pip install -e ".[web]"
+asusrouter web                # starts on http://127.0.0.1:8080
+asusrouter web --port 9090    # custom port
+asusrouter web --reload       # dev mode with auto-reload
+```
+
+### API endpoints
+- `GET /api/` — dashboard homepage (HTMX + Alpine.js)
+- `GET /api/isp-performance?hours=24` — ISP speed test data
+- `GET /api/client-load?hours=1` — client device load
+- `GET /api/devices` — connected devices
+- `GET /api/health?hours=24` — router health score (0–100, grade A–F)
+
+### Docker
+```bash
+docker compose up -d          # build and run on port 8080
+```
+Mount your data directory to expose collected telemetry:
+```yaml
+volumes:
+  - ~/.asusroutercontrol:/data
 ```
 
 ## Architecture
@@ -101,6 +133,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 **SSH & Probes**
 - `ssh.py` — async SSH with host-key trust modes (`strict`, `tofu_confirm`, `tofu_auto`)
 - `probes.py` — NVRAM snapshots, WiFi/client telemetry, latency via SSH commands
+- `aimesh.py` — AiMesh mesh network monitoring via `AsusData.AIMESH` and `AsusData.NODE_INFO`
 
 **Persistence**
 - `datastore.py` — async SQLite (`aiosqlite`) with schema migrations, retention pruning, notification cooldowns
@@ -122,7 +155,8 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 
 ### Dependencies
 - **Core**: `asusrouter>=1.21`, `aiohttp`, `keyring`, `pydantic>=2.0`, `click`, `aiosqlite`, `rich`, `asyncssh`
-- **Dev**: `pytest`, `pytest-asyncio`, `ruff`
+- **Dev**: `pytest`, `pytest-asyncio`, `ruff`, `httpx`
+- **Web**: `fastapi`, `uvicorn[standard]`, `jinja2`
 - **Menubar**: `pyobjc-core`, `pyobjc-framework-cocoa`
 
 ## Market Validity Assessment
@@ -133,7 +167,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - Production-ready: dev→prod deployment with rollback, self-hosted macOS runner, environment isolation
 
 **Market Constraints**
-- **Narrow hardware scope**: Targets RT-AC68U (2014 hardware, end-of-life), limiting addressable market
+- **Hardware scope**: Supports all AsusWRT routers via the `asusrouter` library; model auto-detected on connect
 - **Firmware dependency**: Primary backend relies on `asusrouter` library for Merlin firmware; FreshTomato backend is read-only
 - **Competitive pressure**: ASUS's newer routers (WiFi 6E/7) increasingly expose native APIs via mobile apps, eroding differentiation
 - **Niche audience**: Viable for power users and home lab enthusiasts running Merlin firmware on legacy hardware
@@ -144,7 +178,14 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - ⚠️ **Commercial product**: Not viable without pivoting to broader hardware support (WiFi 6E/7 mesh systems) and SaaS telemetry layer
 - ⚠️ **Scalability**: Single-router focus; no multi-site or fleet management capabilities
 
-**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires hardware scope expansion beyond AC68U and a cloud-based telemetry/management layer.
+**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires a cloud-based telemetry/management layer.
+
+## Tested router models
+
+- RT-AX86U
+- RT-AX88U
+- GT-AX6000
+- ZenWiFi XD6
 
 ## Performance metrics source methodology
 

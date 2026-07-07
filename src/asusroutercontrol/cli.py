@@ -3889,5 +3889,45 @@ def optimize_init_start(tcp: bool, kill: tuple[str, ...], deploy: bool):
     asyncio.run(_deploy())
 
 
+# --- Web Dashboard ---
+
+
+@cli.command("web")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host.")
+@click.option("--port", default=8080, show_default=True, type=click.IntRange(1, 65535))
+@click.option("--reload", "auto_reload", is_flag=True, help="Enable auto-reload (dev).")
+def web_server(host: str, port: int, auto_reload: bool):
+    """Start the web dashboard server."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]Web dependencies not installed.[/red] "
+            "Run: pip install 'asusroutercontrol[web]'"
+        )
+        return
+
+    cfg = load_config()
+    db_path = cfg.data_dir / "router.db"
+    if not db_path.exists():
+        console.print(
+            f"[yellow]Database not found at {db_path}.[/yellow] "
+            "Run 'asusrouter monitor' first to collect data."
+        )
+
+    console.print(
+        f"[bold]Starting web dashboard[/bold] on http://{host}:{port}"
+    )
+    console.print("[dim]Press Ctrl+C to stop.[/dim]")
+
+    uvicorn.run(
+        "asusroutercontrol.web:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=auto_reload,
+    )
+
+
 if __name__ == "__main__":
     cli()
