@@ -13,37 +13,31 @@ import time
 from pathlib import Path
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
+    _active_backend_name,
     delete_legacy_credentials,
-    get_router_credentials,
     migrate_legacy_credentials,
     store_credential,
 )
 from asusroutercontrol.datastore import DataStore
 
 from .core import (
+    _DHCP_RESERVATION_PROFILES,
     _diagnose_capture,
     _get_backend,
-    _get_dhcp_profiles,
     _get_profiles_for_display,
-    _guard_runtime_data_dir,
     _normalize_mac,
     _parse_live_event,
-    _print_profile_device_match_summary,
     _profile_field,
-    _profile_target,
-    _render_device_row,
+    _read_new_syslog_lines,
     _render_dhcp_apply_result,
     _run_profile_reservation,
     _run_profile_unreserve,
-    _scoped_launchd_label,
-    _scoped_launchd_plist_path,
-    _validate_env_file,
+    _run_with_backend,
     console,
 )
 
@@ -766,18 +760,6 @@ def incident_rollback(
     raise click.ClickException(f"Incident rollback stopped: {result.aborted_reason or 'unknown'}")
 
 
-async def _run_with_backend(coro_factory):
-    """Connect, run coroutine, disconnect."""
-    from asusroutercontrol.backends.base import BackendOperationUnsupported
-    backend = _get_backend()
-    try:
-        await backend.connect()
-        try:
-            return await coro_factory(backend)
-        except BackendOperationUnsupported as exc:
-            raise click.ClickException(str(exc)) from exc
-    finally:
-        await backend.disconnect()
 
 
 @cli.command()

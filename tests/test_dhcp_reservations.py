@@ -205,9 +205,9 @@ def _fake_result(*, success: bool = True, message: str = ""):
 
 
 def _patch_profile_command_deps(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("asusroutercontrol.cli._render_dhcp_apply_result", lambda _r: None)
+    monkeypatch.setattr("asusroutercontrol.cli.core._render_dhcp_apply_result", lambda _r: None)
     monkeypatch.setattr(
-        "asusroutercontrol.cli._print_profile_device_match_summary",
+        "asusroutercontrol.cli.core._print_profile_device_match_summary",
         lambda *_a: None,
     )
     monkeypatch.setattr("asusroutercontrol.cli.DataStore", _FakeDataStoreCtx)

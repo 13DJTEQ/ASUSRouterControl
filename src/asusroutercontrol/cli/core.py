@@ -437,3 +437,17 @@ def _run_profile_unreserve(
     if not result.success:
         raise click.ClickException(result.message)
 
+
+async def _run_with_backend(coro_factory):
+    """Connect, run coroutine, disconnect."""
+    from asusroutercontrol.backends.base import BackendOperationUnsupported
+    backend = _get_backend()
+    try:
+        await backend.connect()
+        try:
+            return await coro_factory(backend)
+        except BackendOperationUnsupported as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        await backend.disconnect()
+
