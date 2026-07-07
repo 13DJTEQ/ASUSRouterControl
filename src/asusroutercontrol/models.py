@@ -231,6 +231,37 @@ class ClientLoad(BaseModel):
     health: str = "🟢"  # 🟢 <50%, 🟡 50-80%, 🔴 >80% or weak signal
 
 
+class AiMeshNode(BaseModel):
+    """Single AiMesh node in the mesh network."""
+
+    mac: str
+    ip: str | None = None
+    hostname: str | None = None
+    model: str | None = None
+    firmware: str | None = None
+    is_online: bool = True
+    is_router: bool = False  # True for the primary router node
+    connection_type: str | None = None  # "wired" or "wireless"
+    parent_mac: str | None = None  # parent node MAC for topology
+    rssi: int | None = None
+    cpu_pct: float | None = None
+    ram_pct: float | None = None
+    temperature_c: float | None = None
+    client_count: int = 0
+    rx_bytes: int | None = None
+    tx_bytes: int | None = None
+
+
+class AiMeshTopology(BaseModel):
+    """AiMesh network topology and health summary."""
+
+    timestamp: datetime = Field(default_factory=utcnow)
+    nodes: list[AiMeshNode] = Field(default_factory=list)
+    node_count: int = 0
+    online_count: int = 0
+    backhaul_type: str | None = None  # "wired" / "wireless" / "mixed" / None
+
+
 class RouterSnapshot(BaseModel):
     """Complete point-in-time router state."""
 

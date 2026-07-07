@@ -1600,6 +1600,168 @@ def entware_setup():
     asyncio.run(_setup())
 
 
+# --- AiMesh ---
+
+
+@cli.group("aimesh")
+def aimesh_group():
+    """AiMesh mesh network monitoring."""
+
+
+@aimesh_group.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def aimesh_status(as_json: bool):
+    """Show mesh health summary."""
+    from asusroutercontrol.aimesh import collect_aimesh_topology
+
+    async def _status(backend):
+        with console.status("Fetching AiMesh status..."):
+            topo = await collect_aimesh_topology(backend)
+
+        if as_json:
+            import json
+            console.print(json.dumps(topo.model_dump(mode="json"), indent=2))
+            return
+
+        if topo.node_count == 0:
+            console.print("[dim]No AiMesh nodes detected. AiMesh may not be configured.[/dim]")
+            return
+
+        table = Table(title="AiMesh Status", show_header=False, padding=(0, 2))
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Value")
+        table.add_row("Nodes", f"{topo.online_count}/{topo.node_count} online")
+        if topo.backhaul_type:
+            table.add_row("Backhaul", topo.backhaul_type)
+        all_online = topo.online_count == topo.node_count
+        health_color = "green" if all_online else "red"
+        health_label = "healthy" if all_online else "degraded"
+        table.add_row(
+            "Health",
+            f"[{health_color}]{health_label}[/{health_color}]",
+        )
+        console.print(table)
+
+    asyncio.run(_run_with_backend(_status))
+
+
+@aimesh_group.command("nodes")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def aimesh_nodes(as_json: bool):
+    """List all nodes with status."""
+    from asusroutercontrol.aimesh import collect_aimesh_topology
+
+    async def _nodes(backend):
+        with console.status("Fetching AiMesh nodes..."):
+            topo = await collect_aimesh_topology(backend)
+
+        if as_json:
+            import json
+            console.print(json.dumps([n.model_dump(mode="json") for n in topo.nodes], indent=2))
+            return
+
+        if not topo.nodes:
+            console.print("[dim]No AiMesh nodes detected.[/dim]")
+            return
+
+        table = Table(title=f"AiMesh Nodes ({topo.node_count})")
+        table.add_column("Role", style="bold")
+        table.add_column("Hostname")
+        table.add_column("Model")
+        table.add_column("IP")
+        table.add_column("MAC", style="dim")
+        table.add_column("Backhaul")
+        table.add_column("CPU", justify="right")
+        table.add_column("RAM", justify="right")
+        table.add_column("Clients", justify="right")
+        table.add_column("Status")
+
+        for node in sorted(topo.nodes, key=lambda n: (not n.is_router, n.hostname or n.mac)):
+            role = "[bold cyan]Router[/bold cyan]" if node.is_router else "Node"
+            backhaul = node.connection_type or "-"
+            cpu = f"{node.cpu_pct:.0f}%" if node.cpu_pct is not None else "-"
+            ram = f"{node.ram_pct:.0f}%" if node.ram_pct is not None else "-"
+            status = "[green]online[/green]" if node.is_online else "[red]offline[/red]"
+            table.add_row(
+                role,
+                node.hostname or "-",
+                node.model or "-",
+                node.ip or "-",
+                node.mac,
+                backhaul,
+                cpu,
+                ram,
+                str(node.client_count),
+                status,
+            )
+        console.print(table)
+
+    asyncio.run(_run_with_backend(_nodes))
+
+
+@aimesh_group.command("topology")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def aimesh_topology(as_json: bool):
+    """Show node topology map."""
+    from asusroutercontrol.aimesh import collect_aimesh_topology
+
+    async def _topology(backend):
+        with console.status("Fetching AiMesh topology..."):
+            topo = await collect_aimesh_topology(backend)
+
+        if as_json:
+            import json
+            console.print(json.dumps(topo.model_dump(mode="json"), indent=2))
+            return
+
+        if not topo.nodes:
+            console.print("[dim]No AiMesh nodes detected.[/dim]")
+            return
+
+        # Build lookup by MAC
+        by_mac = {n.mac: n for n in topo.nodes}
+        router_node = next((n for n in topo.nodes if n.is_router), None)
+
+        if router_node:
+            console.print(
+                f"[bold cyan]Router[/bold cyan]: {router_node.hostname or router_node.mac} "
+                f"({router_node.model or 'unknown'})"
+            )
+            if router_node.ip:
+                console.print(f"  IP: {router_node.ip}")
+
+        # Show child nodes grouped by parent
+        child_nodes = [n for n in topo.nodes if not n.is_router]
+        if not child_nodes:
+            console.print("[dim]No satellite nodes in the mesh.[/dim]")
+            return
+
+        # Group by parent
+        children_by_parent: dict[str | None, list] = {}
+        for node in child_nodes:
+            parent = node.parent_mac
+            children_by_parent.setdefault(parent, []).append(node)
+
+        console.print("")
+        for parent_mac, children in children_by_parent.items():
+            parent_node = by_mac.get(parent_mac) if parent_mac else None
+            parent_label = parent_node.hostname or parent_node.mac if parent_node else "Router"
+            console.print(f"  [dim]via[/dim] {parent_label}:")
+            for child in children:
+                if child.connection_type == "wired":
+                    conn_icon = "[green]wired[/green]"
+                else:
+                    conn_icon = "[yellow]wireless[/yellow]"
+                status = "[green]●[/green]" if child.is_online else "[red]●[/red]"
+                rssi_str = f" {child.rssi}dBm" if child.rssi is not None else ""
+                console.print(
+                    f"    {status} {child.hostname or child.mac} "
+                    f"({child.model or '?'}) [{conn_icon}{rssi_str}]"
+                )
+
+    asyncio.run(_run_with_backend(_topology))
+
+
 # --- Menubar App ---
 
 def _normalize_service_environment(environment: str) -> str:
