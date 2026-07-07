@@ -1,6 +1,6 @@
 # ASUSRouterControl
 
-Management and analysis tool for ASUS RT-AC68U routers running stock AsusWRT or AsusWRT-Merlin firmware.
+Management and analysis tool for all AsusWRT routers running stock AsusWRT or AsusWRT-Merlin firmware.
 
 ## Setup
 
@@ -133,7 +133,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - Production-ready: dev→prod deployment with rollback, self-hosted macOS runner, environment isolation
 
 **Market Constraints**
-- **Narrow hardware scope**: Targets RT-AC68U (2014 hardware, end-of-life), limiting addressable market
+- **Hardware scope**: Supports all AsusWRT routers via the `asusrouter` library; model auto-detected on connect
 - **Firmware dependency**: Primary backend relies on `asusrouter` library for Merlin firmware; FreshTomato backend is read-only
 - **Competitive pressure**: ASUS's newer routers (WiFi 6E/7) increasingly expose native APIs via mobile apps, eroding differentiation
 - **Niche audience**: Viable for power users and home lab enthusiasts running Merlin firmware on legacy hardware
@@ -144,7 +144,14 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - ⚠️ **Commercial product**: Not viable without pivoting to broader hardware support (WiFi 6E/7 mesh systems) and SaaS telemetry layer
 - ⚠️ **Scalability**: Single-router focus; no multi-site or fleet management capabilities
 
-**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires hardware scope expansion beyond AC68U and a cloud-based telemetry/management layer.
+**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires a cloud-based telemetry/management layer.
+
+## Tested router models
+
+- RT-AX86U
+- RT-AX88U
+- GT-AX6000
+- ZenWiFi XD6
 
 ## Performance metrics source methodology
 

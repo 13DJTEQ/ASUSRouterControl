@@ -46,6 +46,7 @@ class MerlinBackend(FirmwareBackend):
         self._port = port
         self._session: aiohttp.ClientSession | None = None
         self._router: AsusRouter | None = None
+        self._model: str | None = None
 
     async def connect(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -58,7 +59,20 @@ class MerlinBackend(FirmwareBackend):
             session=self._session,
         )
         await self._router.async_connect()
-        log.info("Connected to router at %s", self._hostname)
+
+        # Auto-detect router model via identity query
+        try:
+            identity = await self._router.async_get_identity()
+            self._model = identity.model
+            log.info(
+                "Connected to %s (%s) at %s",
+                self._model,
+                identity.firmware,
+                self._hostname,
+            )
+        except Exception:
+            self._model = None
+            log.info("Connected to router at %s (model detection failed)", self._hostname)
 
     async def disconnect(self) -> None:
         if self._router:

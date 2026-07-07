@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comprehensive RT-AC68U performance analysis.
+"""Comprehensive AsusWRT router performance analysis.
 
 Downloads the full NVRAM dump, runs all live probes, pulls historical
 optimizer recommendations, and cross-references everything against a
@@ -37,7 +37,7 @@ def _bad(msg: str)  -> str: return f"  {RED}✖{RESET}  {msg}"
 def _info(msg: str) -> str: return f"  {DIM}·{RESET}  {msg}"
 
 
-# ── RT-AC68U Merlin performance knowledge base ──────────────────────────────
+# ── AsusWRT Merlin performance knowledge base ────────────────────────────────
 
 @dataclass
 class NvramRule:
@@ -85,7 +85,7 @@ NVRAM_RULES: list[NvramRule] = [
               "Throughput improvement for lightly loaded 5 GHz band.", "low"),
     NvramRule("wl1_mumimo", "1", "5 GHz MU-MIMO",
               "Serves multiple 5 GHz clients simultaneously instead of round-robin. "
-              "RT-AC68U supports 3x3 MU-MIMO on 5 GHz.", "high"),
+              "Most AsusWRT routers support MU-MIMO on 5 GHz.", "high"),
     NvramRule("wl1_bw", "2", "5 GHz Bandwidth (80 MHz)",
               "5 GHz should run 80 MHz (bw=2) for AC. 40 MHz (bw=1) or 20 MHz halves throughput.",
               "high"),
@@ -93,7 +93,7 @@ NVRAM_RULES: list[NvramRule] = [
     # ── Services / CPU+RAM impact ───────────────────────────────────────────
     NvramRule("wrs_enable", "0", "AiProtect / WebAdvisor (disable if unused)",
               "Trend Micro engine performs deep-packet inspection on every packet. "
-              "Costs ~30-60 MB RAM and measurable CPU on the RT-AC68U BCM4708A0.", "high",
+              "Costs ~30-60 MB RAM and measurable CPU on most AsusWRT routers.", "high",
               condition="only beneficial if AiProtect not actively used"),
     NvramRule("wrs_protect_enable", "0", "AiProtect network protection (disable if unused)",
               "Companion to wrs_enable; same Trend Micro DPI engine.", "high",
@@ -225,8 +225,8 @@ async def run_analysis() -> None:
         print(_bad("No router credentials found. Run: arc credentials set"))
         sys.exit(1)
 
-    print(f"\n{BOLD}{'━'*62}{RESET}")
-    print(f"{BOLD}  RT-AC68U Performance Analysis{RESET}")
+    print(f"{BOLD}{'━'*62}{RESET}")
+    print(f"{BOLD}  AsusWRT Router Performance Analysis{RESET}")
     print(f"{BOLD}{'━'*62}{RESET}")
     print(f"  Host : {cfg.router_host}:{cfg.ssh_port}")
     print(f"  User : {username}")

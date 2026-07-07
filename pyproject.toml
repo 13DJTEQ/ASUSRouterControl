@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "asusroutercontrol"
 version = "0.1.0"
-description = "Management and analysis tool for ASUS RT-AC68U routers"
+description = "Management and analysis tool for all AsusWRT routers"
 requires-python = ">=3.11"
 dependencies = [
     "asusrouter>=1.21",
