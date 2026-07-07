@@ -23,7 +23,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - Treat `guard_action=NOOP|UPDATE|DELETE` as a stop-and-inspect signal; inspect `guard_target_uri` / `guard_target_id` first.
 
 ### Running the app
-- `asusrouter setup` — write router credentials to 1Password via `op` (required before most commands).
+- `asusrouter setup` — write router credentials to Bitwarden via `bw` (required before most commands).
 - `asusrouter status` / `asusrouter devices` / `asusrouter monitor` — primary CLI entrypoints.
 - `make run-menubar` (or `python -m asusroutercontrol.menubar`) — run the macOS menu bar app.
 
@@ -46,7 +46,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 ### Runtime layers and responsibilities
 - **Configuration & credentials**
   - `config.py` loads non-secret runtime config from env / `.env`.
-  - `credentials.py` handles secure credential retrieval/storage via 1Password (`universal-keychain-*` naming), with keychain fallback migration helpers.
+  - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with 1Password and keychain fallback migration helpers.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
   - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).

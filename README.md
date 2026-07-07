@@ -9,7 +9,8 @@ pip install -e .
 asusrouter setup
 ```
 
-The `setup` command stores router credentials securely in 1Password via the `op` CLI.
+The `setup` command stores router credentials securely in Bitwarden via the `bw` CLI (default).
+Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
 Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
 
 ## Developer validation
@@ -80,10 +81,70 @@ asusrouter live-dhcp-auth --mac AA:BB:CC:DD:EE:FF -s 120   # Live phone reconnec
 
 ## Architecture
 
-- **Firmware-agnostic**: Backend abstraction supports Merlin now, FreshTomato later
-- **Backend selection**: `ROUTER_BACKEND` switches between Merlin and FreshTomato implementations
-- **Secure credentials**: 1Password (`op` CLI) with keychain fallback migration support
-- **SoundShield integration**: JSON export for network-aware audio device discovery
+### Overview
+ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6.3K LOC tests) with two primary entrypoints:
+- **CLI** (`asusrouter`) — command-line interface for router management, diagnostics, and DHCP operations
+- **Menu bar app** (`asusroutermonitor`) — macOS native menu bar app with live metrics display
+
+### Runtime Layers
+
+**Configuration & Credentials**
+- `config.py` — frozen `Config` dataclass, env/.env driven, runtime-environment isolation (dev vs prod data dirs)
+- `credentials.py` — pluggable backend registry (Bitwarden primary, 1Password and macOS Keychain fallbacks)
+
+**Firmware Backends** (strategy pattern)
+- `backends/base.py` — `FirmwareBackend` ABC with `BackendOperationUnsupported` exception
+- `backends/merlin.py` — uses `asusrouter` library API (read + selected write operations)
+- `backends/freshtomato.py` — SSH-driven, currently read-only for write operations
+- `backends/factory.py` — selects backend via `ROUTER_BACKEND` env var
+
+**SSH & Probes**
+- `ssh.py` — async SSH with host-key trust modes (`strict`, `tofu_confirm`, `tofu_auto`)
+- `probes.py` — NVRAM snapshots, WiFi/client telemetry, latency via SSH commands
+
+**Persistence**
+- `datastore.py` — async SQLite (`aiosqlite`) with schema migrations, retention pruning, notification cooldowns
+- `models.py` — 20+ Pydantic models (Device, TrafficSnapshot, SpeedTestResult, WiFiSnapshot, ClientLoad, etc.)
+
+**Scheduler** (`scheduler.py`)
+- Long-running `MonitorScheduler` orchestrating concurrent loops: speedtests, SSH probes, client traffic deltas, device polling, config snapshots, recommendations, daily pruning
+- Timeouts, rollback on failed DB cycles, backoff after repeated failures
+
+**Analysis Pipeline**
+- `analyzer.py` + `analysis/` — trends, anomalies, SLA metrics from persisted telemetry
+- `speedtest.py` + `speedtest_providers.py` — multi-provider (Ookla, Cloudflare, CDN) with confidence-scored composite
+- `optimizer.py` → `executor.py` → `rollout.py` — NVRAM optimization with whitelist safeguards, snapshots, config-event recording
+- `reporting.py` — aggregates datastore windows into structured health reports
+
+**CLI Decomposition** (in progress)
+- `cli.py` (136K monolith) being split into `cli/` package (`core.py` = 14K extracted)
+- `_cli_legacy.py` = archived monolith copy
+
+### Dependencies
+- **Core**: `asusrouter>=1.21`, `aiohttp`, `keyring`, `pydantic>=2.0`, `click`, `aiosqlite`, `rich`, `asyncssh`
+- **Dev**: `pytest`, `pytest-asyncio`, `ruff`
+- **Menubar**: `pyobjc-core`, `pyobjc-framework-cocoa`
+
+## Market Validity Assessment
+
+**Technical Strengths**
+- Solid engineering: ~25K LOC with comprehensive test coverage, multi-backend architecture, CI/CD pipeline
+- Feature-rich: device monitoring, WiFi telemetry, multi-provider speed tests, SSH probes, NVRAM optimization, DHCP management, client load analysis, incident rollback, channel surveys
+- Production-ready: dev→prod deployment with rollback, self-hosted macOS runner, environment isolation
+
+**Market Constraints**
+- **Narrow hardware scope**: Targets RT-AC68U (2014 hardware, end-of-life), limiting addressable market
+- **Firmware dependency**: Primary backend relies on `asusrouter` library for Merlin firmware; FreshTomato backend is read-only
+- **Competitive pressure**: ASUS's newer routers (WiFi 6E/7) increasingly expose native APIs via mobile apps, eroding differentiation
+- **Niche audience**: Viable for power users and home lab enthusiasts running Merlin firmware on legacy hardware
+
+**Viability Assessment**
+- ✅ **Personal/power-user tool**: Excellent fit for technical users who want programmatic router management, telemetry, and automation
+- ✅ **Open-source community project**: Strong foundation for community contributions and feature extensions
+- ⚠️ **Commercial product**: Not viable without pivoting to broader hardware support (WiFi 6E/7 mesh systems) and SaaS telemetry layer
+- ⚠️ **Scalability**: Single-router focus; no multi-site or fleet management capabilities
+
+**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires hardware scope expansion beyond AC68U and a cloud-based telemetry/management layer.
 
 ## Performance metrics source methodology
 

@@ -1,4 +1,4 @@
-"""Tests for credentials.py — pluggable backends (1Password, Keychain, Bitwarden).
+"""Tests for credentials.py — pluggable backends (Bitwarden, 1Password, Keychain).
 
 These tests exercise the backend registry, env-aware fallbacks, and the public
 CRUD surface.  Backends are mocked in-memory so no real vault/keychain/CLI is
@@ -136,17 +136,17 @@ def bw_store(credential_stores):
 
 
 class TestBackendSelection:
-    def test_default_backend_is_1password(self, monkeypatch):
+    def test_default_backend_is_bitwarden(self, monkeypatch):
         monkeypatch.delenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", raising=False)
-        assert creds_mod._active_backend_name() == "1password"
+        assert creds_mod._active_backend_name() == "bitwarden"
 
     def test_backend_env_switch(self, monkeypatch):
         monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
         assert creds_mod._active_backend_name() == "keychain"
 
-    def test_unknown_backend_falls_back_to_1password(self, monkeypatch):
+    def test_unknown_backend_falls_back_to_bitwarden(self, monkeypatch):
         monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keeper")
-        assert creds_mod._active_backend_name() == "1password"
+        assert creds_mod._active_backend_name() == "bitwarden"
 
 
 # ---------------------------------------------------------------------------

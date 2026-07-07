@@ -1,0 +1,37 @@
+Usage: python -m asusroutercontrol.cli [OPTIONS] COMMAND [ARGS]...
+
+  ASUSRouterControl — manage your ASUS router.
+
+Options:
+  --version  Show the version and exit.
+  --help     Show this message and exit.
+
+Commands:
+  analyze                  Run full analysis: recommendations + SLA +...
+  client-load-diagnostics  Show client load data-quality diagnostics for...
+  config-history           Show config change history and their...
+  config-snapshot          Take a config snapshot now, or show latest...
+  credentials              Manage router credentials.
+  dashboard                Show combined ISP and client speed/load...
+  devices                  List connected devices.
+  dhcp                     Manage DHCP reservations.
+  entware                  Manage Entware packages (opkg).
+  history                  Show device history.
+  incident                 Incident triage and recovery workflows.
+  live-dhcp-auth           Tail DHCP/Wi-Fi auth logs live and diagnose...
+  menubar                  Manage the AsusRouterMonitor menubar applet.
+  monitor                  Continuously monitor router (Ctrl+C to stop).
+  optimize                 Router optimization: audit, suggest, apply,...
+  ports                    Show port forwarding rules.
+  reboot                   Reboot the router.
+  report                   Generate a network health report.
+  scheduler                Manage the background monitoring scheduler.
+  scripts                  Manage JFFS custom scripts (Merlin).
+  security                 Run security posture check.
+  setup                    Store router credentials in 1Password...
+  speedtest                Run a multi-source speed test.
+  ssh                      Manage SSH trust and host key pinning.
+  status                   Show router system info and WAN status.
+  traffic                  Show traffic summary and anomalies.
+  trends                   Show performance trends (speed, latency, RAM,...
+  wifi                     Toggle WiFi radios.

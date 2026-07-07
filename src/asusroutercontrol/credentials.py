@@ -1,12 +1,13 @@
-"""Secure credential management with pluggable backends: 1Password, macOS Keychain, Bitwarden.
+"""Secure credential management with pluggable backends: Bitwarden, 1Password, macOS Keychain.
 
 Canonical naming follows the universal-keychain convention:
   Service / vault item title: universal-keychain-asusroutercontrol-{env}-{key}
   Account metadata: asusroutercontrol.{env}.{key}
 
 The active backend is controlled by ASUSROUTERCONTROL_CREDENTIAL_BACKEND env var
-("1password" | "keychain" | "bitwarden").  When the backend is unreachable, reads
-fall back through the remaining backends in priority order.
+("bitwarden" | "1password" | "keychain").  Defaults to Bitwarden.
+When the backend is unreachable, reads fall back through the remaining backends
+in priority order.
 """
 
 from __future__ import annotations
@@ -586,16 +587,16 @@ _BACKENDS: dict[str, _CredentialBackend] = {
     "bitwarden": _BitwardenBackend(),
 }
 
-_READ_FALLBACK_ORDER = ["1password", "keychain", "bitwarden"]
-_WRITE_FALLBACK_ORDER = ["1password", "keychain", "bitwarden"]
+_READ_FALLBACK_ORDER = ["bitwarden", "1password", "keychain"]
+_WRITE_FALLBACK_ORDER = ["bitwarden", "1password", "keychain"]
 
 
 def _active_backend_name() -> str:
-    raw = os.environ.get(_CREDENTIAL_BACKEND_ENV, "1password").strip().lower()
+    raw = os.environ.get(_CREDENTIAL_BACKEND_ENV, "bitwarden").strip().lower()
     if raw in _BACKENDS:
         return raw
-    log.warning("Unknown credential backend '%s'; falling back to 1password", raw)
-    return "1password"
+    log.warning("Unknown credential backend '%s'; falling back to bitwarden", raw)
+    return "bitwarden"
 
 
 def _active_backend() -> _CredentialBackend:
