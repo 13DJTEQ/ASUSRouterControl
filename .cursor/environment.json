@@ -1,0 +1,8 @@
+{
+  "name": "ASUSRouterControl",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "pip install -e \".[dev]\""
+}
