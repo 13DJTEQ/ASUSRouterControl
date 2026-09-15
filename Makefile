@@ -45,6 +45,10 @@ verify-dev-app:
 	bash scripts/verify_dev_app.sh
 launch-dev-app: verify-dev-app
 
+# One-shot DEV.app for the Mac you will test on (must run on Darwin).
+local-dev-app:
+	bash scripts/prepare_local_dev_app.sh
+
 app: run-menubar
 
 asusroutercontrol: app
