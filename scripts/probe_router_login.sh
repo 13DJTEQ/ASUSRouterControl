@@ -3,7 +3,7 @@
 # Run on the Mac (on the router LAN).
 #
 # Usage:
-#   ROUTER_PASS='your-password' bash scripts/probe_router_login.sh
+#   ROUTER_PASS='your-real-password' bash scripts/probe_router_login.sh
 #   ROUTER_USER=13Maschine HOST=192.168.50.1 ROUTER_PASS='...' bash scripts/probe_router_login.sh
 set -euo pipefail
 
@@ -25,30 +25,57 @@ if [[ -z "${ROUTER_PASS:-}" ]]; then
   export ROUTER_PASS
 fi
 
+PYTHON=""
+if [[ -x "${ROOT}/.venv/bin/python" ]]; then
+  PYTHON="${ROOT}/.venv/bin/python"
+elif [[ -x "${ROOT}/.venv/bin/python3" ]]; then
+  PYTHON="${ROOT}/.venv/bin/python3"
+elif command -v python3.11 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3.11)"
+else
+  PYTHON="$(command -v python3)"
+fi
+
+if ! "$PYTHON" -c "import dotenv, asusrouter, aiohttp" 2>/dev/null; then
+  echo "Missing deps in: $PYTHON" >&2
+  echo "From the repo root run:  make setup   (or: python3.11 -m venv .venv && .venv/bin/pip install -e '.[dev]')" >&2
+  exit 1
+fi
+
 export PYTHONPATH="${ROOT}/src:${PYTHONPATH:-}"
-python3 <<'PY'
+exec "$PYTHON" <<'PY'
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 host = os.environ["HOST"]
 user = os.environ["ROUTER_USER"]
 password = os.environ["ROUTER_PASS"]
 
 async def main() -> int:
-    from asusroutercontrol.config import Config
     from asusroutercontrol.connect import probe_http
 
+    def cfg(h: str, port: int, ssl: bool):
+        return SimpleNamespace(
+            router_host=h,
+            router_port=port,
+            use_ssl=ssl,
+            router_backend="merlin",
+            ssh_port=1313,
+        )
+
     attempts = [
-        Config(router_host=host, router_port=8443, use_ssl=True),
-        Config(router_host=host, router_port=80, use_ssl=False),
-        Config(router_host="192.168.50.1", router_port=8443, use_ssl=True),
-        Config(router_host="192.168.50.1", router_port=80, use_ssl=False),
+        cfg(host, 8443, True),
+        cfg(host, 80, False),
+        cfg("192.168.50.1", 8443, True),
+        cfg("192.168.50.1", 80, False),
     ]
+    print(f"Using python={sys.executable}")
     print(f"Probing as user={user!r}")
-    for cfg in attempts:
-        ok, err = await probe_http(cfg, user, password)
-        label = f"{'https' if cfg.use_ssl else 'http'}://{cfg.router_host}:{cfg.router_port}"
+    for c in attempts:
+        ok, err = await probe_http(c, user, password)
+        label = f"{'https' if c.use_ssl else 'http'}://{c.router_host}:{c.router_port}"
         if ok:
             print(f"OK  {label}")
             return 0
