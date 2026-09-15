@@ -113,7 +113,10 @@ PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 DEV_RUNTIME_EXE="${dev_runtime_exe}"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
+SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
+# Absolute .app path so Restart can relaunch when not under launchd.
+export ASUSROUTERCONTROL_APP_BUNDLE="\$(cd "\${SELF_DIR}/../.." && pwd)"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then

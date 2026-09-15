@@ -216,6 +216,29 @@ def _menubar_launchd_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / filename
 
 
+def _app_bundle_path() -> Path | None:
+    """Return the running .app bundle path when known (DEV launcher sets this)."""
+    env_path = os.environ.get("ASUSROUTERCONTROL_APP_BUNDLE", "").strip()
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_dir() and candidate.suffix == ".app":
+            return candidate
+    try:
+        from Foundation import NSBundle
+
+        bundle_path = NSBundle.mainBundle().bundlePath()
+        if bundle_path and str(bundle_path).endswith(".app"):
+            candidate = Path(bundle_path)
+            # Ignore bare Python.app / framework hosts used by source launches
+            name = candidate.name.lower()
+            if "python" in name:
+                return None
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
 def _add_section_header(menu, title: str):
     """Add a bold/underline section header menu item."""
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
@@ -1237,8 +1260,8 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def quitApp_(self, sender):
-        """Stop scheduler and terminate — launchd KeepAlive will restart."""
-        log.info("quitApp_ invoked — restarting via KeepAlive")
+        """Restart the menubar app via launchd KeepAlive, or relaunch the .app bundle."""
+        log.info("quitApp_ invoked — restart requested")
         self._stop_scheduler()
         env = _runtime_environment()
         label = _menubar_launchd_label()
@@ -1246,27 +1269,41 @@ class AppDelegate(NSObject):
         install_cmd = "asusrouter menubar install"
         if env != "prod":
             install_cmd = f"{install_cmd} --environment {env}"
-        if not plist.exists():
-            log.warning("No plist found — app will not restart")
-            _notify(
-                "⚠️ Restart Failed",
-                "No launchd plist installed.",
-                f"Run: {install_cmd}",
-            )
-        elif not _launchd_service_loaded(label):
-            # Running outside launchd (e.g. make run-menubar) — no KeepAlive.
-            log.warning("Not managed by launchd — app will not restart")
-            _notify(
-                "⚠️ Restart Failed",
-                "Not running under launchd.",
-                f"Run: {install_cmd}",
-            )
-        else:
+
+        if plist.exists() and _launchd_service_loaded(label):
             log.info("Terminating — launchd KeepAlive will respawn (%s)", label)
-        # Simply terminate; launchd sees the exit and respawns via KeepAlive.
-        # Do NOT bootout — that deregisters the service and kills this process
-        # before bootstrap can run, preventing respawn entirely.
-        NSApplication.sharedApplication().terminate_(sender)
+            # Do NOT bootout — that deregisters the service and prevents respawn.
+            NSApplication.sharedApplication().terminate_(sender)
+            return
+
+        bundle = _app_bundle_path()
+        if bundle is not None:
+            log.info(
+                "Not under launchd — relaunching app bundle: %s", bundle
+            )
+            try:
+                subprocess.Popen(
+                    ["/usr/bin/open", "-n", str(bundle)],
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                log.exception("Failed to relaunch app bundle")
+                _notify(
+                    "⚠️ Restart Failed",
+                    "Could not relaunch the app.",
+                    str(exc)[:100],
+                )
+                return
+            NSApplication.sharedApplication().terminate_(sender)
+            return
+
+        log.warning("Restart unavailable — no launchd service and no app bundle path")
+        _notify(
+            "⚠️ Restart Failed",
+            "Not running under launchd and no app bundle path is set.",
+            f"Run: {install_cmd}",
+        )
+        # Keep the current process alive so the menubar does not disappear.
 
 
 def main() -> None:
