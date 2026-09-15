@@ -1247,7 +1247,9 @@ def setup(host, http_port, ssh_port, ssh, credential_backend, router_backend):
             type=int,
         )
 
-    cred_backend = credential_backend or str(defaults["credential_backend"] or _active_backend_name())
+    cred_backend = credential_backend or str(
+        defaults["credential_backend"] or _active_backend_name()
+    )
     console.print(f"\n[dim]Credential backend: {cred_backend}[/dim]")
 
     try:
