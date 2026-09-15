@@ -194,10 +194,30 @@ _MENUBAR_BASE_LABEL = "com.asusroutermonitor"
 
 
 def _runtime_environment() -> str:
-    env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod").strip().lower()
-    return env or "prod"
+    """Resolve runtime env for icons/data isolation.
+
+    Prefer the explicit env var. If unset, infer ``dev`` from the DEV.app
+    bundle path or a ``DEV_BUILD`` marker so menubar icons stay correct even
+    when the launcher env is lost (e.g. older installs).
+    """
+    env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "").strip().lower()
+    if env:
+        return env
+
+    bundle = os.environ.get("ASUSROUTERCONTROL_APP_BUNDLE", "").strip()
+    if bundle:
+        name = Path(bundle).name
+        if "DEV.app" in name or name.endswith(" DEV.app"):
+            return "dev"
+        marker = Path(bundle) / "Contents" / "Resources" / "DEV_BUILD"
+        if marker.is_file():
+            return "dev"
+
+    return "prod"
+
 
 def _icon_prefix_for_runtime(runtime_env: str) -> str:
+    """Menubar glyph: satellite for prod, test tube for DEV/test runtimes."""
     return _TEST_ICON_PREFIX if runtime_env != "prod" else _ICON_PREFIX
 
 
@@ -286,6 +306,11 @@ class AppDelegate(NSObject):
         runtime_env = _runtime_environment()
         self._runtime_env = runtime_env
         self._icon_prefix = _icon_prefix_for_runtime(runtime_env)
+        log.info(
+            "runtime_env=%s menubar_icon=%s",
+            runtime_env,
+            self._icon_prefix,
+        )
         self._cfg = load_config(runtime_env=runtime_env)
         ensure_runtime_data_dir_isolation(self._cfg, runtime_env=runtime_env)
         self._cfg.ensure_dirs()
