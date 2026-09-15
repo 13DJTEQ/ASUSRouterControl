@@ -441,6 +441,7 @@ class TestBitwardenRouterItemLookup:
 
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: item)
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "unlocked")
 
         assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
         user, pw = creds.get_router_credentials(host_hint="router.asus.com")
@@ -456,6 +457,7 @@ class TestBitwardenRouterItemLookup:
         assert defaults["username"] == "admin"
         assert defaults["password"] == "s3cret"
         assert defaults["credential_backend"] == "bitwarden"
+        assert "1313" in str(defaults.get("store_detail") or "")
 
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
@@ -464,3 +466,17 @@ class TestBitwardenRouterItemLookup:
         assert _bw_item_matches_host(item, "router.asus.com") is True
         assert _bw_item_matches_host(item, "other.example") is False
 
+
+
+    def test_resolve_reports_locked_vault(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="bitwarden",
+        )
+        assert defaults["ssh_port"] == 22
+        assert "locked" in str(defaults.get("store_detail") or "").lower()

@@ -1283,9 +1283,11 @@ class AppDelegate(NSObject):
         alert.setMessageText_("Connect Router")
         info = (
             "HTTP admin login is required. SSH is optional.\n"
-            "Enter host/username/password/SSH port manually, or reuse them from Bitwarden/Keychain.\n"
-            "SSH port is loaded from the same store (and saved on success)."
+            "Enter host/username/password/SSH port manually, or reuse them from Bitwarden/Keychain."
         )
+        detail = defaults.get("store_detail")
+        if detail:
+            info += f"\n{detail}"
         if defaults.get("password_from_store"):
             info += "\nPassword can be left blank to reuse the stored password."
         alert.setInformativeText_(info)
