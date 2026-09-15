@@ -329,9 +329,24 @@ class AppDelegate(NSObject):
         from asusroutercontrol.ssh import RouterSSH
 
         async def _check_backend():
-            username, password = get_router_credentials()
+            from asusroutercontrol.connect import format_http_probe_error
+            from asusroutercontrol.credentials import load_runtime_env_files
+
+            load_runtime_env_files()
+            username, password = get_router_credentials(host_hint=host)
             if not username or not password:
-                raise RuntimeError("Missing router credentials")
+                raise RuntimeError(
+                    "Missing router credentials. Connect Router with the "
+                    "Administration → System login name "
+                    "(e.g. 13Maschine, not admin)."
+                )
+            log.info(
+                "Health check LOGIN as user=%r host=%s port=%s ssl=%s",
+                username,
+                self._cfg.router_host,
+                self._cfg.router_port,
+                self._cfg.use_ssl,
+            )
             backend = create_backend(
                 self._cfg,
                 username=username,
@@ -339,6 +354,12 @@ class AppDelegate(NSObject):
             )
             try:
                 await backend.connect()
+            except Exception as exc:
+                raise RuntimeError(
+                    format_http_probe_error(
+                        exc, host=str(self._cfg.router_host), username=username
+                    )
+                ) from exc
             finally:
                 try:
                     await backend.disconnect()
@@ -1703,6 +1724,12 @@ def main() -> None:
             pass
         sys.exit(78)  # EX_CONFIG
     runtime_env = _runtime_environment()
+    try:
+        from asusroutercontrol.credentials import load_runtime_env_files
+
+        load_runtime_env_files()
+    except Exception:
+        pass
     cfg = load_config(runtime_env=runtime_env)
     ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
     cfg = load_config(runtime_env=runtime_env)

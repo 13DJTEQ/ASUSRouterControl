@@ -1038,32 +1038,102 @@ def _runtime_credential_env() -> str:
     return os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
 
 
+def _env_router_username() -> str | None:
+    return (
+        os.environ.get("ASUSROUTERCONTROL_ROUTER_USERNAME", "").strip()
+        or os.environ.get("ROUTER_USERNAME", "").strip()
+        or None
+    )
+
+
+def load_runtime_env_files() -> None:
+    """Load .env for GUI launches (non-repo cwd) and refresh BW_SESSION."""
+    try:
+        from dotenv import dotenv_values, load_dotenv
+
+        candidates = [
+            Path.cwd() / ".env",
+            Path.home() / "ASUSRouterControl" / ".env",
+            Path.home() / ".asusroutercontrol.dev" / ".env",
+            Path.home() / ".asusroutercontrol" / ".env",
+            Path.home() / ".config" / "asusroutercontrol" / ".env",
+        ]
+        env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
+        if env_override:
+            candidates.insert(0, Path(env_override).expanduser())
+        loaded = False
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    load_dotenv(dotenv_path=str(candidate), override=False)
+                    values = dotenv_values(candidate)
+                    session = (
+                        values.get("BW_SESSION")
+                        or values.get("BITWARDEN_SESSION")
+                        or ""
+                    ).strip()
+                    if session:
+                        os.environ[_BW_SESSION_ENV] = session
+                    # Username override must win over stale Keychain "admin".
+                    for key in (
+                        "ASUSROUTERCONTROL_ROUTER_USERNAME",
+                        "ROUTER_USERNAME",
+                    ):
+                        value = (values.get(key) or "").strip()
+                        if value:
+                            os.environ[key] = value
+                    loaded = True
+            except OSError:
+                continue
+        if not loaded:
+            load_dotenv(override=False)
+    except Exception:  # noqa: BLE001
+        pass
+    _ensure_bw_session_env()
+
+
 def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None, str | None]:
     """Return (username, password) for router access using the runtime env.
 
     When *host_hint* is provided, prefer a matching human Bitwarden login item
     (e.g. ``router.asus.com (13Maschine)``) over stale canonical keys.
+    ``ASUSROUTERCONTROL_ROUTER_USERNAME`` always overrides a stored username
+    (avoids stale Keychain ``admin`` after the router login name was renamed).
     """
+    load_runtime_env_files()
     env = _runtime_credential_env()
+    username: str | None = None
+    password: str | None = None
     if host_hint:
         item = lookup_bitwarden_router_item(host_hint=host_hint)
         if item is not None:
             bw_user, bw_pass = _credentials_from_bitwarden_item(item)
             if bw_user and bw_pass:
-                return bw_user, bw_pass
-            # Partial BW item — fill gaps from canonical store.
-            username = get_credential("router_username", env=env)
-            password = get_credential("router_password", env=env)
-            return bw_user or username, bw_pass or password
-    username = get_credential("router_username", env=env)
-    password = get_credential("router_password", env=env)
-    if username and password:
-        return username, password
-    item = lookup_bitwarden_router_item(host_hint=host_hint)
-    if item is None:
-        return username, password
-    bw_user, bw_pass = _credentials_from_bitwarden_item(item)
-    return username or bw_user, password or bw_pass
+                username, password = bw_user, bw_pass
+            else:
+                # Partial BW item — fill gaps from canonical store.
+                username = bw_user or get_credential("router_username", env=env)
+                password = bw_pass or get_credential("router_password", env=env)
+    if username is None and password is None:
+        username = get_credential("router_username", env=env)
+        password = get_credential("router_password", env=env)
+        if not (username and password):
+            item = lookup_bitwarden_router_item(host_hint=host_hint)
+            if item is not None:
+                bw_user, bw_pass = _credentials_from_bitwarden_item(item)
+                username = username or bw_user
+                password = password or bw_pass
+
+    env_user = _env_router_username()
+    if env_user:
+        if username and username != env_user:
+            log.info(
+                "Overriding stored username %r with env router username %r",
+                username,
+                env_user,
+            )
+        username = env_user
+    return username, password
 
 
 def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
@@ -1115,42 +1185,7 @@ def resolve_connect_login_defaults(
     preferred_backend: str | None = None,
 ) -> dict[str, str | int | None]:
     """Defaults for Connect Router UI / CLI, sourced from BW/Keychain when present."""
-    # Ensure .env values (including BW_SESSION) are visible before vault calls.
-    # GUI .app launches often have a non-repo cwd, so probe known locations.
-    try:
-        from dotenv import dotenv_values, load_dotenv
-
-        candidates = [
-            Path.cwd() / ".env",
-            Path.home() / "ASUSRouterControl" / ".env",
-            Path.home() / ".asusroutercontrol" / ".env",
-            Path.home() / ".config" / "asusroutercontrol" / ".env",
-        ]
-        env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
-        if env_override:
-            candidates.insert(0, Path(env_override).expanduser())
-        loaded = False
-        for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    load_dotenv(dotenv_path=str(candidate), override=False)
-                    # BW_SESSION must refresh after `bw unlock` without relaunch quirks.
-                    values = dotenv_values(candidate)
-                    session = (
-                        values.get("BW_SESSION")
-                        or values.get("BITWARDEN_SESSION")
-                        or ""
-                    ).strip()
-                    if session:
-                        os.environ[_BW_SESSION_ENV] = session
-                    loaded = True
-            except OSError:
-                continue
-        if not loaded:
-            load_dotenv(override=False)
-    except Exception:  # noqa: BLE001
-        pass
-    _ensure_bw_session_env()
+    load_runtime_env_files()
     # Allow a later unlock to recover after an earlier "bw missing" sticky miss.
     global _bw_cli_found  # noqa: PLW0603
     if _bw_cli_found is False:
@@ -1163,13 +1198,8 @@ def resolve_connect_login_defaults(
 
     username, password = get_router_credentials(host_hint=suggested_host)
     stored_port = get_router_ssh_port(host_hint=suggested_host)
-    env_username = (
-        os.environ.get("ASUSROUTERCONTROL_ROUTER_USERNAME", "").strip()
-        or os.environ.get("ROUTER_USERNAME", "").strip()
-        or None
-    )
-    # Do NOT invent "admin" — many Merlin setups rename the login (e.g. 13Maschine).
-    resolved_username = username or env_username or ""
+    # Env override already applied inside get_router_credentials.
+    resolved_username = username or ""
     active = _active_backend_name()
     if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
         backend = preferred_backend

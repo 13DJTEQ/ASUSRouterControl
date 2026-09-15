@@ -530,11 +530,25 @@ class TestBitwardenRouterItemLookup:
         monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
         defaults = creds.resolve_connect_login_defaults(
             suggested_host="router.asus.com",
             preferred_backend="keychain",
         )
         assert defaults["username"] == "13Maschine"
+
+    def test_env_username_overrides_stale_keychain_admin(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        assert creds.store_credential("router_username", "admin", backend="keychain")
+        assert creds.store_credential("router_password", "secret", backend="keychain")
+        user, pw = creds.get_router_credentials(host_hint="router.asus.com")
+        assert user == "13Maschine"
+        assert pw == "secret"
 
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
