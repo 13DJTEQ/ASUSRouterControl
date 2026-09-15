@@ -13,15 +13,15 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 ERROR: ASUSRouterControl DEV.app is a macOS menubar bundle (AppKit / PyObjC).
 
 This environment cannot produce a runnable app for your Mac.
-On your Mac, from this repo checkout:
+On your Mac, from a clone of this repo (not from ~):
 
+  cd ~
+  git clone https://github.com/13DJTEQ/ASUSRouterControl.git   # skip if already cloned
+  cd ASUSRouterControl
   git fetch origin
   git checkout cursor/phase1-docs-agent-cleanup-451c
   git pull --ff-only
-  bash scripts/prepare_local_dev_app.sh
-
-Then open:
-
+  make local-dev-app
   open "testbuilds/ASUSRouterControl DEV.app"
 EOF
   exit 1

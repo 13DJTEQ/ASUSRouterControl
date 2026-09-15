@@ -4,7 +4,23 @@
 
 ## Build on your Mac
 
+Run these from a clone of the repo (not from `~`). First-time setup:
+
 ```bash
+cd ~
+git clone https://github.com/13DJTEQ/ASUSRouterControl.git
+cd ASUSRouterControl
+git fetch origin
+git checkout cursor/phase1-docs-agent-cleanup-451c
+git pull --ff-only
+make local-dev-app
+open "testbuilds/ASUSRouterControl DEV.app"
+```
+
+If you already have a clone:
+
+```bash
+cd /path/to/ASUSRouterControl   # must contain Makefile and .git
 git fetch origin
 git checkout cursor/phase1-docs-agent-cleanup-451c
 git pull --ff-only
