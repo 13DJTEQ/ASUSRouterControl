@@ -30,14 +30,18 @@ from AppKit import (
     NSFontAttributeName,
     NSImage,
     NSImageRight,
+    NSMakeRect,
     NSMenu,
     NSMenuItem,
     NSObject,
+    NSSecureTextField,
     NSStatusBar,
+    NSTextField,
     NSTimer,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSVariableStatusItemLength,
+    NSView,
 )
 from PyObjCTools import AppHelper
 
@@ -443,10 +447,12 @@ class AppDelegate(NSObject):
 
         self._mi_speedtest = _add_action(menu, "▶ Run Speed Test", "runSpeedTest:", self)
         self._mi_report = _add_action(menu, "📊 Generate Report", "genReport:", self)
+        _add_action(menu, "🔌 Connect Router...", "connectRouter:", self)
         _add_action(menu, "🔄 Reboot Router...", "rebootRouter:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self._mi_sched_status = _add_info(menu, "Scheduler: starting...")
+        self._mi_capabilities = _add_info(menu, "Capabilities: checking...")
         _add_action(menu, "Open Log File", "openLog:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1025,6 +1031,31 @@ class AppDelegate(NSObject):
         dot = "●" if alive else "○"
         status = "Running" if alive else "Stopped"
         self._mi_sched_status.setTitle_(f"Scheduler: {dot} {status}")
+        self._refresh_capability_status()
+
+    def _refresh_capability_status(self) -> None:
+        """Show HTTP/SSH capability chips from the active router profile."""
+        try:
+            from asusroutercontrol.profile import load_profiles
+
+            profile = load_profiles(
+                self._cfg.data_dir, runtime_env=self._cfg.runtime_env
+            ).active
+        except Exception:
+            profile = None
+        if profile is None:
+            self._mi_capabilities.setTitle_("Capabilities: HTTP ? · SSH ?")
+            return
+        http = "✓" if profile.http_ok else ("—" if profile.http_ok is False else "?")
+        if not profile.ssh_enabled:
+            ssh = "off"
+        elif profile.ssh_ok is True:
+            ssh = "✓"
+        elif profile.ssh_ok is False:
+            ssh = "—"
+        else:
+            ssh = "?"
+        self._mi_capabilities.setTitle_(f"Capabilities: HTTP {http} · SSH {ssh}")
 
     # ------------------------------------------------------------------
     # Actions
@@ -1158,6 +1189,119 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def resetReportTitle_(self, _):
         self._mi_report.setTitle_("📊 Generate Report")
+
+    @objc.typedSelector(b"v@:@")
+    def connectRouter_(self, sender):
+        """Guided connect flow: HTTP required, SSH optional, Keychain credentials."""
+        from asusroutercontrol.discovery import discover_router_candidates, pick_default_host
+
+        candidates = discover_router_candidates(http_port=80, probe=True)
+        suggested = pick_default_host(candidates)
+
+        alert = NSAlert.new()
+        alert.setMessageText_("Connect Router")
+        alert.setInformativeText_(
+            "HTTP admin login is required. SSH is optional.\n"
+            "Credentials are stored in macOS Keychain."
+        )
+        alert.addButtonWithTitle_("Connect")
+        alert.addButtonWithTitle_("Cancel")
+
+        accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 120))
+
+        def _label(text: str, y: float):
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 90, 22))
+            field.setStringValue_(text)
+            field.setBezeled_(False)
+            field.setDrawsBackground_(False)
+            field.setEditable_(False)
+            accessory.addSubview_(field)
+
+        def _field(y: float, value: str = "", secure: bool = False):
+            cls = NSSecureTextField if secure else NSTextField
+            field = cls.alloc().initWithFrame_(NSMakeRect(100, y, 210, 22))
+            field.setStringValue_(value)
+            accessory.addSubview_(field)
+            return field
+
+        _label("Host", 90)
+        host_field = _field(90, suggested)
+        _label("Username", 60)
+        user_field = _field(60, "admin")
+        _label("Password", 30)
+        pass_field = _field(30, "", secure=True)
+        _label("SSH port", 0)
+        ssh_field = _field(0, str(getattr(self._cfg, "ssh_port", 22) or 22))
+
+        alert.setAccessoryView_(accessory)
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            return
+
+        host = host_field.stringValue().strip()
+        username = user_field.stringValue().strip() or "admin"
+        password = pass_field.stringValue()
+        try:
+            ssh_port = int(ssh_field.stringValue().strip() or "22")
+        except ValueError:
+            ssh_port = 22
+        if not host or not password:
+            _notify("Connect Failed", "", "Host and password are required")
+            return
+
+        threading.Thread(
+            target=self._do_connect,
+            kwargs={
+                "host": host,
+                "username": username,
+                "password": password,
+                "ssh_port": ssh_port,
+            },
+            name="connect-router",
+            daemon=True,
+        ).start()
+
+    def _do_connect(self, *, host: str, username: str, password: str, ssh_port: int):
+        try:
+            from asusroutercontrol.connect import setup_router_connection
+
+            result = asyncio.run(
+                setup_router_connection(
+                    host=host,
+                    username=username,
+                    password=password,
+                    http_port=80,
+                    use_ssl=False,
+                    backend=getattr(self._cfg, "router_backend", "merlin") or "merlin",
+                    ssh_enabled=True,
+                    ssh_port=ssh_port,
+                    credential_backend="keychain",
+                    cfg=self._cfg,
+                    data_dir=self._cfg.data_dir,
+                    discover=False,
+                )
+            )
+            ssh_note = (
+                "SSH ✓"
+                if result.probe.ssh_ok
+                else ("SSH —" if result.probe.ssh_ok is False else "SSH skipped")
+            )
+            _notify(
+                "Router Connected",
+                f"{result.profile.host}",
+                f"HTTP ✓ · {ssh_note} · creds:{result.credentials_backend}",
+            )
+            # Reload config so subsequent actions see the new profile.
+            self._cfg = load_config()
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "refreshCapabilityStatus:", None, False
+            )
+        except Exception as exc:
+            log.exception("Connect router failed")
+            _notify("Connect Failed", "", str(exc)[:120])
+
+    @objc.typedSelector(b"v@:@")
+    def refreshCapabilityStatus_(self, _):
+        self._refresh_capability_status()
 
     @objc.typedSelector(b"v@:@")
     def rebootRouter_(self, sender):

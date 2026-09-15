@@ -198,6 +198,26 @@ class MonitorScheduler:
                 capability="degraded-no-credentials",
                 operation_mode="unknown",
             )
+
+        ssh_enabled = True
+        try:
+            from asusroutercontrol.profile import load_profiles
+
+            profile = load_profiles(
+                self._cfg.data_dir, runtime_env=self._cfg.runtime_env
+            ).active
+            if profile is not None:
+                ssh_enabled = profile.ssh_enabled
+        except Exception:
+            log.debug("Could not load router profile for SSH gating", exc_info=True)
+
+        if not ssh_enabled:
+            log.info("SSH disabled in active router profile; running degraded-no-ssh")
+            return RuntimeProfile(
+                capability="degraded-no-ssh",
+                operation_mode="unknown",
+            )
+
         ssh_ready, op_mode = await self._probe_ssh_capabilities(
             username=username,
             password=password,

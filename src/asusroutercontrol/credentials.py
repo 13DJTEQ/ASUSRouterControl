@@ -655,13 +655,26 @@ def get_credential(key: str, *, env: str = DEFAULT_ENV) -> str | None:
     return os.environ.get(key.upper())
 
 
-def store_credential(key: str, value: str, *, env: str = DEFAULT_ENV) -> bool:
-    """Store credential in the active backend."""
-    active = _active_backend()
-    if active.store(key, value, env=env):
-        log.info("Stored %s in %s (env=%s)", key, active.name, env)
+def store_credential(
+    key: str,
+    value: str,
+    *,
+    env: str = DEFAULT_ENV,
+    backend: str | None = None,
+) -> bool:
+    """Store credential in the active backend (or an explicit backend)."""
+    if backend is None:
+        target = _active_backend()
+    else:
+        name = backend.strip().lower()
+        if name not in _BACKENDS:
+            log.error("Unknown credential backend '%s'", backend)
+            return False
+        target = _BACKENDS[name]
+    if target.store(key, value, env=env):
+        log.info("Stored %s in %s (env=%s)", key, target.name, env)
         return True
-    log.error("Failed to store %s in %s", key, active.name)
+    log.error("Failed to store %s in %s", key, target.name)
     return False
 
 
@@ -683,6 +696,31 @@ def get_router_credentials() -> tuple[str | None, str | None]:
         get_credential("router_username", env=env),
         get_credential("router_password", env=env),
     )
+
+
+def store_router_credentials(
+    username: str,
+    password: str,
+    *,
+    env: str | None = None,
+    backend: str | None = None,
+) -> str:
+    """Store router username/password.
+
+    Returns the backend name used. Menubar/setup UI should pass
+    ``backend="keychain"``; CLI setup keeps the process default (Bitwarden).
+    """
+    resolved_env = env or os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
+    target_name = (backend or _active_backend_name()).strip().lower()
+    ok_user = store_credential(
+        "router_username", username, env=resolved_env, backend=target_name
+    )
+    ok_pass = store_credential(
+        "router_password", password, env=resolved_env, backend=target_name
+    )
+    if not (ok_user and ok_pass):
+        raise RuntimeError(f"Failed to store router credentials in {target_name}")
+    return target_name
 
 
 # ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ Backend selection:
 
 | Variable | Default | Description |
 |---|---|---|
-| `SSH_PORT` | `1313` | SSH port on the router |
+| `SSH_PORT` | `22` | SSH port on the router (lab overrides often use `1313`) |
 | `SSH_TRUST_MODE` | `tofu_confirm` | `strict` / `tofu_confirm` / `tofu_auto` |
 | `SSH_HOST_KEY_FINGERPRINT` | _(none)_ | Expected SHA256 fingerprint for strict mode |
 | `SSH_KNOWN_HOSTS_PATH` | _(none)_ | Path to a custom known_hosts file |
