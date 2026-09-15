@@ -405,6 +405,14 @@ class TestRouterConnectionSecrets:
         assert defaults["credential_backend"] == "keychain"
         assert defaults["password_from_store"] is True
 
+    def test_get_router_ssh_port_from_active_backend(self, monkeypatch, mem_keyring):
+        """SSH port is read from the active credential backend (BW or Keychain)."""
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import get_router_ssh_port, store_credential
+
+        assert store_credential("router_ssh_port", "1313", backend="keychain")
+        assert get_router_ssh_port() == 1313
+
     def test_invalid_ssh_port_rejected(self, monkeypatch, mem_keyring):
         monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
         from asusroutercontrol.credentials import store_router_credentials
