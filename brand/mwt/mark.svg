@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MWT mark">
+  <title>MWT</title>
+  <rect width="512" height="512" rx="96" fill="#0B1C24"/>
+  <text x="256" y="292" text-anchor="middle" fill="#F2F7F8" font-size="168" font-weight="700"
+        font-family="Avenir Next, Segoe UI, system-ui, sans-serif" letter-spacing="-8">MWT</text>
+  <path d="M96 340 C160 300, 224 380, 288 340 S416 300, 448 330" fill="none" stroke="#2EC4B6"
+        stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

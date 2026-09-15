@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" role="img" aria-label="Media Wave Technology lockup">
+  <title>Media Wave Technology lockup</title>
+  <rect x="24" y="36" width="168" height="168" rx="36" fill="#0B1C24"/>
+  <text x="108" y="132" text-anchor="middle" fill="#F2F7F8" font-size="48" font-weight="700"
+        font-family="Avenir Next, Segoe UI, system-ui, sans-serif" letter-spacing="-2">MWT</text>
+  <path d="M48 158 C72 142, 96 174, 120 158 S168 142, 180 154" fill="none" stroke="#2EC4B6" stroke-width="8" stroke-linecap="round"/>
+  <text x="232" y="118" font-family="Avenir Next, Segoe UI, system-ui, sans-serif" font-size="48" font-weight="650" fill="#0B1C24">Media Wave</text>
+  <text x="232" y="172" font-family="Avenir Next, Segoe UI, system-ui, sans-serif" font-size="36" font-weight="500" fill="#8AA3AB">Technology</text>
+  <path d="M232 196 C320 182, 400 210, 480 196" fill="none" stroke="#2EC4B6" stroke-width="4" stroke-linecap="round"/>
+</svg>

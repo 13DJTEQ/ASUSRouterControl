@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 120" role="img" aria-label="Media Wave Technology wordmark">
+  <title>Media Wave Technology</title>
+  <text x="0" y="72" font-family="Avenir Next, Segoe UI, system-ui, sans-serif" font-size="42" font-weight="650" fill="#0B1C24">Media Wave</text>
+  <text x="292" y="72" font-family="Avenir Next, Segoe UI, system-ui, sans-serif" font-size="42" font-weight="500" fill="#8AA3AB">Technology</text>
+  <path d="M0 92 C80 78, 160 106, 240 92 S400 78, 480 92" fill="none" stroke="#2EC4B6" stroke-width="4" stroke-linecap="round"/>
+</svg>
