@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="MWT favicon">
+  <title>MWT favicon</title>
+  <rect width="64" height="64" rx="14" fill="#0B1C24"/>
+  <text x="32" y="40" text-anchor="middle" fill="#F2F7F8" font-size="18" font-weight="700"
+        font-family="Avenir Next, Segoe UI, system-ui, sans-serif" letter-spacing="-1">MWT</text>
+  <path d="M12 46 C20 40, 28 52, 36 46 S52 40, 56 45" fill="none" stroke="#2EC4B6" stroke-width="4" stroke-linecap="round"/>
+</svg>
