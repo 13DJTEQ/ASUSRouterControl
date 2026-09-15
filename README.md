@@ -1,6 +1,6 @@
 # ASUSRouterControl
 
-Management and analysis tool for ASUS RT-AC68U routers running stock AsusWRT or AsusWRT-Merlin firmware.
+Management and analysis tool for ASUS routers (primary lab target: **RT-BE92U** on stock AsusWRT; Merlin flavor also supported). Legacy RT-AC68U references may remain in older notes.
 
 ## Setup
 
@@ -11,7 +11,7 @@ asusrouter setup
 
 The `setup` command stores router credentials securely in Bitwarden via the `bw` CLI (default).
 Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
-Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
+Set `ROUTER_BACKEND=merlin` (default), `stock`, or `asuswrt` in `.env`. FreshTomato is deferred (hard-fail if selected). Optional ISP plan: `PLAN_DOWNLOAD_MBPS` / `PLAN_UPLOAD_MBPS` (defaults 300/35).
 
 ## Developer validation
 
@@ -23,13 +23,6 @@ bash scripts/validate.sh
 The validation script runs lint (`ruff`), tests (`pytest`), and syntax checks (`compileall`).
 If required dev tools are missing, it exits with an actionable install command.
 For app-level verification in each development cycle, run `make verify-dev-app` to rebuild the DEV app bundle, relaunch it, and perform a runtime smoke-check.
-
-## Memory Palace workflow
-For day-to-day planning, implementation checkpoints, and review summaries, follow:
-- `docs/skills/memory-palace/references/mcp-workflow.md`
-- `docs/skills/memory-palace/references/trigger-samples.md`
-
-This keeps durable task context discoverable across sessions and contributors.
 
 ## CI/CD pipeline
 
@@ -94,9 +87,10 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 
 **Firmware Backends** (strategy pattern)
 - `backends/base.py` — `FirmwareBackend` ABC with `BackendOperationUnsupported` exception
-- `backends/merlin.py` — uses `asusrouter` library API (read + selected write operations)
-- `backends/freshtomato.py` — SSH-driven, currently read-only for write operations
-- `backends/factory.py` — selects backend via `ROUTER_BACKEND` env var
+- `backends/asuswrt.py` — `AsusWrtBackend` for stock AsusWRT + Merlin (`flavor` capability gates)
+- `backends/merlin.py` — compatibility alias of `AsusWrtBackend(flavor="merlin")`
+- `backends/freshtomato.py` — deferred stub (factory hard-fails if selected)
+- `backends/factory.py` — selects via `ROUTER_BACKEND` (`merlin`|`stock`|`asuswrt`)
 
 **SSH & Probes**
 - `ssh.py` — async SSH with host-key trust modes (`strict`, `tofu_confirm`, `tofu_auto`)
@@ -116,9 +110,8 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - `optimizer.py` → `executor.py` → `rollout.py` — NVRAM optimization with whitelist safeguards, snapshots, config-event recording
 - `reporting.py` — aggregates datastore windows into structured health reports
 
-**CLI Decomposition** (in progress)
-- `cli.py` (136K monolith) being split into `cli/` package (`core.py` = 14K extracted)
-- `_cli_legacy.py` = archived monolith copy
+**CLI**
+- `cli/` package is the sole CLI entrypoint (duplicate monoliths removed in 0.2.0)
 
 ### Dependencies
 - **Core**: `asusrouter>=1.21`, `aiohttp`, `keyring`, `pydantic>=2.0`, `click`, `aiosqlite`, `rich`, `asyncssh`
@@ -133,7 +126,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - Production-ready: dev→prod deployment with rollback, self-hosted macOS runner, environment isolation
 
 **Market Constraints**
-- **Narrow hardware scope**: Targets RT-AC68U (2014 hardware, end-of-life), limiting addressable market
+- **Hardware focus**: Primary HITL target is RT-BE92U (stock AsusWRT); older AC68U notes are legacy
 - **Firmware dependency**: Primary backend relies on `asusrouter` library for Merlin firmware; FreshTomato backend is read-only
 - **Competitive pressure**: ASUS's newer routers (WiFi 6E/7) increasingly expose native APIs via mobile apps, eroding differentiation
 - **Niche audience**: Viable for power users and home lab enthusiasts running Merlin firmware on legacy hardware
@@ -144,7 +137,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - ⚠️ **Commercial product**: Not viable without pivoting to broader hardware support (WiFi 6E/7 mesh systems) and SaaS telemetry layer
 - ⚠️ **Scalability**: Single-router focus; no multi-site or fleet management capabilities
 
-**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires hardware scope expansion beyond AC68U and a cloud-based telemetry/management layer.
+**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability benefits from multi-model coverage (BE92U+) and a cloud-based telemetry/management layer.
 
 ## Performance metrics source methodology
 

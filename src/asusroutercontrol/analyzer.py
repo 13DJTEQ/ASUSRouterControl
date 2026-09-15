@@ -10,12 +10,14 @@ import logging
 from datetime import datetime
 from statistics import mean, stdev
 
+from asusroutercontrol.config import plan_download_bps, plan_upload_bps
 from asusroutercontrol.datastore import DataStore
 
 log = logging.getLogger(__name__)
 
-PLAN_SPEED_DOWN = 300_000_000  # 300 Mbps
-PLAN_SPEED_UP = 35_000_000     # 35 Mbps
+
+PLAN_SPEED_DOWN = plan_download_bps()  # config default 300 Mbps
+PLAN_SPEED_UP = plan_upload_bps()      # config default 35 Mbps
 
 
 # ---------------------------------------------------------------------------

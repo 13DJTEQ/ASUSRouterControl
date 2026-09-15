@@ -15,13 +15,6 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - `make test` — run full pytest suite.
 - `python3 -m pytest tests/path/to/test_file.py::test_name` — run a single test.
 
-### Memory Palace workflow
-- Use `docs/skills/memory-palace/references/mcp-workflow.md` as the canonical planning -> implementation -> review procedure.
-- Before first memory operation in a session, call `read_memory("system://boot")`.
-- If URI is unknown, run `search_memory(..., include_session=true)` before selecting a target.
-- Read target memory before any mutation (`create_memory`, `update_memory`, `delete_memory`, `add_alias`).
-- Treat `guard_action=NOOP|UPDATE|DELETE` as a stop-and-inspect signal; inspect `guard_target_uri` / `guard_target_id` first.
-
 ### Running the app
 - `asusrouter setup` — write router credentials to Bitwarden via `bw` (required before most commands).
 - `asusrouter status` / `asusrouter devices` / `asusrouter monitor` — primary CLI entrypoints.
@@ -30,8 +23,8 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 ## Project build rule (macOS app bundles)
 - DEV builds must be generated with `make build-dev-app` and output to `testbuilds/` under the repository root.
 - Every development cycle must run a fresh `make build-dev-app` before functionality verification, and verification must use that rebuilt DEV bundle (`make verify-dev-app`).
-- DEV app bundle is labeled `ASUSRouterControl DEV.app` with a red `DEV` icon for immediate visual separation from production.
-- Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
+- DEV app bundle is labeled `ASUSRouterControl DEV.app` with a red test-tube (`🧪`) DEV icon for immediate visual separation from production (satellite `📡`).
+- Production DMG packaging is not currently exposed as a Make target; do not claim `make build-prod-dmg` until that target exists. Prefer DEV verification via `make build-dev-app` / `make verify-dev-app`.
 - Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
 - When failures occur, standard workflow is mandatory: analyze root cause, apply the minimal repair, then relaunch/rerun to verify the failure is resolved.
 
@@ -39,7 +32,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ### Core shape
 - The project is a Python package (`src/asusroutercontrol`) with two primary entrypoints:
-  - CLI (`cli.py`, exposed as `asusrouter`)
+  - CLI (`cli/` package, exposed as `asusrouter`)
   - Menu bar app (`menubar.py`, exposed as `asusroutermonitor`)
 - Both entrypoints rely on shared config, credentials, backend adapters, SSH probes, and SQLite persistence.
 
@@ -49,9 +42,10 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with 1Password and keychain fallback migration helpers.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
-  - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).
-  - `backends/merlin.py` uses the `asusrouter` API (read + selected write operations).
-  - `backends/freshtomato.py` is SSH-driven and currently read-only for write operations.
+  - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` | `stock` | `asuswrt`; `freshtomato` hard-fails as deferred).
+  - `backends/asuswrt.py` (`AsusWrtBackend`) uses the `asusrouter` API for stock AsusWRT and Merlin (`flavor` gates JFFS/Entware/SSH probes).
+  - `backends/merlin.py` is a one-cycle compatibility alias of `AsusWrtBackend(flavor="merlin")`.
+  - `backends/freshtomato.py` remains an in-tree stub; selecting it raises `BackendDeferredError`.
   - `ssh.py` provides async SSH execution plus host-key trust/pinning logic (`strict`, `tofu_confirm`, `tofu_auto`).
 - **Persistence**
   - `datastore.py` is the central async SQLite layer (`router.db`) with schema creation, lightweight migrations, inserts, queries, retention pruning, and notification cooldown tracking.
@@ -67,7 +61,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - periodic recommendation generation,
   - daily retention pruning.
 - Scheduler loops use timeouts, rollback on failed DB cycles, and backoff after repeated failures.
-- Important implementation detail: `_poll_loop` currently instantiates `MerlinBackend` directly instead of using `backends.factory.create_backend`; `ROUTER_BACKEND` selection is respected in CLI paths, but not this scheduler poll path.
+- Scheduler `_poll_loop` and menubar reboot both use `backends.factory.create_backend` (respects `ROUTER_BACKEND`).
 
 ### Analysis, optimization, reporting pipeline
 - **Probes** (`probes.py`) gather low-level router signals over SSH, including tracked NVRAM snapshots and diffs.
@@ -75,6 +69,11 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - **Analysis** (`analyzer.py`, `analysis/*`) computes trends, mean shifts, anomalies, and SLA-oriented metrics from persisted telemetry.
 - **Optimization/execution** (`optimizer.py`, `executor.py`, `rollout.py`) turns findings into suggested/applied NVRAM changes with whitelist safeguards, snapshots, and config-event recording.
 - **Reporting** (`reporting.py`) aggregates datastore windows into structured health reports and recommendation summaries.
+
+## Hardware / firmware targets
+- Primary HITL: **RT-BE92U** on stock AsusWRT (`ROUTER_BACKEND=stock` or `asuswrt`).
+- Merlin flavor (`ROUTER_BACKEND=merlin`) remains supported via capability flags; Merlin HITL on BE92U is N/A until a Merlin image exists for this model.
+- FreshTomato is deferred (factory hard-fail; stub retained).
 
 ## Repository-specific guardrails
 - Keep backend behavior aligned with `FirmwareBackend` operation support; unsupported operations should surface via `BackendOperationUnsupported` (or equivalent explicit failure), not silent no-ops.

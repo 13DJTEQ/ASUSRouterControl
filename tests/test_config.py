@@ -202,3 +202,23 @@ class TestConfigDirect:
         cfg = Config(router_backend="merlin", router_host="192.168.1.1")
         assert cfg.router_backend == "merlin"
         assert cfg.router_host == "192.168.1.1"
+
+
+class TestPlanSpeeds:
+    def test_default_plan_speeds(self, env_clean):
+        from asusroutercontrol.config import load_config, plan_download_bps, plan_upload_bps
+        cfg = load_config()
+        assert cfg.plan_download_mbps == 300.0
+        assert cfg.plan_upload_mbps == 35.0
+        assert plan_download_bps(cfg) == 300_000_000
+        assert plan_upload_bps(cfg) == 35_000_000
+
+    def test_plan_speeds_from_env(self, env_clean, monkeypatch):
+        from asusroutercontrol.config import load_config, plan_download_bps, plan_upload_bps
+        monkeypatch.setenv("PLAN_DOWNLOAD_MBPS", "500")
+        monkeypatch.setenv("PLAN_UPLOAD_MBPS", "20")
+        cfg = load_config()
+        assert cfg.plan_download_mbps == 500.0
+        assert cfg.plan_upload_mbps == 20.0
+        assert plan_download_bps(cfg) == 500_000_000
+        assert plan_upload_bps(cfg) == 20_000_000

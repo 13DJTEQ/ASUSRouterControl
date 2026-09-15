@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.models import (
     ClientLoad,
     ConfigEvent,
@@ -350,7 +351,7 @@ class DataStore:
     async def upsert_device(self, dev: Device, *, commit: bool = True) -> bool:
         """Insert or update device. Returns True if device is new."""
         db = self._conn()
-        now = dev.last_seen or datetime.utcnow()
+        now = dev.last_seen or utcnow()
         now_str = now.isoformat()
 
         async with db.execute(
@@ -487,7 +488,7 @@ class DataStore:
 
     async def get_traffic_history(self, *, hours: int = 24, limit: int = 1000) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = utcnow() - timedelta(hours=max(1, hours))
         async with db.execute(
             "SELECT * FROM traffic_snapshots WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
             (cutoff.isoformat(), limit),
@@ -530,7 +531,7 @@ class DataStore:
         self, *, days: int = 7, source: str | None = None
     ) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = "SELECT * FROM speed_tests WHERE timestamp >= ?"
         params: list = [cutoff.isoformat()]
         if source:
@@ -551,7 +552,7 @@ class DataStore:
         if metric not in allowed:
             raise ValueError(f"Unsupported speed metric: {metric}")
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = (
             f"SELECT timestamp, {metric}, quality FROM speed_tests WHERE timestamp >= ?"
             f" AND {metric} IS NOT NULL"
@@ -575,7 +576,7 @@ class DataStore:
         if metric not in allowed:
             raise ValueError(f"Unsupported latency metric: {metric}")
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = (
             f"SELECT timestamp, target, {metric}, quality FROM latency_probes"
             " WHERE timestamp >= ?"
@@ -607,7 +608,7 @@ class DataStore:
         if metric not in allowed:
             raise ValueError(f"Unsupported wifi metric: {metric}")
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = f"SELECT timestamp, band, {metric} FROM wifi_snapshots WHERE timestamp >= ?"
         params: list = [cutoff.isoformat()]
         if band:
@@ -641,7 +642,7 @@ class DataStore:
 
     async def get_latency_probes(self, *, days: int = 7, target: str | None = None) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = "SELECT * FROM latency_probes WHERE timestamp >= ?"
         params: list = [cutoff.isoformat()]
         if target:
@@ -670,7 +671,7 @@ class DataStore:
 
     async def get_system_snapshots(self, *, days: int = 7) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         async with db.execute(
             "SELECT * FROM system_snapshots WHERE timestamp >= ?"
             " ORDER BY timestamp DESC",
@@ -692,7 +693,7 @@ class DataStore:
         if metric not in allowed:
             raise ValueError(f"Unsupported system metric: {metric}")
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         async with db.execute(
             f"SELECT timestamp, {metric} FROM system_snapshots WHERE timestamp >= ?"
             f" AND {metric} IS NOT NULL"
@@ -723,7 +724,7 @@ class DataStore:
 
     async def get_wifi_snapshots(self, *, days: int = 7, band: str | None = None) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         sql = "SELECT * FROM wifi_snapshots WHERE timestamp >= ?"
         params: list = [cutoff.isoformat()]
         if band:
@@ -757,7 +758,7 @@ class DataStore:
 
     async def get_config_snapshots(self, *, days: int = 90) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         async with db.execute(
             "SELECT * FROM config_snapshots WHERE timestamp >= ?"
             " ORDER BY timestamp DESC",
@@ -791,7 +792,7 @@ class DataStore:
 
     async def get_config_events(self, *, days: int = 90) -> list[dict]:
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         async with db.execute(
             "SELECT * FROM config_events WHERE timestamp >= ?"
             " ORDER BY timestamp DESC",
@@ -880,7 +881,7 @@ class DataStore:
         self, rec_key: str, *, sent_at: datetime | None = None
     ) -> None:
         db = self._conn()
-        sent = (sent_at or datetime.utcnow()).isoformat()
+        sent = (sent_at or utcnow()).isoformat()
         await db.execute(
             "INSERT INTO notification_log (rec_key, last_notified) VALUES (?, ?)"
             " ON CONFLICT(rec_key) DO UPDATE SET last_notified=excluded.last_notified",
@@ -893,7 +894,7 @@ class DataStore:
     async def prune_old_data(self, *, retention_days: int = 90) -> dict[str, int]:
         """Delete rows older than retention_days. Returns count deleted per table."""
         db = self._conn()
-        cutoff_ts = (datetime.utcnow() - timedelta(days=max(1, retention_days))).isoformat()
+        cutoff_ts = (utcnow() - timedelta(days=max(1, retention_days))).isoformat()
         pruned: dict[str, int] = {}
         for table, col in [
             ("latency_probes", "timestamp"),
@@ -1186,7 +1187,7 @@ class DataStore:
     ) -> list[dict]:
         """Return device_perf_history rows for a given MAC."""
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+        cutoff = utcnow() - timedelta(days=max(1, days))
         async with db.execute(
             "SELECT * FROM device_perf_history"
             " WHERE mac = ? AND timestamp >= ?"
@@ -1236,7 +1237,7 @@ class DataStore:
     async def get_traffic_aggregates(self, *, hours: int = 24) -> dict:
         """Return aggregate traffic stats over the given window."""
         db = self._conn()
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = utcnow() - timedelta(hours=max(1, hours))
         async with db.execute(
             "SELECT COUNT(*) as samples,"
             " MAX(rx_bytes) - MIN(rx_bytes) as total_rx,"

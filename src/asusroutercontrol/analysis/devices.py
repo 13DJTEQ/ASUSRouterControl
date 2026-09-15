@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.datastore import DataStore
 
 
@@ -29,7 +30,7 @@ async def detect_absent_devices(
     """Identify devices that were recently seen but are now absent."""
     all_devs = await store.get_all_devices()
     absent = []
-    now = datetime.utcnow()
+    now = utcnow()
     for dev in all_devs:
         if dev["mac"] in current_macs:
             continue

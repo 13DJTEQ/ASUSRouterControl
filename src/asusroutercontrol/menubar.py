@@ -46,7 +46,11 @@ from asusroutercontrol.analysis.clients import (
     format_client_load_display,
     format_client_rate_display,
 )
-from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
+from asusroutercontrol.config import (
+    ensure_runtime_data_dir_isolation,
+    load_config,
+    plan_download_bps,
+)
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -54,7 +58,8 @@ from asusroutercontrol.scheduler import MonitorScheduler
 log = logging.getLogger(__name__)
 
 # Thresholds for notifications
-PLAN_SPEED_DOWN = 300_000_000  # 300 Mbps
+
+PLAN_SPEED_DOWN = plan_download_bps()
 TEMP_WARN_C = 85.0
 LOSS_WARN_PCT = 5.0
 SPEED_DROP_RATIO = 0.70  # notify if < 70% of plan
@@ -189,10 +194,30 @@ _MENUBAR_BASE_LABEL = "com.asusroutermonitor"
 
 
 def _runtime_environment() -> str:
-    env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod").strip().lower()
-    return env or "prod"
+    """Resolve runtime env for icons/data isolation.
+
+    Prefer the explicit env var. If unset, infer ``dev`` from the DEV.app
+    bundle path or a ``DEV_BUILD`` marker so menubar icons stay correct even
+    when the launcher env is lost (e.g. older installs).
+    """
+    env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "").strip().lower()
+    if env:
+        return env
+
+    bundle = os.environ.get("ASUSROUTERCONTROL_APP_BUNDLE", "").strip()
+    if bundle:
+        name = Path(bundle).name
+        if "DEV.app" in name or name.endswith(" DEV.app"):
+            return "dev"
+        marker = Path(bundle) / "Contents" / "Resources" / "DEV_BUILD"
+        if marker.is_file():
+            return "dev"
+
+    return "prod"
+
 
 def _icon_prefix_for_runtime(runtime_env: str) -> str:
+    """Menubar glyph: satellite for prod, test tube for DEV/test runtimes."""
     return _TEST_ICON_PREFIX if runtime_env != "prod" else _ICON_PREFIX
 
 
@@ -209,6 +234,29 @@ def _menubar_launchd_plist_path() -> Path:
         else f"{_MENUBAR_BASE_LABEL}.{env}.plist"
     )
     return Path.home() / "Library" / "LaunchAgents" / filename
+
+
+def _app_bundle_path() -> Path | None:
+    """Return the running .app bundle path when known (DEV launcher sets this)."""
+    env_path = os.environ.get("ASUSROUTERCONTROL_APP_BUNDLE", "").strip()
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_dir() and candidate.suffix == ".app":
+            return candidate
+    try:
+        from Foundation import NSBundle
+
+        bundle_path = NSBundle.mainBundle().bundlePath()
+        if bundle_path and str(bundle_path).endswith(".app"):
+            candidate = Path(bundle_path)
+            # Ignore bare Python.app / framework hosts used by source launches
+            name = candidate.name.lower()
+            if "python" in name:
+                return None
+            return candidate
+    except Exception:
+        pass
+    return None
 
 
 def _add_section_header(menu, title: str):
@@ -258,6 +306,11 @@ class AppDelegate(NSObject):
         runtime_env = _runtime_environment()
         self._runtime_env = runtime_env
         self._icon_prefix = _icon_prefix_for_runtime(runtime_env)
+        log.info(
+            "runtime_env=%s menubar_icon=%s",
+            runtime_env,
+            self._icon_prefix,
+        )
         self._cfg = load_config(runtime_env=runtime_env)
         ensure_runtime_data_dir_isolation(self._cfg, runtime_env=runtime_env)
         self._cfg.ensure_dirs()
@@ -284,12 +337,18 @@ class AppDelegate(NSObject):
 
         self._build_menu()
 
-        # Phase 4: Health check before starting scheduler
+        # Start monitoring immediately. Health check only adjusts degraded UI —
+        # do not block the scheduler on router reachability (DEV.app especially).
+        self._mi_sched_status.setTitle_("Scheduler: ● Starting")
+        self._ensure_runtime_started()
         threading.Thread(
             target=self._startup_health_check, name="health-check", daemon=True
         ).start()
 
-        log.info("AsusRouterMonitor starting (health check in progress)")
+        log.info(
+            "AsusRouterMonitor monitoring started (data_dir=%s, health check in progress)",
+            self._cfg.data_dir,
+        )
 
     def _set_status_icon(self, state: str) -> None:
         btn = self.statusitem.button()
@@ -300,15 +359,17 @@ class AppDelegate(NSObject):
         btn.setToolTip_(f"ASUSRouterControl {env_label} — {state}")
 
     def _startup_health_check(self):
-        """Check router backend reachability before starting scheduler."""
+        """Probe router reachability and update degraded UI (scheduler already running)."""
         from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
         from asusroutercontrol.ssh import RouterSSH
 
-        async def _check_backend():
+        async def _check_backend() -> None:
             username, password = get_router_credentials()
             if not username or not password:
-                raise RuntimeError("Missing router credentials")
+                raise RuntimeError(
+                    "Missing router credentials — run: asusrouter setup"
+                )
             backend = create_backend(
                 self._cfg,
                 username=username,
@@ -322,16 +383,35 @@ class AppDelegate(NSObject):
                 except Exception:
                     log.debug("Backend disconnect error in health check", exc_info=True)
 
-        async def _check_ssh():
-            ssh = RouterSSH(connect_timeout=10.0)
+        async def _check_ssh() -> None:
+            username, password = get_router_credentials()
+            ssh = RouterSSH(
+                hostname=self._cfg.router_host,
+                username=username,
+                password=password,
+                port=self._cfg.ssh_port,
+                connect_timeout=10.0,
+            )
             await ssh.connect()
             await ssh.disconnect()
 
+        async def _run_checks() -> None:
+            await asyncio.wait_for(_check_backend(), timeout=15.0)
+            backend_name = (self._cfg.router_backend or "").strip().lower()
+            if backend_name == "merlin":
+                try:
+                    await asyncio.wait_for(_check_ssh(), timeout=12.0)
+                except Exception as exc:
+                    log.warning(
+                        "SSH unavailable at startup: %s — monitoring continues with limited data",
+                        exc,
+                    )
+
         try:
-            asyncio.run(_check_backend())
+            asyncio.run(_run_checks())
         except Exception as exc:
             log.warning(
-                "Router backend unreachable: %s — entering degraded mode",
+                "Router health check failed: %s — monitoring continues in degraded mode",
                 exc,
             )
             self._degraded = True
@@ -340,16 +420,7 @@ class AppDelegate(NSObject):
             )
             return
 
-        if (self._cfg.router_backend or "").strip().lower() == "merlin":
-            try:
-                asyncio.run(_check_ssh())
-            except Exception as exc:
-                log.warning(
-                    "SSH unavailable at startup: %s — starting scheduler with limited data",
-                    exc,
-                )
-
-        log.info("Router reachable — starting scheduler")
+        log.info("Router reachable — monitoring healthy")
         self._degraded = False
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "startAfterHealthCheck:", None, False
@@ -357,22 +428,20 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def startAfterHealthCheck_(self, _):
-        """Called on main thread after successful health check."""
-        if self._degraded:
-            self._set_status_icon("Degraded")
-            self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
-        else:
-            self._set_status_icon("Running")
-            self._mi_sched_status.setTitle_("Scheduler: ● Running")
+        """Main-thread UI update after a successful health check."""
         self._ensure_runtime_started()
+        self._set_status_icon("Running")
+        self._mi_sched_status.setTitle_("Scheduler: ● Running")
         log.info("AsusRouterMonitor ready")
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router backend unreachable — run in degraded mode and retry health check."""
-        self._set_status_icon("Degraded (retrying health)")
-        self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
+        """Main-thread UI update when router health check fails."""
         self._ensure_runtime_started()
+        self._set_status_icon("Degraded (retrying health)")
+        self._mi_sched_status.setTitle_(
+            "Scheduler: ● Running (degraded, retrying health)"
+        )
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             60.0, self, "retryHealthCheck:", None, False
         )
@@ -541,10 +610,13 @@ class AppDelegate(NSObject):
                     self._cfg,
                     on_speedtest_complete=self._on_scheduled_speedtest,
                 )
-                log.info("Scheduler started from menubar app")
+                log.info(
+                    "Scheduler started from menubar app (data_dir=%s)",
+                    self._cfg.data_dir,
+                )
                 loop.run_until_complete(self._sched.run())
             except Exception:
-                log.debug("Scheduler thread crashed", exc_info=True)
+                log.exception("Scheduler thread crashed — monitoring stopped")
             finally:
                 self._sched_loop = None
 
@@ -799,7 +871,7 @@ class AppDelegate(NSObject):
             "🔴": "Connection alert",
         }.get(status_dot, "Connection status unknown")
         self._set_status_icon(status_label)
-        self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
+        self._mi_model.setTitle_(f"Router: RT-BE92U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
         if sys_snap:
@@ -1023,7 +1095,19 @@ class AppDelegate(NSObject):
 
         alive = self._sched_thread and self._sched_thread.is_alive()
         dot = "●" if alive else "○"
-        status = "Running" if alive else "Stopped"
+        if not alive:
+            status = "Stopped"
+        else:
+            profile = getattr(self._sched, "runtime_profile", None) if self._sched else None
+            capability = getattr(profile, "capability", None)
+            if capability == "degraded-no-credentials":
+                status = "Running (need credentials — asusrouter setup)"
+            elif capability == "degraded-no-ssh":
+                status = "Running (limited — no SSH)"
+            elif self._degraded:
+                status = "Running (degraded)"
+            else:
+                status = "Running"
         self._mi_sched_status.setTitle_(f"Scheduler: {dot} {status}")
 
     # ------------------------------------------------------------------
@@ -1173,7 +1257,11 @@ class AppDelegate(NSObject):
 
     def _do_reboot(self):
         try:
-            from asusroutercontrol.backends.merlin import MerlinBackend
+            from asusroutercontrol.backends.base import BackendOperationUnsupported
+            from asusroutercontrol.backends.factory import (
+                BackendDeferredError,
+                create_backend,
+            )
             from asusroutercontrol.credentials import get_router_credentials
 
             username, password = get_router_credentials()
@@ -1182,12 +1270,8 @@ class AppDelegate(NSObject):
                 return
 
             async def _reboot():
-                backend = MerlinBackend(
-                    hostname=self._cfg.router_host,
-                    username=username,
-                    password=password,
-                    use_ssl=self._cfg.use_ssl,
-                    port=self._cfg.router_port,
+                backend = create_backend(
+                    self._cfg, username=username, password=password
                 )
                 await backend.connect()
                 try:
@@ -1200,6 +1284,9 @@ class AppDelegate(NSObject):
                 _notify("🔄 Router Rebooting", "", "Allow 2-3 min to reconnect")
             else:
                 _notify("Reboot Failed", "", "Router did not accept command")
+        except (BackendOperationUnsupported, BackendDeferredError) as exc:
+            log.warning("Reboot unsupported: %s", exc)
+            _notify("Reboot Unsupported", "", str(exc)[:100])
         except Exception as exc:
             log.exception("Reboot action failed")
             _notify("Reboot Error", "", str(exc)[:100])
@@ -1229,8 +1316,8 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def quitApp_(self, sender):
-        """Stop scheduler and terminate — launchd KeepAlive will restart."""
-        log.info("quitApp_ invoked — restarting via KeepAlive")
+        """Restart the menubar app via launchd KeepAlive, or relaunch the .app bundle."""
+        log.info("quitApp_ invoked — restart requested")
         self._stop_scheduler()
         env = _runtime_environment()
         label = _menubar_launchd_label()
@@ -1238,27 +1325,41 @@ class AppDelegate(NSObject):
         install_cmd = "asusrouter menubar install"
         if env != "prod":
             install_cmd = f"{install_cmd} --environment {env}"
-        if not plist.exists():
-            log.warning("No plist found — app will not restart")
-            _notify(
-                "⚠️ Restart Failed",
-                "No launchd plist installed.",
-                f"Run: {install_cmd}",
-            )
-        elif not _launchd_service_loaded(label):
-            # Running outside launchd (e.g. make run-menubar) — no KeepAlive.
-            log.warning("Not managed by launchd — app will not restart")
-            _notify(
-                "⚠️ Restart Failed",
-                "Not running under launchd.",
-                f"Run: {install_cmd}",
-            )
-        else:
+
+        if plist.exists() and _launchd_service_loaded(label):
             log.info("Terminating — launchd KeepAlive will respawn (%s)", label)
-        # Simply terminate; launchd sees the exit and respawns via KeepAlive.
-        # Do NOT bootout — that deregisters the service and kills this process
-        # before bootstrap can run, preventing respawn entirely.
-        NSApplication.sharedApplication().terminate_(sender)
+            # Do NOT bootout — that deregisters the service and prevents respawn.
+            NSApplication.sharedApplication().terminate_(sender)
+            return
+
+        bundle = _app_bundle_path()
+        if bundle is not None:
+            log.info(
+                "Not under launchd — relaunching app bundle: %s", bundle
+            )
+            try:
+                subprocess.Popen(
+                    ["/usr/bin/open", "-n", str(bundle)],
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                log.exception("Failed to relaunch app bundle")
+                _notify(
+                    "⚠️ Restart Failed",
+                    "Could not relaunch the app.",
+                    str(exc)[:100],
+                )
+                return
+            NSApplication.sharedApplication().terminate_(sender)
+            return
+
+        log.warning("Restart unavailable — no launchd service and no app bundle path")
+        _notify(
+            "⚠️ Restart Failed",
+            "Not running under launchd and no app bundle path is set.",
+            f"Run: {install_cmd}",
+        )
+        # Keep the current process alive so the menubar does not disappear.
 
 
 def main() -> None:

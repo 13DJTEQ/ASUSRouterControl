@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Generate the red DEV .icns with a test-tube glyph (not the prod satellite)."""
 from __future__ import annotations
 
 import argparse
@@ -34,11 +35,14 @@ ICON_SLOTS = {
     "icon_512x512@2x.png": 1024,
 }
 
+_TEST_TUBE = "🧪"
+
 
 def _render_png(path: Path, size: int) -> None:
     image = NSImage.alloc().initWithSize_((size, size))
     image.lockFocus()
 
+    # Red field so DEV is visually distinct from production.
     NSColor.colorWithCalibratedRed_green_blue_alpha_(0.78, 0.08, 0.08, 1.0).setFill()
     radius = size * 0.2
     NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
@@ -49,14 +53,34 @@ def _render_png(path: Path, size: int) -> None:
 
     paragraph = NSMutableParagraphStyle.alloc().init()
     paragraph.setAlignment_(1)  # center
-    text_size = max(size * 0.22, 8.0)
-    attrs = {
-        NSFontAttributeName: NSFont.boldSystemFontOfSize_(text_size),
+
+    # Primary mark: test tube (matches menubar DEV glyph).
+    tube_size = max(size * 0.55, 10.0)
+    tube_attrs = {
+        NSFontAttributeName: NSFont.systemFontOfSize_(tube_size),
         NSForegroundColorAttributeName: NSColor.whiteColor(),
         NSParagraphStyleAttributeName: paragraph,
     }
-    text = NSAttributedString.alloc().initWithString_attributes_("DEV", attrs)
-    text.drawInRect_(NSMakeRect(0, (size - text_size) / 2.3, size, text_size * 1.4))
+    tube = NSAttributedString.alloc().initWithString_attributes_(_TEST_TUBE, tube_attrs)
+    tube_height = tube_size * 1.15
+    tube.drawInRect_(
+        NSMakeRect(0, (size - tube_height) / 2.0 + size * 0.04, size, tube_height)
+    )
+
+    # Small DEV caption under the glyph for Finder/Dock clarity at large sizes.
+    if size >= 64:
+        caption_size = max(size * 0.12, 8.0)
+        caption_attrs = {
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(caption_size),
+            NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSParagraphStyleAttributeName: paragraph,
+        }
+        caption = NSAttributedString.alloc().initWithString_attributes_(
+            "DEV", caption_attrs
+        )
+        caption.drawInRect_(
+            NSMakeRect(0, size * 0.06, size, caption_size * 1.3)
+        )
 
     image.unlockFocus()
     bitmap = NSBitmapImageRep.imageRepWithData_(image.TIFFRepresentation())
@@ -76,7 +100,9 @@ def _build_iconset(iconset_dir: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate a red DEV .icns app icon.")
+    parser = argparse.ArgumentParser(
+        description="Generate a red DEV .icns with a test-tube glyph."
+    )
     parser.add_argument(
         "--output",
         required=True,

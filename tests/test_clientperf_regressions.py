@@ -304,7 +304,7 @@ class Test6GHzBucketCoverage:
         assert len(loads) == 1
         # 600/1200 * 100 = 50%
         assert loads[0].load_pct == 50.0
-        assert loads[0].health == "🟡"
+        assert loads[0].health == "warn"
         assert loads[0].band == "6GHz"
 
     def test_compute_loads_6ghz_high_throughput(self) -> None:
@@ -317,7 +317,7 @@ class Test6GHzBucketCoverage:
         loads = compute_client_loads([dev])
         # 1100/1200 * 100 ≈ 91.7% → red
         assert loads[0].load_pct > 80.0
-        assert loads[0].health == "🔴"
+        assert loads[0].health == "critical"
 
     def test_compute_loads_6ghz_low_throughput_weak_signal(self) -> None:
         dev = _make_device(
@@ -330,7 +330,7 @@ class Test6GHzBucketCoverage:
         loads = compute_client_loads([dev])
         assert loads[0].load_pct < 5.0
         # Weak RSSI forces red
-        assert loads[0].health == "🔴"
+        assert loads[0].health == "critical"
 
     def test_build_wifi_includes_6ghz_band(self) -> None:
         snaps = [

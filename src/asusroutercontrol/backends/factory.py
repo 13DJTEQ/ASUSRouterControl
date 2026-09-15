@@ -6,7 +6,12 @@ Usage::
     backend = create_backend(cfg, username=username, password=password)
 
 The backend implementation is chosen from ``cfg.router_backend``
-(env var ``ROUTER_BACKEND``).  Supported values: ``merlin``, ``freshtomato``.
+(env var ``ROUTER_BACKEND``).
+
+Supported values:
+- ``merlin`` — AsusWrtBackend(flavor=\"merlin\")
+- ``stock`` / ``asuswrt`` — AsusWrtBackend(flavor=\"stock\")
+- ``freshtomato`` — hard-fail (deferred; stub retained in-tree)
 """
 
 from __future__ import annotations
@@ -17,6 +22,10 @@ from asusroutercontrol.config import Config
 
 class UnknownBackendError(ValueError):
     """Raised when ROUTER_BACKEND names an unrecognised firmware backend."""
+
+
+class BackendDeferredError(RuntimeError):
+    """Raised when a backend is intentionally not selectable yet."""
 
 
 def create_backend(
@@ -39,31 +48,31 @@ def create_backend(
 
     Raises:
         UnknownBackendError: If ``cfg.router_backend`` is not recognised.
+        BackendDeferredError: If FreshTomato is selected (not supported yet).
     """
     kind = (cfg.router_backend or "merlin").strip().lower()
 
-    if kind == "merlin":
-        from asusroutercontrol.backends.merlin import MerlinBackend
+    if kind in {"merlin", "stock", "asuswrt"}:
+        from asusroutercontrol.backends.asuswrt import AsusWrtBackend
 
-        return MerlinBackend(
+        flavor = "merlin" if kind == "merlin" else "stock"
+        return AsusWrtBackend(
             hostname=cfg.router_host,
             username=username,
             password=password,
             use_ssl=cfg.use_ssl,
             port=cfg.router_port,
+            flavor=flavor,
         )
 
     if kind == "freshtomato":
-        from asusroutercontrol.backends.freshtomato import FreshTomatoBackend
-
-        return FreshTomatoBackend(
-            hostname=cfg.router_host,
-            username=username,
-            password=password,
-            ssh_port=cfg.ssh_port,
+        raise BackendDeferredError(
+            "FreshTomato backend is deferred and not selectable. "
+            "Use ROUTER_BACKEND=stock, asuswrt, or merlin. "
+            "The stub remains in asusroutercontrol.backends.freshtomato for later work."
         )
 
-    known = ", ".join(sorted(["merlin", "freshtomato"]))
+    known = ", ".join(sorted(["asuswrt", "freshtomato (deferred)", "merlin", "stock"]))
     raise UnknownBackendError(
         f"Unknown ROUTER_BACKEND={kind!r}. Known backends: {known}"
     )

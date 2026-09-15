@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asusroutercontrol"
-version = "0.1.0"
-description = "Management and analysis tool for ASUS RT-AC68U routers"
+version = "0.2.0"
+description = "Management and analysis tool for ASUS routers (RT-BE92U primary; stock AsusWRT + Merlin)"
 requires-python = ">=3.11"
 dependencies = [
     "asusrouter>=1.21",

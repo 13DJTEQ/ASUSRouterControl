@@ -1,4 +1,4 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app local-dev-app
 
 VENV_PYTHON := .venv/bin/python
 SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
@@ -44,6 +44,10 @@ build-dev-app:
 verify-dev-app:
 	bash scripts/verify_dev_app.sh
 launch-dev-app: verify-dev-app
+
+# One-shot DEV.app for the Mac you will test on (must run on Darwin).
+local-dev-app:
+	bash scripts/prepare_local_dev_app.sh
 
 app: run-menubar
 

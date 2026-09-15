@@ -1,3 +1,5 @@
+> **Superseded (0.2.0):** `cli.py` / `_cli_legacy.py` deleted; `cli/` package is the sole entrypoint.
+
 # Phase 4 Plan v2: CLI Monolith Decomposition (Revised)
 
 **Date:** 2026-06-16

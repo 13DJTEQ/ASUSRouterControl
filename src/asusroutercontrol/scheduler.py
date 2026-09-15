@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Literal
 
 from asusroutercontrol._time import utcnow
+from asusroutercontrol.analysis.clients import _health_status
 from asusroutercontrol.config import Config, ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import get_router_credentials
 from asusroutercontrol.datastore import DataStore
@@ -172,6 +173,12 @@ class MonitorScheduler:
                     self._ssh_recovery_loop(), name="ssh-recovery"
                 )
             )
+        if profile.capability == "degraded-no-credentials":
+            self._tasks.append(
+                asyncio.create_task(
+                    self._credentials_recovery_loop(), name="credentials-recovery"
+                )
+            )
         try:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         finally:
@@ -282,6 +289,62 @@ class MonitorScheduler:
                 return  # recovery complete
         except asyncio.CancelledError:
             log.info("SSH recovery loop cancelled")
+
+    async def _credentials_recovery_loop(self) -> None:
+        """Re-probe credentials when started in degraded-no-credentials mode.
+
+        Once credentials appear (e.g. after `asusrouter setup`), promote the
+        runtime profile and start previously skipped credential/SSH loops so
+        monitoring becomes active without restarting the menubar app.
+        """
+        interval = min(SSH_RECOVERY_INTERVAL, 60.0)
+        try:
+            while self._running:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                profile = self._runtime_profile
+                if profile is None or profile.capability != "degraded-no-credentials":
+                    log.info("Credentials recovery: no longer degraded, exiting loop")
+                    return
+
+                new_profile = await self._determine_runtime_profile()
+                if new_profile.capability == "degraded-no-credentials":
+                    log.info("Credentials recovery probe: still missing credentials")
+                    continue
+
+                self._runtime_profile = new_profile
+                log.info(
+                    "Credentials recovery: promoted to capability=%s operation_mode=%s",
+                    new_profile.capability,
+                    new_profile.operation_mode,
+                )
+                newly_eligible, _ = self._select_task_specs(new_profile)
+                newly_eligible_names = {spec.name for spec in newly_eligible}
+                running_names = {task.get_name() for task in self._tasks if not task.done()}
+                for spec in self._skipped_specs:
+                    if (
+                        spec.name in newly_eligible_names
+                        and spec.name not in running_names
+                    ):
+                        task = asyncio.create_task(spec.runner(), name=spec.name)
+                        self._tasks.append(task)
+                        log.info(
+                            "Credentials recovery: started previously-skipped %s loop",
+                            spec.name,
+                        )
+                self._skipped_specs = [
+                    s for s in self._skipped_specs if s.name not in newly_eligible_names
+                ]
+                if new_profile.capability == "degraded-no-ssh":
+                    self._tasks.append(
+                        asyncio.create_task(
+                            self._ssh_recovery_loop(), name="ssh-recovery"
+                        )
+                    )
+                return
+        except asyncio.CancelledError:
+            log.info("Credentials recovery loop cancelled")
 
     async def _detect_operation_mode(self, ssh: RouterSSH) -> OperationMode:
         try:
@@ -605,13 +668,7 @@ class MonitorScheduler:
             load_pct = min(100.0, (peak / link_rate) * 100.0) if link_rate > 0 else 0.0
 
             rssi = snap.get("rssi")
-            health = "\U0001f7e2"
-            if rssi is not None and rssi < -75:
-                health = "\U0001f534"
-            elif load_pct >= 80:
-                health = "\U0001f534"
-            elif load_pct >= 50:
-                health = "\U0001f7e1"
+            health = _health_status(load_pct, rssi)
             row = device_rows.get(mac_key)
 
             cl = ClientLoad(
@@ -665,7 +722,7 @@ class MonitorScheduler:
                     rx_rate_mbps=None,
                     rssi=None,
                     load_pct=0.0,
-                    health="\U0001f7e2",
+                    health="ok",
                 ),
                 commit=False,
             )
@@ -791,7 +848,7 @@ class MonitorScheduler:
                 tx_rate_mbps=tx_rate_mbps,
                 rx_rate_mbps=rx_rate_mbps,
                 load_pct=load_pct,
-                health="🟢",
+                health=_health_status(load_pct or 0.0, None),
             )
             await self._store.insert_device_perf(cl, commit=False)
             presence_rows += 1

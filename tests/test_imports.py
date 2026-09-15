@@ -79,23 +79,26 @@ def test_unknown_backend_error_raised() -> None:
         create_backend(cfg, username="u", password="p")
 
 
-def test_factory_returns_merlin_for_merlin_backend() -> None:
-    """create_backend('merlin') returns a MerlinBackend instance."""
+def test_factory_returns_asuswrt_for_merlin_backend() -> None:
+    """create_backend('merlin') returns AsusWrtBackend(flavor=merlin)."""
+    from asusroutercontrol.backends.asuswrt import AsusWrtBackend
     from asusroutercontrol.backends.factory import create_backend
-    from asusroutercontrol.backends.merlin import MerlinBackend
     from asusroutercontrol.config import Config
 
     cfg = Config(router_backend="merlin")
     backend = create_backend(cfg, username="admin", password="secret")
-    assert isinstance(backend, MerlinBackend)
+    assert isinstance(backend, AsusWrtBackend)
+    assert backend.flavor == "merlin"
 
 
-def test_factory_returns_freshtomato_for_freshtomato_backend() -> None:
-    """create_backend('freshtomato') returns a FreshTomatoBackend instance."""
-    from asusroutercontrol.backends.factory import create_backend
-    from asusroutercontrol.backends.freshtomato import FreshTomatoBackend
+
+def test_factory_returns_deferred_for_freshtomato_backend() -> None:
+    """create_backend('freshtomato') hard-fails as deferred."""
+    from asusroutercontrol.backends.factory import BackendDeferredError, create_backend
     from asusroutercontrol.config import Config
 
     cfg = Config(router_backend="freshtomato")
-    backend = create_backend(cfg, username="admin", password="secret")
-    assert isinstance(backend, FreshTomatoBackend)
+    with pytest.raises(BackendDeferredError):
+        create_backend(cfg, username="admin", password="secret")
+
+

@@ -1,6 +1,6 @@
 # ASUSRouterControl User Guide
 
-CLI management and analysis tool for the ASUS RT-AC68U running AsusWRT-Merlin.
+CLI management and analysis tool for ASUS routers. Primary lab target: **RT-BE92U** on stock AsusWRT; AsusWRT-Merlin flavor also supported.
 
 ---
 
@@ -27,13 +27,15 @@ Verify: `asusrouter --version`
 
 ## Initial Setup
 
-### 1. Store credentials in 1Password
+### 1. Store credentials in Bitwarden
 
 ```bash
 asusrouter setup
 ```
 
-Prompts for router username (default: `admin`) and password. Credentials are stored securely in 1Password item titles matching `universal-keychain-asusroutercontrol-<env>-<key>`. Secrets are **never** written to disk or `.env`.
+Prompts for router username (default: `admin`) and password. Credentials are stored securely in Bitwarden via the `bw` CLI (default). Item titles match `universal-keychain-asusroutercontrol-<env>-<key>`. Secrets are **never** written to disk or `.env`.
+
+Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
 
 ### 2. Configure environment
 
@@ -51,8 +53,13 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `SOUNDSHIELD_EXPORT_PATH` | `~/.asusroutercontrol/soundshield_network.json` | SoundShield JSON export |
 
 Backend selection:
-- `ROUTER_BACKEND=merlin` (default): full feature set, including write operations.
-- `ROUTER_BACKEND=freshtomato`: read-only MVP backend (write operations like reboot/WiFi/port-forward updates are intentionally unsupported).
+- `ROUTER_BACKEND=merlin` (default): `AsusWrtBackend(flavor=merlin)` — full feature set including JFFS scripts / Entware.
+- `ROUTER_BACKEND=stock` or `asuswrt`: `AsusWrtBackend(flavor=stock)` — HTTP read/write via `asusrouter`; JFFS/Entware CLI commands hard-fail with a clear unsupported error.
+- `ROUTER_BACKEND=freshtomato`: **deferred** — selecting it hard-fails; stub retained in-tree for a later experimental pass.
+
+Optional ISP plan speeds (SLA math):
+- `PLAN_DOWNLOAD_MBPS` (default `300`)
+- `PLAN_UPLOAD_MBPS` (default `35`)
 
 **SSH (Merlin features)**
 
@@ -78,7 +85,7 @@ Backend selection:
 ## CLI Commands
 
 ### `asusrouter setup`
-Interactive credential storage. Saves username and password to 1Password.
+Interactive credential storage. Saves username and password to Bitwarden (default; or the configured credential backend).
 
 ---
 
@@ -358,9 +365,9 @@ All data lives in `~/.asusroutercontrol/` (configurable via `DATA_DIR`).
 
 | Operation | Method |
 |---|---|
-| Store | `asusrouter setup` |
-| Retrieve | 1Password first; falls back to keychain migration entries, then env vars `ROUTER_USERNAME` / `ROUTER_PASSWORD` |
-| View / delete | `op item get universal-keychain-asusroutercontrol-prod-router_password` (or use 1Password app) |
+| Store | `asusrouter setup` (Bitwarden via `bw` by default) |
+| Retrieve | Bitwarden first; falls back to 1Password/keychain migration entries, then env vars `ROUTER_USERNAME` / `ROUTER_PASSWORD` |
+| View / delete | `bw get item universal-keychain-asusroutercontrol-prod-router_password` (or Bitwarden app). For 1Password backend: `op item get …` |
 
 ---
 
