@@ -29,7 +29,8 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Project build rule (macOS app bundles)
 - DEV builds must be generated with `make build-dev-app` and output to `testbuilds/` under the repository root.
-- Every development cycle must run a fresh `make build-dev-app` before functionality verification, and verification must use that rebuilt DEV bundle (`make verify-dev-app`).
+- **After each implementation/fix pass**, run a fresh `make build-dev-app` before functionality verification; verification must use that rebuilt DEV bundle (`make verify-dev-app` / `open "testbuilds/ASUSRouterControl DEV.app"`). Do not verify against a stale bundle.
+- Cloud/Linux agents cannot build a runnable `.app` (AppKit required). They must still require the rebuild and give the operator the Mac commands; never claim a cloud rebuild succeeded.
 - DEV app bundle is labeled `ASUSRouterControl DEV.app` with a red `DEV` icon for immediate visual separation from production.
 - Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
 - Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
