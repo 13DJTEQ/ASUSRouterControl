@@ -1325,7 +1325,7 @@ class AppDelegate(NSObject):
         )
         backend_popup.removeAllItems()
         backend_popup.addItemsWithTitles_(["keychain", "bitwarden"])
-        preferred = "keychain"
+        preferred = str(defaults.get("credential_backend") or "keychain")
         if preferred not in ("keychain", "bitwarden"):
             preferred = "keychain"
         backend_popup.selectItemWithTitle_(preferred)

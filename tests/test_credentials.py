@@ -413,6 +413,27 @@ class TestRouterConnectionSecrets:
         assert store_credential("router_ssh_port", "1313", backend="keychain")
         assert get_router_ssh_port() == 1313
 
+    def test_host_hint_bw_ssh_port_overrides_stale_canonical(
+        self, monkeypatch, mem_keyring
+    ):
+        """Stale Keychain port 22 must not mask the BW item SSH Port field."""
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol import credentials as creds
+
+        assert creds.store_credential("router_ssh_port", "22", backend="keychain")
+        item = {
+            "id": "abc",
+            "name": "router.asus.com (13Maschine)",
+            "login": {"username": "admin", "password": "pw", "uris": []},
+            "fields": [{"name": "SSH Port", "value": "1313"}],
+        }
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: item
+        )
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+        # Without a host hint, canonical store still wins.
+        assert creds.get_router_ssh_port() == 22
+
     def test_invalid_ssh_port_rejected(self, monkeypatch, mem_keyring):
         monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
         from asusroutercontrol.credentials import store_router_credentials

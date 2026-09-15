@@ -897,10 +897,11 @@ def _ssh_port_from_bitwarden_item(item: dict) -> int | None:
         {
             "ssh port",
             "ssh_port",
+            "ssh-port",
             "sshport",
-            "port",
-            "ssh",
             "router ssh port",
+            "ssh",
+            # Intentionally omit bare "port" — too ambiguous on human items.
         },
     )
     if raw is None:
@@ -972,11 +973,19 @@ def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None,
 
 
 def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
-    """Return SSH port from canonical store, else from the Bitwarden router item.
+    """Return SSH port from the host-matched Bitwarden item, else canonical store.
 
-    Human BW items such as ``router.asus.com (13Maschine)`` are supported via
-    custom fields named like ``SSH Port`` / ``ssh_port``, or notes lines.
+    Human BW items such as ``router.asus.com (13Maschine)`` are preferred when
+    *host_hint* is set, so a stale Keychain ``router_ssh_port=22`` cannot mask
+    the item's ``SSH Port`` custom field.
     """
+    if host_hint:
+        item = lookup_bitwarden_router_item(host_hint=host_hint)
+        if item is not None:
+            from_item = _ssh_port_from_bitwarden_item(item)
+            if from_item is not None:
+                return from_item
+
     raw = get_credential("router_ssh_port", env=_runtime_credential_env())
     if raw is not None and str(raw).strip():
         try:
@@ -989,10 +998,12 @@ def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
                 return port
             log.warning("Ignoring out-of-range router_ssh_port=%s from credential store", port)
 
-    item = lookup_bitwarden_router_item(host_hint=host_hint)
-    if item is None:
-        return None
-    return _ssh_port_from_bitwarden_item(item)
+    if not host_hint:
+        item = lookup_bitwarden_router_item(host_hint=host_hint)
+        if item is None:
+            return None
+        return _ssh_port_from_bitwarden_item(item)
+    return None
 
 
 def bitwarden_vault_status() -> str:
