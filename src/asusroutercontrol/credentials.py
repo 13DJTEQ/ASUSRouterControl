@@ -1163,6 +1163,13 @@ def resolve_connect_login_defaults(
 
     username, password = get_router_credentials(host_hint=suggested_host)
     stored_port = get_router_ssh_port(host_hint=suggested_host)
+    env_username = (
+        os.environ.get("ASUSROUTERCONTROL_ROUTER_USERNAME", "").strip()
+        or os.environ.get("ROUTER_USERNAME", "").strip()
+        or None
+    )
+    # Do NOT invent "admin" — many Merlin setups rename the login (e.g. 13Maschine).
+    resolved_username = username or env_username or ""
     active = _active_backend_name()
     if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
         backend = preferred_backend
@@ -1180,14 +1187,14 @@ def resolve_connect_login_defaults(
     if (
         bw_status == "unlocked"
         and item_name
-        and username
+        and resolved_username
         and password
         and item_ssh_port is not None
     ):
         detail = (
             f"Bitwarden: loaded login + SSH port {item_ssh_port} from '{item_name}'"
         )
-    elif bw_status == "unlocked" and item_name and username and password:
+    elif bw_status == "unlocked" and item_name and resolved_username and password:
         detail = (
             f"Bitwarden: loaded login from '{item_name}' "
             f"but no SSH Port custom field — using {ssh_port}. "
@@ -1209,7 +1216,9 @@ def resolve_connect_login_defaults(
     elif bw_status == "locked":
         detail = (
             "Bitwarden vault is locked — SSH port will stay at 22 until unlocked. "
-            "In Terminal: bw unlock  → put BW_SESSION=... into .env → relaunch app"
+            "In Terminal: bw unlock  → put BW_SESSION=... into .env → relaunch app. "
+            "Router Login Name may not be 'admin' "
+            "(check Administration → System)."
         )
     elif bw_status == "cli_not_found":
         detail = (
@@ -1221,18 +1230,25 @@ def resolve_connect_login_defaults(
     else:
         detail = f"Bitwarden status: {bw_status}"
 
+    if not resolved_username:
+        extra = (
+            "Enter the Router Login Name from Administration → System "
+            "(not always 'admin')."
+        )
+        detail = f"{detail} {extra}" if detail else extra
+
     log.info(
         "Connect defaults: bw_status=%s item=%r ssh_port=%s user=%r backend=%s",
         bw_status,
         item_name,
         ssh_port,
-        username,
+        resolved_username or None,
         backend,
     )
 
     return {
         "host": suggested_host,
-        "username": username or "admin",
+        "username": resolved_username,
         "password": password or "",
         "ssh_port": ssh_port,
         "credential_backend": backend,

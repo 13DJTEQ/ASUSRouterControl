@@ -1363,7 +1363,7 @@ class AppDelegate(NSObject):
         _label("Host", 120)
         host_field = _field(120, str(defaults["host"] or suggested))
         _label("Username", 90)
-        user_field = _field(90, str(defaults["username"] or "admin"))
+        user_field = _field(90, str(defaults["username"] or ""))
         _label("Password", 60)
         pass_field = _field(60, "", secure=True)
         _label("SSH port", 30)
@@ -1385,7 +1385,7 @@ class AppDelegate(NSObject):
             return
 
         host = host_field.stringValue().strip()
-        username = user_field.stringValue().strip() or "admin"
+        username = user_field.stringValue().strip()
         password = (pass_field.stringValue() or stored_password).strip()
         credential_backend = backend_popup.titleOfSelectedItem() or "keychain"
         if credential_backend not in ("keychain", "bitwarden"):
@@ -1410,11 +1410,13 @@ class AppDelegate(NSObject):
                     ssh_port = bw_port
             except Exception:
                 log.debug("Connect SSH port re-resolve failed", exc_info=True)
-        if not host or not password:
+        if not host or not username or not password:
             _notify(
                 "Connect Failed",
                 "",
-                "Host and password are required (or store them in Bitwarden/Keychain first)",
+                "Host, username, and password are required. "
+                "Username is the Router Login Name "
+                "(Administration → System) — often not 'admin'.",
             )
             return
 

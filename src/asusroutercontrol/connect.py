@@ -91,8 +91,9 @@ def format_http_probe_error(
     if code_name == "CREDENTIALS":
         return (
             f"Router rejected login for {host}{user_hint}. "
-            "Username/password are wrong — use the router admin credentials "
-            "from the Bitwarden login item (not Wi‑Fi password / item title)."
+            "Username/password are wrong — use Administration → System "
+            "→ Router Login Name (may not be 'admin') and that account's "
+            "password from Bitwarden (not the Wi‑Fi password)."
             + settings_hint
         )
     if code_name == "CAPTCHA":

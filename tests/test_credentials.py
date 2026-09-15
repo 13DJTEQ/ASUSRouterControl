@@ -519,7 +519,22 @@ class TestBitwardenRouterItemLookup:
             preferred_backend="keychain",
         )
         assert defaults["ssh_port"] == 22
+        assert defaults["username"] == ""
         assert "locked" in str(defaults.get("store_detail") or "").lower()
+        assert "login name" in str(defaults.get("store_detail") or "").lower()
+
+    def test_env_router_username_used_when_store_empty(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="keychain",
+        )
+        assert defaults["username"] == "13Maschine"
 
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
