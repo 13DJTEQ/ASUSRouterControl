@@ -941,10 +941,20 @@ def _runtime_credential_env() -> str:
 def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None, str | None]:
     """Return (username, password) for router access using the runtime env.
 
-    Falls back to a human Bitwarden router login item (title/URI match or
-    ASUSROUTERCONTROL_BW_ROUTER_ITEM) when canonical keys are absent.
+    When *host_hint* is provided, prefer a matching human Bitwarden login item
+    (e.g. ``router.asus.com (13Maschine)``) over stale canonical keys.
     """
     env = _runtime_credential_env()
+    if host_hint:
+        item = lookup_bitwarden_router_item(host_hint=host_hint)
+        if item is not None:
+            bw_user, bw_pass = _credentials_from_bitwarden_item(item)
+            if bw_user and bw_pass:
+                return bw_user, bw_pass
+            # Partial BW item — fill gaps from canonical store.
+            username = get_credential("router_username", env=env)
+            password = get_credential("router_password", env=env)
+            return bw_user or username, bw_pass or password
     username = get_credential("router_username", env=env)
     password = get_credential("router_password", env=env)
     if username and password:
@@ -996,10 +1006,29 @@ def resolve_connect_login_defaults(
 ) -> dict[str, str | int | None]:
     """Defaults for Connect Router UI / CLI, sourced from BW/Keychain when present."""
     # Ensure .env values (including BW_SESSION) are visible before vault calls.
+    # GUI .app launches often have a non-repo cwd, so probe known locations.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        candidates = [
+            Path.cwd() / ".env",
+            Path.home() / "ASUSRouterControl" / ".env",
+            Path.home() / ".asusroutercontrol" / ".env",
+            Path.home() / ".config" / "asusroutercontrol" / ".env",
+        ]
+        env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
+        if env_override:
+            candidates.insert(0, Path(env_override).expanduser())
+        loaded = False
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    load_dotenv(dotenv_path=str(candidate), override=False)
+                    loaded = True
+            except OSError:
+                continue
+        if not loaded:
+            load_dotenv(override=False)
     except Exception:  # noqa: BLE001
         pass
     _ensure_bw_session_env()
@@ -1021,7 +1050,22 @@ def resolve_connect_login_defaults(
 
     detail: str | None = None
     if backend == "bitwarden":
-        if bw_status == "unlocked" and item_name and stored_port is not None:
+        if (
+            bw_status == "unlocked"
+            and item_name
+            and username
+            and password
+            and stored_port is not None
+        ):
+            detail = (
+                f"Bitwarden: loaded login + SSH port {stored_port} from '{item_name}'"
+            )
+        elif bw_status == "unlocked" and item_name and username and password:
+            detail = (
+                f"Bitwarden: loaded login from '{item_name}' "
+                f"(no SSH Port field; using {ssh_port})"
+            )
+        elif bw_status == "unlocked" and item_name and stored_port is not None:
             detail = f"Bitwarden: loaded SSH port {stored_port} from '{item_name}'"
         elif bw_status == "unlocked" and item_name:
             detail = (

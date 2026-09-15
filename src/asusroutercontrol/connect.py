@@ -149,6 +149,25 @@ async def setup_router_connection(
         password,
         try_ssh=ssh_enabled,
     )
+    # Retry HTTPS/443 when plain HTTP/80 fails (common for hardened routers).
+    if (
+        not probe.http_ok
+        and not use_ssl
+        and http_port == 80
+    ):
+        log.info(
+            "HTTP probe failed for %s (%s); retrying HTTPS:443",
+            resolved_host,
+            probe.http_error,
+        )
+        profile = replace(profile, use_ssl=True, http_port=443)
+        effective = apply_profile(base, profile)
+        probe = await probe_connection(
+            effective,
+            username,
+            password,
+            try_ssh=ssh_enabled,
+        )
     if not probe.http_ok:
         raise ConnectionError(
             f"HTTP admin login failed for {resolved_host}: {probe.http_error}"
@@ -167,13 +186,36 @@ async def setup_router_connection(
     store.upsert(profile, make_active=True)
     path = save_profiles(store, target_dir, runtime_env=namespace)
 
-    stored_backend = store_router_credentials(
-        username,
-        password,
-        ssh_port=ssh_port,
-        env=namespace,
-        backend=credential_backend,
-    )
+    stored_backend = credential_backend
+    try:
+        stored_backend = store_router_credentials(
+            username,
+            password,
+            ssh_port=ssh_port,
+            env=namespace,
+            backend=credential_backend,
+        )
+    except Exception as store_exc:  # noqa: BLE001 — connection already succeeded
+        log.warning(
+            "Credential store in %s failed after successful HTTP login: %s",
+            credential_backend,
+            store_exc,
+        )
+        if credential_backend != "keychain":
+            try:
+                stored_backend = store_router_credentials(
+                    username,
+                    password,
+                    ssh_port=ssh_port,
+                    env=namespace,
+                    backend="keychain",
+                )
+                log.info("Fell back to keychain credential store")
+            except Exception as keychain_exc:  # noqa: BLE001
+                log.warning("Keychain credential fallback failed: %s", keychain_exc)
+                stored_backend = f"unstored:{credential_backend}"
+        else:
+            stored_backend = f"unstored:{credential_backend}"
     return SetupResult(
         profile=profile,
         probe=probe,

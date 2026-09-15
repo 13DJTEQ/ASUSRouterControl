@@ -1325,7 +1325,7 @@ class AppDelegate(NSObject):
         )
         backend_popup.removeAllItems()
         backend_popup.addItemsWithTitles_(["keychain", "bitwarden"])
-        preferred = str(defaults.get("credential_backend") or "keychain")
+        preferred = "keychain"
         if preferred not in ("keychain", "bitwarden"):
             preferred = "keychain"
         backend_popup.selectItemWithTitle_(preferred)
@@ -1408,9 +1408,12 @@ class AppDelegate(NSObject):
             )
         except Exception as exc:
             log.exception("Connect router failed")
-            self._connection_last_error = str(exc)[:120]
+            detail = str(exc).strip() or exc.__class__.__name__
+            if len(detail) > 400:
+                detail = detail[:397] + "..."
+            self._connection_last_error = detail
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "finishConnectFailure:", str(exc)[:120], False
+                "finishConnectFailure:", detail, False
             )
 
     @objc.typedSelector(b"v@:@")
@@ -1482,8 +1485,9 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def finishConnectFailure_(self, detail):
         host = getattr(self._cfg, "router_host", None) or "router"
+        detail_s = str(detail) if detail else "connect failed"
         self._set_connection_state(
-            unable_state(host, str(detail) if detail else "connect failed"),
+            unable_state(host, detail_s),
             notify=True,
         )
         try:
@@ -1491,6 +1495,14 @@ class AppDelegate(NSObject):
             self._mi_connect.setEnabled_(True)
         except Exception:
             pass
+        try:
+            alert = NSAlert.new()
+            alert.setMessageText_("Unable to Connect")
+            alert.setInformativeText_(detail_s)
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+        except Exception:
+            log.debug("Failed to show connect failure alert", exc_info=True)
     @objc.typedSelector(b"v@:@")
     def rebootRouter_(self, sender):
         alert = NSAlert.new()

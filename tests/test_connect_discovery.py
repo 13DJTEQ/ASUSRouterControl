@@ -133,3 +133,36 @@ async def test_scheduler_skips_ssh_when_profile_disables_it(
     runtime = await sched._determine_runtime_profile()
     assert runtime.capability == "degraded-no-ssh"
     assert called["ssh"] is False
+
+
+@pytest.mark.asyncio
+async def test_setup_falls_back_when_credential_store_fails(tmp_path, monkeypatch):
+    from asusroutercontrol.config import Config
+    from asusroutercontrol.connect import ConnectionProbeResult, setup_router_connection
+
+    async def _probe(cfg, username, password, *, try_ssh=True):
+        return ConnectionProbeResult(http_ok=True, ssh_ok=None)
+
+    calls = {"n": 0}
+
+    def _store(username, password, *, ssh_port=None, env=None, backend=None):
+        calls["n"] += 1
+        if backend == "bitwarden":
+            raise RuntimeError("bw encode failed")
+        return backend or "keychain"
+
+    monkeypatch.setattr("asusroutercontrol.connect.probe_connection", _probe)
+    monkeypatch.setattr("asusroutercontrol.connect.store_router_credentials", _store)
+
+    result = await setup_router_connection(
+        host="192.168.50.1",
+        username="admin",
+        password="pw",
+        credential_backend="bitwarden",
+        data_dir=tmp_path,
+        discover=False,
+        cfg=Config(data_dir=tmp_path),
+    )
+    assert result.probe.http_ok is True
+    assert result.credentials_backend == "keychain"
+    assert calls["n"] == 2
