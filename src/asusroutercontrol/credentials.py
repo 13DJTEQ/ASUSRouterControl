@@ -34,6 +34,7 @@ _LEGACY_SERVICE = "com.asusroutercontrol"
 
 _CREDENTIAL_BACKEND_ENV = "ASUSROUTERCONTROL_CREDENTIAL_BACKEND"
 _BW_ROUTER_ITEM_ENV = "ASUSROUTERCONTROL_BW_ROUTER_ITEM"
+_DEFAULT_BW_ROUTER_ITEM = "router.asus.com (13Maschine)"
 _OP_VAULT_ENV = "ASUSROUTERCONTROL_1PASSWORD_VAULT"
 _OP_VAULT_ENV_FALLBACK = "OP_VAULT"
 _BW_SESSION_ENV = "BW_SESSION"
@@ -912,11 +913,13 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
     """Find the human Bitwarden router login item (e.g. 'router.asus.com (13Maschine)').
 
     Preference order:
-    1. ASUSROUTERCONTROL_BW_ROUTER_ITEM exact title/id
+    1. ASUSROUTERCONTROL_BW_ROUTER_ITEM exact title/id (defaults to lab item)
     2. Search/list match against host hints (title or URI)
     3. Broad search for titles containing router.asus.com that have SSH Port
     """
-    explicit = os.environ.get(_BW_ROUTER_ITEM_ENV, "").strip()
+    explicit = (
+        os.environ.get(_BW_ROUTER_ITEM_ENV, "").strip() or _DEFAULT_BW_ROUTER_ITEM
+    )
     if explicit:
         item = _bw_get_item_json(explicit)
         if item is not None:
@@ -931,6 +934,16 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
                     if full is not None:
                         return full
                 return candidate
+        # Also try search by the stable host fragment.
+        for candidate in _bw_search_items("router.asus.com"):
+            name = str(candidate.get("name", ""))
+            if "13maschine" in name.lower() or name.lower() == explicit.lower():
+                item_id = candidate.get("id")
+                if isinstance(item_id, str) and item_id:
+                    full = _bw_get_item_json(item_id)
+                    if full is not None:
+                        log.info("Resolved BW router item via search: %s", full.get("name"))
+                        return full
         log.info("Configured BW router item %r was not found", explicit)
 
     for hint in _bw_item_host_hints(host_hint):
