@@ -27,6 +27,32 @@ from asusroutercontrol.ssh import RouterSSH
 log = logging.getLogger(__name__)
 
 
+def format_http_probe_error(exc: BaseException, *, host: str) -> str:
+    """Turn asusrouter/network failures into actionable Connect UI text."""
+    raw = str(exc).strip() or exc.__class__.__name__
+    low = raw.lower()
+    if "cannot access" in low and "login" in low:
+        return (
+            f"Cannot reach HTTP admin login on {host}. "
+            "Check you are on the router LAN/Wi‑Fi, username/password are the "
+            "router admin credentials (not the Bitwarden item label), and try "
+            "the gateway IP if router.asus.com fails."
+        )
+    if "ssl" in low and "certificate" in low:
+        return (
+            f"TLS/SSL certificate error talking to {host}. "
+            "Retry with HTTP or install/trust the router certificate."
+        )
+    if "timeout" in low or "timed out" in low:
+        return f"Timed out reaching {host}. Confirm the host/IP and local network."
+    if "name or service not known" in low or "nodename nor servname" in low:
+        return f"Could not resolve host {host}. Use the router LAN IP instead."
+    if "connection refused" in low:
+        return f"Connection refused by {host}. Check HTTP(S) admin port."
+    return f"{raw}"
+
+
+
 @dataclass(frozen=True)
 class ConnectionProbeResult:
     http_ok: bool
@@ -54,7 +80,7 @@ async def probe_http(cfg: Config, username: str, password: str) -> tuple[bool, s
         await backend.connect()
         return True, None
     except Exception as exc:  # noqa: BLE001 — surface any connect failure to setup UX
-        return False, str(exc)
+        return False, format_http_probe_error(exc, host=cfg.router_host)
     finally:
         try:
             await backend.disconnect()
@@ -149,25 +175,53 @@ async def setup_router_connection(
         password,
         try_ssh=ssh_enabled,
     )
-    # Retry HTTPS/443 when plain HTTP/80 fails (common for hardened routers).
-    if (
-        not probe.http_ok
-        and not use_ssl
-        and http_port == 80
-    ):
-        log.info(
-            "HTTP probe failed for %s (%s); retrying HTTPS:443",
-            resolved_host,
-            probe.http_error,
-        )
-        profile = replace(profile, use_ssl=True, http_port=443)
-        effective = apply_profile(base, profile)
-        probe = await probe_connection(
-            effective,
-            username,
-            password,
-            try_ssh=ssh_enabled,
-        )
+    # Retry alternate transports when the first HTTP probe fails.
+    if not probe.http_ok:
+        attempts: list[tuple[str, int, bool]] = []
+        if not use_ssl and http_port == 80:
+            attempts.append((resolved_host, 443, True))
+        # router.asus.com only works on-LAN via ASUS DNS — also try gateway IP.
+        host_l = resolved_host.strip().lower()
+        if host_l in {"router.asus.com", "www.asusrouter.com", "router.asus.com."}:
+            try:
+                from asusroutercontrol.discovery import default_gateway_ipv4
+
+                gateway = default_gateway_ipv4()
+            except Exception:  # noqa: BLE001
+                gateway = None
+            if gateway and gateway != resolved_host:
+                attempts.append((gateway, http_port, use_ssl))
+                if not use_ssl and http_port == 80:
+                    attempts.append((gateway, 443, True))
+
+        last_error = probe.http_error
+        for attempt_host, attempt_port, attempt_ssl in attempts:
+            log.info(
+                "HTTP probe failed for %s (%s); retrying %s:%s ssl=%s",
+                resolved_host,
+                last_error,
+                attempt_host,
+                attempt_port,
+                attempt_ssl,
+            )
+            profile = replace(
+                profile,
+                host=attempt_host,
+                http_port=attempt_port,
+                use_ssl=attempt_ssl,
+            )
+            effective = apply_profile(base, profile)
+            probe = await probe_connection(
+                effective,
+                username,
+                password,
+                try_ssh=ssh_enabled,
+            )
+            last_error = probe.http_error
+            if probe.http_ok:
+                resolved_host = attempt_host
+                break
+
     if not probe.http_ok:
         raise ConnectionError(
             f"HTTP admin login failed for {resolved_host}: {probe.http_error}"

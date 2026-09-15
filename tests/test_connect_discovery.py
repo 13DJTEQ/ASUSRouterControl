@@ -166,3 +166,14 @@ async def test_setup_falls_back_when_credential_store_fails(tmp_path, monkeypatc
     assert result.probe.http_ok is True
     assert result.credentials_backend == "keychain"
     assert calls["n"] == 2
+
+
+def test_format_http_probe_error_login_endpoint():
+    from asusroutercontrol.connect import format_http_probe_error
+
+    msg = format_http_probe_error(
+        RuntimeError("Cannot access EndpointService.LOGIN. Failed in `async_connect`"),
+        host="router.asus.com",
+    )
+    assert "router admin credentials" in msg.lower() or "gateway ip" in msg.lower()
+    assert "router.asus.com" in msg
