@@ -32,6 +32,7 @@ DEFAULT_ENV = "prod"
 _LEGACY_SERVICE = "com.asusroutercontrol"
 
 _CREDENTIAL_BACKEND_ENV = "ASUSROUTERCONTROL_CREDENTIAL_BACKEND"
+_BW_ROUTER_ITEM_ENV = "ASUSROUTERCONTROL_BW_ROUTER_ITEM"
 _OP_VAULT_ENV = "ASUSROUTERCONTROL_1PASSWORD_VAULT"
 _OP_VAULT_ENV_FALLBACK = "OP_VAULT"
 _BW_SESSION_ENV = "BW_SESSION"
@@ -683,6 +684,179 @@ def delete_credential(key: str, *, env: str = DEFAULT_ENV) -> bool:
     return _active_backend().delete(key, env=env)
 
 
+
+
+def _bw_custom_field_value(item: dict, field_names: set[str]) -> str | None:
+    """Return the first custom-field value whose name matches field_names."""
+    fields = item.get("fields", [])
+    if not isinstance(fields, list):
+        return None
+    wanted = {n.lower() for n in field_names}
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("name", "")).strip().lower()
+        if name not in wanted:
+            continue
+        value = field.get("value")
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if text_value:
+            return text_value
+    return None
+
+
+def _bw_notes_ssh_port(notes: str | None) -> str | None:
+    if not notes:
+        return None
+    import re
+
+    patterns = (
+        r"(?im)^\s*ssh[\s_-]*port\s*[:=]\s*(\d{1,5})\s*$",
+        r"(?im)^\s*port\s*[:=]\s*(\d{1,5})\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, notes)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _bw_item_host_hints(host_hint: str | None = None) -> list[str]:
+    hints: list[str] = []
+    for candidate in (
+        host_hint,
+        os.environ.get("ROUTER_HOST", "").strip() or None,
+        "router.asus.com",
+    ):
+        if candidate and candidate not in hints:
+            hints.append(candidate)
+    return hints
+
+
+def _bw_item_matches_host(item: dict, host: str) -> bool:
+    host_l = host.strip().lower()
+    if not host_l:
+        return False
+    name = str(item.get("name", "")).lower()
+    if host_l in name:
+        return True
+    login = item.get("login")
+    if not isinstance(login, dict):
+        return False
+    uris = login.get("uris", [])
+    if isinstance(uris, list):
+        for entry in uris:
+            if isinstance(entry, dict):
+                uri = str(entry.get("uri", ""))
+            else:
+                uri = str(entry)
+            if host_l in uri.lower():
+                return True
+    return False
+
+
+def _bw_get_item_json(title_or_id: str) -> dict | None:
+    backend = _BACKENDS.get("bitwarden")
+    if backend is None or not isinstance(backend, _BitwardenBackend):
+        return None
+    if not backend.healthy():
+        return None
+    result = backend._run(["get", "item", title_or_id, "--raw"])
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        payload = json_loads(result.stdout or "{}")
+    except JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _bw_search_items(query: str) -> list[dict]:
+    backend = _BACKENDS.get("bitwarden")
+    if backend is None or not isinstance(backend, _BitwardenBackend):
+        return []
+    if not backend.healthy():
+        return []
+    result = backend._run(["list", "items", "--search", query])
+    if result is None or result.returncode != 0:
+        return []
+    try:
+        payload = json_loads(result.stdout or "[]")
+    except JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None:
+    """Find the human Bitwarden router login item (e.g. 'router.asus.com (13Maschine)').
+
+    Preference order:
+    1. ASUSROUTERCONTROL_BW_ROUTER_ITEM exact title/id
+    2. Search/list match against host hints (title or URI)
+    """
+    explicit = os.environ.get(_BW_ROUTER_ITEM_ENV, "").strip()
+    if explicit:
+        item = _bw_get_item_json(explicit)
+        if item is not None:
+            return item
+        log.debug("Configured BW router item %r was not found", explicit)
+
+    for hint in _bw_item_host_hints(host_hint):
+        # Exact get by title first (fast path for titles equal to host)
+        item = _bw_get_item_json(hint)
+        if item is not None:
+            return item
+        for candidate in _bw_search_items(hint):
+            if _bw_item_matches_host(candidate, hint):
+                # list --search may return summaries; refresh full item when id present
+                item_id = candidate.get("id")
+                if isinstance(item_id, str) and item_id:
+                    full = _bw_get_item_json(item_id)
+                    return full or candidate
+                return candidate
+    return None
+
+
+def _ssh_port_from_bitwarden_item(item: dict) -> int | None:
+    raw = _bw_custom_field_value(
+        item,
+        {
+            "ssh port",
+            "ssh_port",
+            "sshport",
+            "port",
+            "ssh",
+            "router ssh port",
+        },
+    )
+    if raw is None:
+        raw = _bw_notes_ssh_port(item.get("notes") if isinstance(item.get("notes"), str) else None)
+    if raw is None:
+        return None
+    try:
+        port = int(str(raw).strip())
+    except ValueError:
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _credentials_from_bitwarden_item(item: dict) -> tuple[str | None, str | None]:
+    login = item.get("login")
+    if not isinstance(login, dict):
+        return None, None
+    username = login.get("username")
+    password = login.get("password")
+    user = str(username).strip() if isinstance(username, str) and username.strip() else None
+    pw = str(password) if isinstance(password, str) and password else None
+    return user, pw
+
+
 # ---------------------------------------------------------------------------
 # Router-specific helpers
 # ---------------------------------------------------------------------------
@@ -694,29 +868,46 @@ def _runtime_credential_env() -> str:
     return os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
 
 
-def get_router_credentials() -> tuple[str | None, str | None]:
-    """Return (username, password) for router access using the runtime env."""
+def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None, str | None]:
+    """Return (username, password) for router access using the runtime env.
+
+    Falls back to a human Bitwarden router login item (title/URI match or
+    ASUSROUTERCONTROL_BW_ROUTER_ITEM) when canonical keys are absent.
+    """
     env = _runtime_credential_env()
-    return (
-        get_credential("router_username", env=env),
-        get_credential("router_password", env=env),
-    )
+    username = get_credential("router_username", env=env)
+    password = get_credential("router_password", env=env)
+    if username and password:
+        return username, password
+    item = lookup_bitwarden_router_item(host_hint=host_hint)
+    if item is None:
+        return username, password
+    bw_user, bw_pass = _credentials_from_bitwarden_item(item)
+    return username or bw_user, password or bw_pass
 
 
-def get_router_ssh_port() -> int | None:
-    """Return stored SSH port from Bitwarden/Keychain (or other backends), if any."""
+def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
+    """Return SSH port from canonical store, else from the Bitwarden router item.
+
+    Human BW items such as ``router.asus.com (13Maschine)`` are supported via
+    custom fields named like ``SSH Port`` / ``ssh_port``, or notes lines.
+    """
     raw = get_credential("router_ssh_port", env=_runtime_credential_env())
-    if raw is None or not str(raw).strip():
+    if raw is not None and str(raw).strip():
+        try:
+            port = int(str(raw).strip())
+        except ValueError:
+            log.warning("Ignoring non-integer router_ssh_port value from credential store")
+            port = None
+        else:
+            if 1 <= port <= 65535:
+                return port
+            log.warning("Ignoring out-of-range router_ssh_port=%s from credential store", port)
+
+    item = lookup_bitwarden_router_item(host_hint=host_hint)
+    if item is None:
         return None
-    try:
-        port = int(str(raw).strip())
-    except ValueError:
-        log.warning("Ignoring non-integer router_ssh_port value from credential store")
-        return None
-    if not 1 <= port <= 65535:
-        log.warning("Ignoring out-of-range router_ssh_port=%s from credential store", port)
-        return None
-    return port
+    return _ssh_port_from_bitwarden_item(item)
 
 
 def resolve_connect_login_defaults(
@@ -726,8 +917,8 @@ def resolve_connect_login_defaults(
     preferred_backend: str | None = None,
 ) -> dict[str, str | int | None]:
     """Defaults for Connect Router UI / CLI, sourced from BW/Keychain when present."""
-    username, password = get_router_credentials()
-    stored_port = get_router_ssh_port()
+    username, password = get_router_credentials(host_hint=suggested_host)
+    stored_port = get_router_ssh_port(host_hint=suggested_host)
     active = _active_backend_name()
     if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
         backend = preferred_backend

@@ -422,3 +422,45 @@ class TestRouterConnectionSecrets:
             raise AssertionError("expected ValueError")
         except ValueError:
             pass
+
+
+class TestBitwardenRouterItemLookup:
+    def test_ssh_port_from_human_bw_item_custom_field(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        item = {
+            "id": "abc",
+            "name": "router.asus.com (13Maschine)",
+            "login": {
+                "username": "admin",
+                "password": "s3cret",
+                "uris": [{"uri": "http://router.asus.com"}],
+            },
+            "fields": [{"name": "SSH Port", "value": "1313"}],
+        }
+
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: item)
+
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+        user, pw = creds.get_router_credentials(host_hint="router.asus.com")
+        assert user == "admin"
+        assert pw == "s3cret"
+
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            config_ssh_port=22,
+            preferred_backend="bitwarden",
+        )
+        assert defaults["ssh_port"] == 1313
+        assert defaults["username"] == "admin"
+        assert defaults["password"] == "s3cret"
+        assert defaults["credential_backend"] == "bitwarden"
+
+    def test_item_match_prefers_title_with_host(self):
+        from asusroutercontrol.credentials import _bw_item_matches_host
+
+        item = {"name": "router.asus.com (13Maschine)", "login": {"uris": []}}
+        assert _bw_item_matches_host(item, "router.asus.com") is True
+        assert _bw_item_matches_host(item, "other.example") is False
+
