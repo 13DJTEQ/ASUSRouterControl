@@ -117,6 +117,11 @@ SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
 # Absolute .app path so Restart can relaunch when not under launchd.
 export ASUSROUTERCONTROL_APP_BUNDLE="\$(cd "\${SELF_DIR}/../.." && pwd)"
+# Load project .env even when Finder launches the app with cwd=/
+if [[ -f "\${PROJECT_ROOT}/.env" ]]; then
+  export ASUSROUTERCONTROL_ENV_FILE="\${PROJECT_ROOT}/.env"
+fi
+export ASUSROUTERCONTROL_PROJECT_ROOT="\${PROJECT_ROOT}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then

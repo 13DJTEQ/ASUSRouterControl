@@ -337,12 +337,18 @@ class AppDelegate(NSObject):
 
         self._build_menu()
 
-        # Phase 4: Health check before starting scheduler
+        # Start monitoring immediately. Health check only adjusts degraded UI —
+        # do not block the scheduler on router reachability (DEV.app especially).
+        self._mi_sched_status.setTitle_("Scheduler: ● Starting")
+        self._ensure_runtime_started()
         threading.Thread(
             target=self._startup_health_check, name="health-check", daemon=True
         ).start()
 
-        log.info("AsusRouterMonitor starting (health check in progress)")
+        log.info(
+            "AsusRouterMonitor monitoring started (data_dir=%s, health check in progress)",
+            self._cfg.data_dir,
+        )
 
     def _set_status_icon(self, state: str) -> None:
         btn = self.statusitem.button()
@@ -353,15 +359,17 @@ class AppDelegate(NSObject):
         btn.setToolTip_(f"ASUSRouterControl {env_label} — {state}")
 
     def _startup_health_check(self):
-        """Check router backend reachability before starting scheduler."""
+        """Probe router reachability and update degraded UI (scheduler already running)."""
         from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
         from asusroutercontrol.ssh import RouterSSH
 
-        async def _check_backend():
+        async def _check_backend() -> None:
             username, password = get_router_credentials()
             if not username or not password:
-                raise RuntimeError("Missing router credentials")
+                raise RuntimeError(
+                    "Missing router credentials — run: asusrouter setup"
+                )
             backend = create_backend(
                 self._cfg,
                 username=username,
@@ -375,16 +383,35 @@ class AppDelegate(NSObject):
                 except Exception:
                     log.debug("Backend disconnect error in health check", exc_info=True)
 
-        async def _check_ssh():
-            ssh = RouterSSH(connect_timeout=10.0)
+        async def _check_ssh() -> None:
+            username, password = get_router_credentials()
+            ssh = RouterSSH(
+                hostname=self._cfg.router_host,
+                username=username,
+                password=password,
+                port=self._cfg.ssh_port,
+                connect_timeout=10.0,
+            )
             await ssh.connect()
             await ssh.disconnect()
 
+        async def _run_checks() -> None:
+            await asyncio.wait_for(_check_backend(), timeout=15.0)
+            backend_name = (self._cfg.router_backend or "").strip().lower()
+            if backend_name == "merlin":
+                try:
+                    await asyncio.wait_for(_check_ssh(), timeout=12.0)
+                except Exception as exc:
+                    log.warning(
+                        "SSH unavailable at startup: %s — monitoring continues with limited data",
+                        exc,
+                    )
+
         try:
-            asyncio.run(_check_backend())
+            asyncio.run(_run_checks())
         except Exception as exc:
             log.warning(
-                "Router backend unreachable: %s — entering degraded mode",
+                "Router health check failed: %s — monitoring continues in degraded mode",
                 exc,
             )
             self._degraded = True
@@ -393,16 +420,7 @@ class AppDelegate(NSObject):
             )
             return
 
-        if (self._cfg.router_backend or "").strip().lower() == "merlin":
-            try:
-                asyncio.run(_check_ssh())
-            except Exception as exc:
-                log.warning(
-                    "SSH unavailable at startup: %s — starting scheduler with limited data",
-                    exc,
-                )
-
-        log.info("Router reachable — starting scheduler")
+        log.info("Router reachable — monitoring healthy")
         self._degraded = False
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "startAfterHealthCheck:", None, False
@@ -410,22 +428,20 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def startAfterHealthCheck_(self, _):
-        """Called on main thread after successful health check."""
-        if self._degraded:
-            self._set_status_icon("Degraded")
-            self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded)")
-        else:
-            self._set_status_icon("Running")
-            self._mi_sched_status.setTitle_("Scheduler: ● Running")
+        """Main-thread UI update after a successful health check."""
         self._ensure_runtime_started()
+        self._set_status_icon("Running")
+        self._mi_sched_status.setTitle_("Scheduler: ● Running")
         log.info("AsusRouterMonitor ready")
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router backend unreachable — run in degraded mode and retry health check."""
-        self._set_status_icon("Degraded (retrying health)")
-        self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
+        """Main-thread UI update when router health check fails."""
         self._ensure_runtime_started()
+        self._set_status_icon("Degraded (retrying health)")
+        self._mi_sched_status.setTitle_(
+            "Scheduler: ● Running (degraded, retrying health)"
+        )
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             60.0, self, "retryHealthCheck:", None, False
         )
@@ -594,10 +610,13 @@ class AppDelegate(NSObject):
                     self._cfg,
                     on_speedtest_complete=self._on_scheduled_speedtest,
                 )
-                log.info("Scheduler started from menubar app")
+                log.info(
+                    "Scheduler started from menubar app (data_dir=%s)",
+                    self._cfg.data_dir,
+                )
                 loop.run_until_complete(self._sched.run())
             except Exception:
-                log.debug("Scheduler thread crashed", exc_info=True)
+                log.exception("Scheduler thread crashed — monitoring stopped")
             finally:
                 self._sched_loop = None
 
@@ -1076,7 +1095,19 @@ class AppDelegate(NSObject):
 
         alive = self._sched_thread and self._sched_thread.is_alive()
         dot = "●" if alive else "○"
-        status = "Running" if alive else "Stopped"
+        if not alive:
+            status = "Stopped"
+        else:
+            profile = getattr(self._sched, "runtime_profile", None) if self._sched else None
+            capability = getattr(profile, "capability", None)
+            if capability == "degraded-no-credentials":
+                status = "Running (need credentials — asusrouter setup)"
+            elif capability == "degraded-no-ssh":
+                status = "Running (limited — no SSH)"
+            elif self._degraded:
+                status = "Running (degraded)"
+            else:
+                status = "Running"
         self._mi_sched_status.setTitle_(f"Scheduler: {dot} {status}")
 
     # ------------------------------------------------------------------
