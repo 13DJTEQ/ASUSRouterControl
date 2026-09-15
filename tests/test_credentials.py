@@ -367,3 +367,207 @@ class TestDeleteLegacyCredentials:
             )
             is None
         )
+
+
+# ---------------------------------------------------------------------------
+# Router SSH port + connect defaults
+# ---------------------------------------------------------------------------
+
+
+class TestRouterConnectionSecrets:
+    def test_store_and_get_ssh_port(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import (
+            get_router_ssh_port,
+            store_router_credentials,
+        )
+
+        store_router_credentials("admin", "secret", ssh_port=1313, backend="keychain")
+        assert get_router_ssh_port() == 1313
+
+    def test_resolve_connect_login_defaults_prefills(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import (
+            resolve_connect_login_defaults,
+            store_router_credentials,
+        )
+
+        store_router_credentials("labadmin", "pw", ssh_port=2222, backend="keychain")
+        defaults = resolve_connect_login_defaults(
+            suggested_host="192.168.50.1",
+            config_ssh_port=22,
+            preferred_backend="keychain",
+        )
+        assert defaults["host"] == "192.168.50.1"
+        assert defaults["username"] == "labadmin"
+        assert defaults["password"] == "pw"
+        assert defaults["ssh_port"] == 2222
+        assert defaults["credential_backend"] == "keychain"
+        assert defaults["password_from_store"] is True
+
+    def test_get_router_ssh_port_from_active_backend(self, monkeypatch, mem_keyring):
+        """SSH port is read from the active credential backend (BW or Keychain)."""
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import get_router_ssh_port, store_credential
+
+        assert store_credential("router_ssh_port", "1313", backend="keychain")
+        assert get_router_ssh_port() == 1313
+
+    def test_host_hint_bw_ssh_port_overrides_stale_canonical(
+        self, monkeypatch, mem_keyring
+    ):
+        """Stale Keychain port 22 must not mask the BW item SSH Port field."""
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol import credentials as creds
+
+        assert creds.store_credential("router_ssh_port", "22", backend="keychain")
+        item = {
+            "id": "abc",
+            "name": "router.asus.com (13Maschine)",
+            "login": {"username": "admin", "password": "pw", "uris": []},
+            "fields": [{"name": "SSH Port", "value": "1313"}],
+        }
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: item
+        )
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+        # Without a host hint, canonical store still wins.
+        assert creds.get_router_ssh_port() == 22
+
+    def test_invalid_ssh_port_rejected(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import store_router_credentials
+
+        try:
+            store_router_credentials("a", "b", ssh_port=70000, backend="keychain")
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+
+class TestBitwardenRouterItemLookup:
+    def test_ssh_port_from_human_bw_item_custom_field(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        item = {
+            "id": "abc",
+            "name": "router.asus.com (13Maschine)",
+            "login": {
+                "username": "admin",
+                "password": "s3cret",
+                "uris": [{"uri": "http://router.asus.com"}],
+            },
+            "fields": [{"name": "SSH Port", "value": "1313"}],
+        }
+
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: item)
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "unlocked")
+
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+        user, pw = creds.get_router_credentials(host_hint="router.asus.com")
+        assert user == "admin"
+        assert pw == "s3cret"
+
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            config_ssh_port=22,
+            preferred_backend="bitwarden",
+        )
+        assert defaults["ssh_port"] == 1313
+        assert defaults["username"] == "admin"
+        assert defaults["password"] == "s3cret"
+        assert defaults["credential_backend"] == "bitwarden"
+        assert "1313" in str(defaults.get("store_detail") or "")
+
+    def test_bw_password_strips_whitespace(self):
+        from asusroutercontrol.credentials import _credentials_from_bitwarden_item
+
+        item = {
+            "login": {
+                "username": " admin ",
+                "password": " s3cret\n",
+            }
+        }
+        user, pw = _credentials_from_bitwarden_item(item)
+        assert user == "admin"
+        assert pw == "s3cret"
+
+    def test_fuzzy_and_uri_ssh_port_parsing(self):
+        from asusroutercontrol.credentials import _ssh_port_from_bitwarden_item
+
+        fuzzy = {
+            "fields": [{"name": "Router SSH Port Number", "value": "1313"}],
+            "login": {"uris": []},
+        }
+        assert _ssh_port_from_bitwarden_item(fuzzy) == 1313
+
+        uri_item = {
+            "fields": [],
+            "login": {"uris": [{"uri": "ssh://admin@router.asus.com:2222"}]},
+        }
+        assert _ssh_port_from_bitwarden_item(uri_item) == 2222
+
+    def test_locked_vault_detail_always_shown(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="keychain",
+        )
+        assert defaults["ssh_port"] == 22
+        assert defaults["username"] == ""
+        assert "locked" in str(defaults.get("store_detail") or "").lower()
+        assert "login name" in str(defaults.get("store_detail") or "").lower()
+
+    def test_env_router_username_used_when_store_empty(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="keychain",
+        )
+        assert defaults["username"] == "13Maschine"
+
+    def test_env_username_overrides_stale_keychain_admin(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        assert creds.store_credential("router_username", "admin", backend="keychain")
+        assert creds.store_credential("router_password", "secret", backend="keychain")
+        user, pw = creds.get_router_credentials(host_hint="router.asus.com")
+        assert user == "13Maschine"
+        assert pw == "secret"
+
+    def test_item_match_prefers_title_with_host(self):
+        from asusroutercontrol.credentials import _bw_item_matches_host
+
+        item = {"name": "router.asus.com (13Maschine)", "login": {"uris": []}}
+        assert _bw_item_matches_host(item, "router.asus.com") is True
+        assert _bw_item_matches_host(item, "other.example") is False
+
+
+
+    def test_resolve_reports_locked_vault(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="bitwarden",
+        )
+        assert defaults["ssh_port"] == 22
+        assert "locked" in str(defaults.get("store_detail") or "").lower()

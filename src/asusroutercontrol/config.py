@@ -25,7 +25,7 @@ class Config:
     use_ssl: bool = False
     polling_interval: int = 60
     data_dir: Path = field(default_factory=lambda: Path.home() / ".asusroutercontrol")
-    ssh_port: int = 1313
+    ssh_port: int = 22
     ssh_trust_mode: str = "tofu_confirm"  # strict | tofu_confirm | tofu_auto
     ssh_host_key_fingerprint: str | None = None  # e.g. SHA256:...
     ssh_known_hosts_path: Path | None = None
@@ -123,6 +123,47 @@ def _resolve_env_file(explicit_env_file: str | Path | None) -> Path | None:
     return Path(candidate).expanduser()
 
 
+def _apply_active_profile(cfg: Config) -> Config:
+    """Overlay active profile connection fields unless env explicitly set them.
+
+    Precedence: defaults < profile < explicit environment variables.
+    Lab setups keep SSH_PORT=1313 via .env; customer profiles default to port 22.
+    """
+    try:
+        from asusroutercontrol.profile import apply_profile, load_profiles
+    except Exception:
+        return cfg
+
+    store = load_profiles(cfg.data_dir, runtime_env=cfg.runtime_env)
+    profile = store.active
+    if profile is None:
+        return cfg
+
+    overlaid = apply_profile(cfg, profile)
+    updates: dict = {}
+    if "ROUTER_HOST" in os.environ:
+        updates["router_host"] = cfg.router_host
+    if "ROUTER_PORT" in os.environ:
+        updates["router_port"] = cfg.router_port
+    if "USE_SSL" in os.environ:
+        updates["use_ssl"] = cfg.use_ssl
+    if "ROUTER_BACKEND" in os.environ:
+        updates["router_backend"] = cfg.router_backend
+    if "SSH_PORT" in os.environ:
+        updates["ssh_port"] = cfg.ssh_port
+    if "SSH_TRUST_MODE" in os.environ:
+        updates["ssh_trust_mode"] = cfg.ssh_trust_mode
+    if "SSH_HOST_KEY_FINGERPRINT" in os.environ:
+        updates["ssh_host_key_fingerprint"] = cfg.ssh_host_key_fingerprint
+    if _RUNTIME_ENV_VAR in os.environ:
+        updates["runtime_env"] = cfg.runtime_env
+    if not updates:
+        return overlaid
+    from dataclasses import replace as _replace
+    return _replace(overlaid, **updates)
+
+
+
 def load_config(
     env_file: str | Path | None = None,
     runtime_env: str | None = None,
@@ -148,7 +189,7 @@ def load_config(
         use_ssl=os.environ.get("USE_SSL", "false").lower() in ("true", "1", "yes"),
         polling_interval=int(os.environ.get("POLLING_INTERVAL", "60")),
         data_dir=data_dir,
-        ssh_port=int(os.environ.get("SSH_PORT", "1313")),
+        ssh_port=int(os.environ.get("SSH_PORT", "22")),
         ssh_trust_mode=os.environ.get("SSH_TRUST_MODE", "tofu_confirm").strip().lower(),
         ssh_host_key_fingerprint=(
             os.environ.get("SSH_HOST_KEY_FINGERPRINT", "").strip() or None
@@ -178,4 +219,4 @@ def load_config(
         probe_client_cap=int(os.environ.get("PROBE_CLIENT_CAP", "20")),
     )
     ensure_runtime_data_dir_isolation(cfg, runtime_env=resolved_runtime_env)
-    return cfg
+    return _apply_active_profile(cfg)

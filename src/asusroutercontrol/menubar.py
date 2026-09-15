@@ -30,14 +30,19 @@ from AppKit import (
     NSFontAttributeName,
     NSImage,
     NSImageRight,
+    NSMakeRect,
     NSMenu,
     NSMenuItem,
     NSObject,
+    NSPopUpButton,
+    NSSecureTextField,
     NSStatusBar,
+    NSTextField,
     NSTimer,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSVariableStatusItemLength,
+    NSView,
 )
 from PyObjCTools import AppHelper
 
@@ -47,6 +52,14 @@ from asusroutercontrol.analysis.clients import (
     format_client_rate_display,
 )
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
+from asusroutercontrol.connection_monitor import (
+    ConnectionMonitorState,
+    connected_state,
+    connecting_state,
+    should_notify_transition,
+    state_from_profile,
+    unable_state,
+)
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -273,6 +286,12 @@ class AppDelegate(NSObject):
         self._last_device_count = None
         self._last_saturation_notify = None
         self._degraded = False
+        self._connection_state = ConnectionMonitorState(phase="unknown")
+        self._last_notified_connection_phase = None
+        self._connection_last_error = None
+        self._health_fail_count = 0
+        self._health_retry_seconds = 60.0
+        self._health_retries_paused = False
         self._spinner_timer = None
         self._spinner_frame = 0
 
@@ -301,14 +320,33 @@ class AppDelegate(NSObject):
 
     def _startup_health_check(self):
         """Check router backend reachability before starting scheduler."""
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showConnectingStatus:", host, False
+        )
         from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
         from asusroutercontrol.ssh import RouterSSH
 
         async def _check_backend():
-            username, password = get_router_credentials()
+            from asusroutercontrol.connect import format_http_probe_error
+            from asusroutercontrol.credentials import load_runtime_env_files
+
+            load_runtime_env_files()
+            username, password = get_router_credentials(host_hint=host)
             if not username or not password:
-                raise RuntimeError("Missing router credentials")
+                raise RuntimeError(
+                    "Missing router credentials. Connect Router with the "
+                    "Administration → System login name "
+                    "(e.g. 13Maschine, not admin)."
+                )
+            log.info(
+                "Health check LOGIN as user=%r host=%s port=%s ssl=%s",
+                username,
+                self._cfg.router_host,
+                self._cfg.router_port,
+                self._cfg.use_ssl,
+            )
             backend = create_backend(
                 self._cfg,
                 username=username,
@@ -316,6 +354,12 @@ class AppDelegate(NSObject):
             )
             try:
                 await backend.connect()
+            except Exception as exc:
+                raise RuntimeError(
+                    format_http_probe_error(
+                        exc, host=str(self._cfg.router_host), username=username
+                    )
+                ) from exc
             finally:
                 try:
                     await backend.disconnect()
@@ -330,11 +374,17 @@ class AppDelegate(NSObject):
         try:
             asyncio.run(_check_backend())
         except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
             log.warning(
                 "Router backend unreachable: %s — entering degraded mode",
-                exc,
+                detail,
             )
             self._degraded = True
+            self._health_fail_count += 1
+            self._connection_last_error = detail[:200]
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "showUnableStatus:", detail[:200], False
+            )
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "enterDegradedMode:", None, False
             )
@@ -351,8 +401,32 @@ class AppDelegate(NSObject):
 
         log.info("Router reachable — starting scheduler")
         self._degraded = False
+        self._health_fail_count = 0
+        self._health_retry_seconds = 60.0
+        self._health_retries_paused = False
+        self._connection_last_error = None
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showConnectedStatus:", None, False
+        )
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "startAfterHealthCheck:", None, False
+        )
+
+    @staticmethod
+    def _is_login_auth_failure(detail: str | None) -> bool:
+        text = (detail or "").lower()
+        return any(
+            token in text
+            for token in (
+                "cannot access",
+                "endpointservice.login",
+                "async_connect",
+                "rejected login",
+                "captcha",
+                "temporarily locked",
+                "wrong credentials",
+                "access error",
+            )
         )
 
     @objc.typedSelector(b"v@:@")
@@ -369,17 +443,41 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router backend unreachable — run in degraded mode and retry health check."""
+        """Router backend unreachable — run degraded; back off LOGIN retries hard."""
         self._set_status_icon("Degraded (retrying health)")
         self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
         self._ensure_runtime_started()
+
+        auth_fail = self._is_login_auth_failure(self._connection_last_error)
+        if auth_fail and self._health_fail_count >= 3:
+            self._health_retries_paused = True
+            self._mi_sched_status.setTitle_(
+                "Scheduler: ● Degraded — use Connect Router (LOGIN retries paused)"
+            )
+            log.warning(
+                "Paused automatic health LOGIN retries after %s failures "
+                "(avoids Captcha lockout). Fix credentials/Captcha, then Connect Router.",
+                self._health_fail_count,
+            )
+            return
+
+        if auth_fail:
+            # 5 → 10 → 15 min — repeated LOGIN failures trigger router Captcha.
+            delay = min(900.0, max(300.0, self._health_retry_seconds * 2))
+        else:
+            delay = min(300.0, max(60.0, self._health_retry_seconds * 1.5))
+        self._health_retry_seconds = delay
+        log.info("Scheduling health retry in %.0fs (auth_fail=%s)", delay, auth_fail)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            60.0, self, "retryHealthCheck:", None, False
+            delay, self, "retryHealthCheck:", None, False
         )
 
     @objc.typedSelector(b"v@:@")
     def retryHealthCheck_(self, _):
-        """Retry the health check."""
+        """Retry the health check unless LOGIN retries were paused."""
+        if self._health_retries_paused:
+            log.info("Health LOGIN retries paused — waiting for Connect Router")
+            return
         threading.Thread(
             target=self._startup_health_check, name="health-retry", daemon=True
         ).start()
@@ -443,10 +541,13 @@ class AppDelegate(NSObject):
 
         self._mi_speedtest = _add_action(menu, "▶ Run Speed Test", "runSpeedTest:", self)
         self._mi_report = _add_action(menu, "📊 Generate Report", "genReport:", self)
+        self._mi_connect = _add_action(menu, "🔌 Connect Router...", "connectRouter:", self)
         _add_action(menu, "🔄 Reboot Router...", "rebootRouter:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self._mi_sched_status = _add_info(menu, "Scheduler: starting...")
+        self._mi_connection = _add_info(menu, "Connection: Unknown")
+        self._mi_capabilities = _add_info(menu, "Capabilities: checking...")
         _add_action(menu, "Open Log File", "openLog:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1025,6 +1126,81 @@ class AppDelegate(NSObject):
         dot = "●" if alive else "○"
         status = "Running" if alive else "Stopped"
         self._mi_sched_status.setTitle_(f"Scheduler: {dot} {status}")
+        self._refresh_capability_status()
+
+
+    def _set_connection_state(
+        self,
+        state: ConnectionMonitorState,
+        *,
+        notify: bool = True,
+    ) -> None:
+        """Update connection menu/tooltip and optionally notify on transitions."""
+        previous = getattr(self, "_connection_state", None)
+        self._connection_state = state
+        if state.phase == "unable" and state.detail:
+            self._connection_last_error = state.detail
+        try:
+            self._mi_connection.setTitle_(state.menu_title)
+        except Exception:
+            log.debug("Connection menu item not ready", exc_info=True)
+        try:
+            self._set_status_icon(state.tooltip)
+        except Exception:
+            log.debug("Status icon update failed", exc_info=True)
+
+        if notify and should_notify_transition(previous, state):
+            note = state.notification
+            if note:
+                _notify(note[0], note[1], note[2])
+            self._last_notified_connection_phase = state.phase
+
+    def _refresh_capability_status(self) -> None:
+        """Show HTTP/SSH capability chips from the active router profile."""
+        try:
+            from asusroutercontrol.profile import load_profiles
+
+            profile = load_profiles(
+                self._cfg.data_dir, runtime_env=self._cfg.runtime_env
+            ).active
+        except Exception:
+            profile = None
+        if profile is None:
+            self._mi_capabilities.setTitle_("Capabilities: HTTP ? · SSH ?")
+            if (
+                getattr(self, "_connection_state", None) is None
+                or self._connection_state.phase != "connecting"
+            ):
+                self._set_connection_state(
+                    ConnectionMonitorState(phase="unknown"),
+                    notify=False,
+                )
+            return
+        http = "✓" if profile.http_ok else ("—" if profile.http_ok is False else "?")
+        if not profile.ssh_enabled:
+            ssh = "off"
+        elif profile.ssh_ok is True:
+            ssh = "✓"
+        elif profile.ssh_ok is False:
+            ssh = "—"
+        else:
+            ssh = "?"
+        self._mi_capabilities.setTitle_(f"Capabilities: HTTP {http} · SSH {ssh}")
+        # Keep connection monitor in sync with profile capability flags.
+        if (
+            getattr(self, "_connection_state", None) is None
+            or self._connection_state.phase != "connecting"
+        ):
+            self._set_connection_state(
+                state_from_profile(
+                    host=getattr(profile, "host", None) if profile else None,
+                    http_ok=getattr(profile, "http_ok", None) if profile else None,
+                    ssh_ok=getattr(profile, "ssh_ok", None) if profile else None,
+                    ssh_enabled=bool(getattr(profile, "ssh_enabled", True)) if profile else True,
+                    last_error=self._connection_last_error,
+                ),
+                notify=False,
+            )
 
     # ------------------------------------------------------------------
     # Actions
@@ -1160,6 +1336,265 @@ class AppDelegate(NSObject):
         self._mi_report.setTitle_("📊 Generate Report")
 
     @objc.typedSelector(b"v@:@")
+    def connectRouter_(self, sender):
+        """Guided connect flow: HTTP required, SSH optional, BW/Keychain credentials."""
+        from asusroutercontrol.credentials import resolve_connect_login_defaults
+        from asusroutercontrol.discovery import discover_router_candidates, pick_default_host
+
+        candidates = discover_router_candidates(http_port=80, probe=True)
+        suggested = pick_default_host(candidates)
+        defaults = resolve_connect_login_defaults(
+            suggested_host=suggested,
+            config_ssh_port=int(getattr(self._cfg, "ssh_port", 22) or 22),
+        )
+        stored_password = str(defaults.get("password") or "")
+
+        alert = NSAlert.new()
+        alert.setMessageText_("Connect Router")
+        info = (
+            "HTTP admin login is required. SSH is optional.\n"
+            "Enter host/username/password/SSH port manually, or reuse them from Bitwarden/Keychain."
+        )
+        detail = defaults.get("store_detail")
+        if detail:
+            info += f"\n{detail}"
+        if defaults.get("password_from_store"):
+            info += "\nPassword can be left blank to reuse the stored password."
+        alert.setInformativeText_(info)
+        alert.addButtonWithTitle_("Connect")
+        alert.addButtonWithTitle_("Cancel")
+
+        accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 150))
+
+        def _label(text_value: str, y: float):
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 90, 22))
+            field.setStringValue_(text_value)
+            field.setBezeled_(False)
+            field.setDrawsBackground_(False)
+            field.setEditable_(False)
+            accessory.addSubview_(field)
+
+        def _field(y: float, value: str = "", secure: bool = False):
+            cls = NSSecureTextField if secure else NSTextField
+            field = cls.alloc().initWithFrame_(NSMakeRect(100, y, 210, 22))
+            field.setStringValue_(value)
+            accessory.addSubview_(field)
+            return field
+
+        _label("Host", 120)
+        host_field = _field(120, str(defaults["host"] or suggested))
+        _label("Username", 90)
+        user_field = _field(90, str(defaults["username"] or ""))
+        _label("Password", 60)
+        pass_field = _field(60, "", secure=True)
+        _label("SSH port", 30)
+        ssh_field = _field(30, str(defaults["ssh_port"] or 22))
+        _label("Store in", 0)
+        backend_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(100, 0, 210, 22), False
+        )
+        backend_popup.removeAllItems()
+        backend_popup.addItemsWithTitles_(["keychain", "bitwarden"])
+        preferred = str(defaults.get("credential_backend") or "keychain")
+        if preferred not in ("keychain", "bitwarden"):
+            preferred = "keychain"
+        backend_popup.selectItemWithTitle_(preferred)
+        accessory.addSubview_(backend_popup)
+
+        alert.setAccessoryView_(accessory)
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            return
+
+        host = host_field.stringValue().strip()
+        username = user_field.stringValue().strip()
+        password = (pass_field.stringValue() or stored_password).strip()
+        credential_backend = backend_popup.titleOfSelectedItem() or "keychain"
+        if credential_backend not in ("keychain", "bitwarden"):
+            credential_backend = "keychain"
+        try:
+            ssh_port = int(ssh_field.stringValue().strip() or "22")
+        except ValueError:
+            ssh_port = 22
+        # Safety net: if the dialog still shows default 22, re-read Bitwarden
+        # using the host the user actually entered (vault may have unlocked
+        # after the dialog opened, or search needed the typed host).
+        if ssh_port == 22:
+            try:
+                from asusroutercontrol.credentials import get_router_ssh_port
+
+                bw_port = get_router_ssh_port(host_hint=host or suggested)
+                if bw_port is not None and bw_port != 22:
+                    log.info(
+                        "Connect: overriding SSH port 22 with Bitwarden port %s",
+                        bw_port,
+                    )
+                    ssh_port = bw_port
+            except Exception:
+                log.debug("Connect SSH port re-resolve failed", exc_info=True)
+        if not host or not username or not password:
+            _notify(
+                "Connect Failed",
+                "",
+                "Host, username, and password are required. "
+                "Username is the Router Login Name "
+                "(Administration → System) — often not 'admin'.",
+            )
+            return
+
+        self._set_connection_state(connecting_state(host), notify=True)
+        try:
+            self._mi_connect.setTitle_("🔌 Connecting…")
+            self._mi_connect.setEnabled_(False)
+        except Exception:
+            pass
+        threading.Thread(
+            target=self._do_connect,
+            kwargs={
+                "host": host,
+                "username": username,
+                "password": password,
+                "ssh_port": ssh_port,
+                "credential_backend": credential_backend,
+            },
+            name="connect-router",
+            daemon=True,
+        ).start()
+
+    def _do_connect(
+        self,
+        *,
+        host: str,
+        username: str,
+        password: str,
+        ssh_port: int,
+        credential_backend: str = "keychain",
+    ):
+        try:
+            from asusroutercontrol.connect import setup_router_connection
+
+            result = asyncio.run(
+                setup_router_connection(
+                    host=host,
+                    username=username,
+                    password=password,
+                    http_port=80,
+                    use_ssl=False,
+                    backend=getattr(self._cfg, "router_backend", "merlin") or "merlin",
+                    ssh_enabled=True,
+                    ssh_port=ssh_port,
+                    credential_backend=credential_backend,
+                    cfg=self._cfg,
+                    data_dir=self._cfg.data_dir,
+                    discover=False,
+                )
+            )
+            self._connection_last_error = None
+            self._health_fail_count = 0
+            self._health_retry_seconds = 60.0
+            self._health_retries_paused = False
+            # Reload config so subsequent actions see the new profile.
+            self._cfg = load_config()
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "finishConnectSuccess:", result.profile.host, False
+            )
+        except Exception as exc:
+            log.exception("Connect router failed")
+            detail = str(exc).strip() or exc.__class__.__name__
+            if len(detail) > 400:
+                detail = detail[:397] + "..."
+            self._connection_last_error = detail
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "finishConnectFailure:", detail, False
+            )
+
+    @objc.typedSelector(b"v@:@")
+    def refreshCapabilityStatus_(self, _):
+        self._refresh_capability_status()
+
+    @objc.typedSelector(b"v@:@")
+    def showConnectingStatus_(self, host):
+        host_s = str(host) if host else "router"
+        self._set_connection_state(connecting_state(host_s), notify=True)
+        try:
+            self._mi_connect.setTitle_("🔌 Connecting…")
+            self._mi_connect.setEnabled_(False)
+        except Exception:
+            pass
+
+    @objc.typedSelector(b"v@:@")
+    def showUnableStatus_(self, detail):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self._set_connection_state(
+            unable_state(host, str(detail) if detail else "unreachable"),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+
+    @objc.typedSelector(b"v@:@")
+    def showConnectedStatus_(self, _):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self._set_connection_state(
+            connected_state(host, http_ok=True, ssh_ok=None, ssh_enabled=True),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+        self._refresh_capability_status()
+
+
+    @objc.typedSelector(b"v@:@")
+    def finishConnectSuccess_(self, host):
+        host_s = str(host) if host else getattr(self._cfg, "router_host", None) or "router"
+        try:
+            from asusroutercontrol.profile import load_profiles
+            profile = load_profiles(self._cfg.data_dir, runtime_env=self._cfg.runtime_env).active
+        except Exception:
+            profile = None
+        self._set_connection_state(
+            connected_state(
+                host_s,
+                http_ok=True,
+                ssh_ok=getattr(profile, "ssh_ok", None) if profile else None,
+                ssh_enabled=bool(getattr(profile, "ssh_enabled", True)) if profile else True,
+            ),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+        self._refresh_capability_status()
+
+    @objc.typedSelector(b"v@:@")
+    def finishConnectFailure_(self, detail):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        detail_s = str(detail) if detail else "connect failed"
+        self._set_connection_state(
+            unable_state(host, detail_s),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+        try:
+            alert = NSAlert.new()
+            alert.setMessageText_("Unable to Connect")
+            alert.setInformativeText_(detail_s)
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+        except Exception:
+            log.debug("Failed to show connect failure alert", exc_info=True)
+    @objc.typedSelector(b"v@:@")
     def rebootRouter_(self, sender):
         alert = NSAlert.new()
         alert.setMessageText_("Reboot Router?")
@@ -1289,6 +1724,12 @@ def main() -> None:
             pass
         sys.exit(78)  # EX_CONFIG
     runtime_env = _runtime_environment()
+    try:
+        from asusroutercontrol.credentials import load_runtime_env_files
+
+        load_runtime_env_files()
+    except Exception:
+        pass
     cfg = load_config(runtime_env=runtime_env)
     ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
     cfg = load_config(runtime_env=runtime_env)

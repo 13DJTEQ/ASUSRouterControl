@@ -1,0 +1,25 @@
+---
+description: Rebuild ASUSRouterControl DEV.app after every implementation pass before verification
+alwaysApply: true
+---
+
+# Rebuild DEV.app after each pass
+
+After every implementation or fix pass that touches menubar, packaging, credentials UI, connect flow, scheduler UI, or any code that ships inside the macOS menubar app:
+
+1. Commit and push the pass first.
+2. On a **macOS** machine with the feature branch checked out, run a fresh DEV rebuild:
+
+```bash
+make build-dev-app
+make verify-dev-app
+open "testbuilds/ASUSRouterControl DEV.app"
+```
+
+3. Do **not** ask humans to verify against a stale `testbuilds/` bundle or a production DMG.
+4. Cloud / Linux agents **cannot** produce a runnable `.app` (AppKit / PyObjC / `LSUIElement` require macOS). When working from a non-macOS agent:
+   - Still treat the rebuild as mandatory for verification.
+   - Tell the operator the exact pull + `make build-dev-app` commands for their Mac.
+   - Do not claim the DEV app was rebuilt from the cloud environment.
+
+5. Prefer the active feature branch checkout — never rebuild from an unrelated branch (e.g. phase1 docs) when verifying connect/monitor work.
