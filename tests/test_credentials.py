@@ -367,3 +367,50 @@ class TestDeleteLegacyCredentials:
             )
             is None
         )
+
+
+# ---------------------------------------------------------------------------
+# Router SSH port + connect defaults
+# ---------------------------------------------------------------------------
+
+
+class TestRouterConnectionSecrets:
+    def test_store_and_get_ssh_port(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import (
+            get_router_ssh_port,
+            store_router_credentials,
+        )
+
+        store_router_credentials("admin", "secret", ssh_port=1313, backend="keychain")
+        assert get_router_ssh_port() == 1313
+
+    def test_resolve_connect_login_defaults_prefills(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import (
+            resolve_connect_login_defaults,
+            store_router_credentials,
+        )
+
+        store_router_credentials("labadmin", "pw", ssh_port=2222, backend="keychain")
+        defaults = resolve_connect_login_defaults(
+            suggested_host="192.168.50.1",
+            config_ssh_port=22,
+            preferred_backend="keychain",
+        )
+        assert defaults["host"] == "192.168.50.1"
+        assert defaults["username"] == "labadmin"
+        assert defaults["password"] == "pw"
+        assert defaults["ssh_port"] == 2222
+        assert defaults["credential_backend"] == "keychain"
+        assert defaults["password_from_store"] is True
+
+    def test_invalid_ssh_port_rejected(self, monkeypatch, mem_keyring):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        from asusroutercontrol.credentials import store_router_credentials
+
+        try:
+            store_router_credentials("a", "b", ssh_port=70000, backend="keychain")
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass

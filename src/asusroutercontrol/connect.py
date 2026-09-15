@@ -170,6 +170,7 @@ async def setup_router_connection(
     stored_backend = store_router_credentials(
         username,
         password,
+        ssh_port=ssh_port,
         env=namespace,
         backend=credential_backend,
     )

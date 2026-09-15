@@ -33,6 +33,7 @@ from AppKit import (
     NSMakeRect,
     NSMenu,
     NSMenuItem,
+    NSPopUpButton,
     NSObject,
     NSSecureTextField,
     NSStatusBar,
@@ -1266,26 +1267,35 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def connectRouter_(self, sender):
-        """Guided connect flow: HTTP required, SSH optional, Keychain credentials."""
+        """Guided connect flow: HTTP required, SSH optional, BW/Keychain credentials."""
+        from asusroutercontrol.credentials import resolve_connect_login_defaults
         from asusroutercontrol.discovery import discover_router_candidates, pick_default_host
 
         candidates = discover_router_candidates(http_port=80, probe=True)
         suggested = pick_default_host(candidates)
+        defaults = resolve_connect_login_defaults(
+            suggested_host=suggested,
+            config_ssh_port=int(getattr(self._cfg, "ssh_port", 22) or 22),
+        )
+        stored_password = str(defaults.get("password") or "")
 
         alert = NSAlert.new()
         alert.setMessageText_("Connect Router")
-        alert.setInformativeText_(
+        info = (
             "HTTP admin login is required. SSH is optional.\n"
-            "Credentials are stored in macOS Keychain."
+            "Login and SSH port are loaded from / saved to Bitwarden or Keychain."
         )
+        if defaults.get("password_from_store"):
+            info += "\nPassword field can be left blank to reuse the stored password."
+        alert.setInformativeText_(info)
         alert.addButtonWithTitle_("Connect")
         alert.addButtonWithTitle_("Cancel")
 
-        accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 120))
+        accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 150))
 
-        def _label(text: str, y: float):
+        def _label(text_value: str, y: float):
             field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 90, 22))
-            field.setStringValue_(text)
+            field.setStringValue_(text_value)
             field.setBezeled_(False)
             field.setDrawsBackground_(False)
             field.setEditable_(False)
@@ -1298,14 +1308,25 @@ class AppDelegate(NSObject):
             accessory.addSubview_(field)
             return field
 
-        _label("Host", 90)
-        host_field = _field(90, suggested)
-        _label("Username", 60)
-        user_field = _field(60, "admin")
-        _label("Password", 30)
-        pass_field = _field(30, "", secure=True)
-        _label("SSH port", 0)
-        ssh_field = _field(0, str(getattr(self._cfg, "ssh_port", 22) or 22))
+        _label("Host", 120)
+        host_field = _field(120, str(defaults["host"] or suggested))
+        _label("Username", 90)
+        user_field = _field(90, str(defaults["username"] or "admin"))
+        _label("Password", 60)
+        pass_field = _field(60, "", secure=True)
+        _label("SSH port", 30)
+        ssh_field = _field(30, str(defaults["ssh_port"] or 22))
+        _label("Store in", 0)
+        backend_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(100, 0, 210, 22), False
+        )
+        backend_popup.removeAllItems()
+        backend_popup.addItemsWithTitles_(["keychain", "bitwarden"])
+        preferred = str(defaults.get("credential_backend") or "keychain")
+        if preferred not in ("keychain", "bitwarden"):
+            preferred = "keychain"
+        backend_popup.selectItemWithTitle_(preferred)
+        accessory.addSubview_(backend_popup)
 
         alert.setAccessoryView_(accessory)
         if alert.runModal() != NSAlertFirstButtonReturn:
@@ -1313,13 +1334,20 @@ class AppDelegate(NSObject):
 
         host = host_field.stringValue().strip()
         username = user_field.stringValue().strip() or "admin"
-        password = pass_field.stringValue()
+        password = pass_field.stringValue() or stored_password
+        credential_backend = backend_popup.titleOfSelectedItem() or "keychain"
+        if credential_backend not in ("keychain", "bitwarden"):
+            credential_backend = "keychain"
         try:
             ssh_port = int(ssh_field.stringValue().strip() or "22")
         except ValueError:
             ssh_port = 22
         if not host or not password:
-            _notify("Connect Failed", "", "Host and password are required")
+            _notify(
+                "Connect Failed",
+                "",
+                "Host and password are required (or store them in Bitwarden/Keychain first)",
+            )
             return
 
         self._set_connection_state(connecting_state(host), notify=True)
@@ -1335,12 +1363,21 @@ class AppDelegate(NSObject):
                 "username": username,
                 "password": password,
                 "ssh_port": ssh_port,
+                "credential_backend": credential_backend,
             },
             name="connect-router",
             daemon=True,
         ).start()
 
-    def _do_connect(self, *, host: str, username: str, password: str, ssh_port: int):
+    def _do_connect(
+        self,
+        *,
+        host: str,
+        username: str,
+        password: str,
+        ssh_port: int,
+        credential_backend: str = "keychain",
+    ):
         try:
             from asusroutercontrol.connect import setup_router_connection
 
@@ -1354,7 +1391,7 @@ class AppDelegate(NSObject):
                     backend=getattr(self._cfg, "router_backend", "merlin") or "merlin",
                     ssh_enabled=True,
                     ssh_port=ssh_port,
-                    credential_backend="keychain",
+                    credential_backend=credential_backend,
                     cfg=self._cfg,
                     data_dir=self._cfg.data_dir,
                     discover=False,

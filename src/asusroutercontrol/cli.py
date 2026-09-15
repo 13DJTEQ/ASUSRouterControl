@@ -1210,18 +1210,44 @@ def setup(host, http_port, ssh_port, ssh, credential_backend, router_backend):
             console.print(f"  {mark} {c.host} ({c.source})")
         console.print()
 
+    from asusroutercontrol.credentials import (
+        get_router_credentials,
+        get_router_ssh_port,
+        resolve_connect_login_defaults,
+    )
+
+    saved_user, saved_pass = get_router_credentials()
+    saved_port = get_router_ssh_port()
+    defaults = resolve_connect_login_defaults(
+        suggested_host=suggested,
+        config_ssh_port=int(ssh_port or 22),
+        preferred_backend=credential_backend,
+    )
+
     resolved_host = click.prompt("Router host", default=suggested)
-    username = click.prompt("Router username", default="admin")
-    password = click.prompt("Router password", hide_input=True)
+    username = click.prompt("Router username", default=str(defaults["username"] or "admin"))
+    password_prompt = "Router password"
+    if saved_pass:
+        password_prompt += " [leave blank to reuse stored]"
+    password = click.prompt(password_prompt, hide_input=True, default="", show_default=False)
+    password = password or saved_pass or ""
+    if not password:
+        raise click.ClickException(
+            "Password is required (or store it in Bitwarden/Keychain first)."
+        )
     use_ssl = click.confirm("Use HTTPS?", default=False)
     ssh_enabled = ssh
     if ssh_enabled:
         ssh_enabled = click.confirm("Probe SSH on this router?", default=True)
-    resolved_ssh_port = ssh_port
+    resolved_ssh_port = int(defaults["ssh_port"] or ssh_port or 22)
     if ssh_enabled:
-        resolved_ssh_port = click.prompt("SSH port", default=ssh_port, type=int)
+        resolved_ssh_port = click.prompt(
+            "SSH port",
+            default=saved_port or ssh_port,
+            type=int,
+        )
 
-    cred_backend = credential_backend or _active_backend_name()
+    cred_backend = credential_backend or str(defaults["credential_backend"] or _active_backend_name())
     console.print(f"\n[dim]Credential backend: {cred_backend}[/dim]")
 
     try:

@@ -686,31 +686,81 @@ def delete_credential(key: str, *, env: str = DEFAULT_ENV) -> bool:
 # ---------------------------------------------------------------------------
 # Router-specific helpers
 # ---------------------------------------------------------------------------
-_ROUTER_KEYS = ("router_username", "router_password")
+_ROUTER_KEYS = ("router_username", "router_password", "router_ssh_port")
+_GUI_CREDENTIAL_BACKENDS = ("bitwarden", "keychain")
+
+
+def _runtime_credential_env() -> str:
+    return os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
 
 
 def get_router_credentials() -> tuple[str | None, str | None]:
     """Return (username, password) for router access using the runtime env."""
-    env = os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
+    env = _runtime_credential_env()
     return (
         get_credential("router_username", env=env),
         get_credential("router_password", env=env),
     )
 
 
+def get_router_ssh_port() -> int | None:
+    """Return stored SSH port from Bitwarden/Keychain (or other backends), if any."""
+    raw = get_credential("router_ssh_port", env=_runtime_credential_env())
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        port = int(str(raw).strip())
+    except ValueError:
+        log.warning("Ignoring non-integer router_ssh_port value from credential store")
+        return None
+    if not 1 <= port <= 65535:
+        log.warning("Ignoring out-of-range router_ssh_port=%s from credential store", port)
+        return None
+    return port
+
+
+def resolve_connect_login_defaults(
+    *,
+    suggested_host: str,
+    config_ssh_port: int = 22,
+    preferred_backend: str | None = None,
+) -> dict[str, str | int | None]:
+    """Defaults for Connect Router UI / CLI, sourced from BW/Keychain when present."""
+    username, password = get_router_credentials()
+    stored_port = get_router_ssh_port()
+    active = _active_backend_name()
+    if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
+        backend = preferred_backend
+    elif active in _GUI_CREDENTIAL_BACKENDS:
+        backend = active
+    else:
+        backend = "keychain"
+    ssh_port = stored_port if stored_port is not None else int(config_ssh_port or 22)
+    return {
+        "host": suggested_host,
+        "username": username or "admin",
+        "password": password or "",
+        "ssh_port": ssh_port,
+        "credential_backend": backend,
+        "password_from_store": bool(password),
+    }
+
+
 def store_router_credentials(
     username: str,
     password: str,
     *,
+    ssh_port: int | None = None,
     env: str | None = None,
     backend: str | None = None,
 ) -> str:
-    """Store router username/password.
+    """Store router username/password and optional SSH port.
 
-    Returns the backend name used. Menubar/setup UI should pass
-    ``backend="keychain"``; CLI setup keeps the process default (Bitwarden).
+    Returns the backend name used. Connect UI may pass ``backend="keychain"`` or
+    ``backend="bitwarden"``; CLI setup keeps the process default (Bitwarden) unless
+    overridden.
     """
-    resolved_env = env or os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod")
+    resolved_env = env or _runtime_credential_env()
     target_name = (backend or _active_backend_name()).strip().lower()
     ok_user = store_credential(
         "router_username", username, env=resolved_env, backend=target_name
@@ -718,7 +768,15 @@ def store_router_credentials(
     ok_pass = store_credential(
         "router_password", password, env=resolved_env, backend=target_name
     )
-    if not (ok_user and ok_pass):
+    ok_port = True
+    if ssh_port is not None:
+        port = int(ssh_port)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"Invalid ssh_port: {port}")
+        ok_port = store_credential(
+            "router_ssh_port", str(port), env=resolved_env, backend=target_name
+        )
+    if not (ok_user and ok_pass and ok_port):
         raise RuntimeError(f"Failed to store router credentials in {target_name}")
     return target_name
 

@@ -63,9 +63,10 @@ async def test_setup_router_connection_persists_profile_and_creds(
 
     stored: dict[str, str] = {}
 
-    def _store(username, password, *, env=None, backend=None):
+    def _store(username, password, *, ssh_port=None, env=None, backend=None):
         stored["username"] = username
         stored["password"] = password
+        stored["ssh_port"] = ssh_port
         stored["backend"] = backend or "keychain"
         return stored["backend"]
 
@@ -88,6 +89,7 @@ async def test_setup_router_connection_persists_profile_and_creds(
     assert result.probe.http_ok is True
     assert result.credentials_backend == "keychain"
     assert stored["backend"] == "keychain"
+    assert stored["ssh_port"] == 1313
 
     loaded = load_profiles(tmp_path)
     assert loaded.active is not None
