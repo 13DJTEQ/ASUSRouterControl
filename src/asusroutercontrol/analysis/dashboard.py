@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.datastore import DataStore
 
 
@@ -14,9 +15,12 @@ def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        parsed = datetime.fromisoformat(ts)
     except Exception:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _timestamp_sort_key(row: dict) -> str:
@@ -28,6 +32,14 @@ def _in_window(ts: str | None, *, start: datetime, end: datetime) -> bool:
     parsed = _parse_iso(ts)
     if not parsed:
         return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
     return start <= parsed <= end
 
 
@@ -211,7 +223,7 @@ async def build_isp_client_dashboard(
 ) -> dict:
     """Return ISP + client dashboard payload over a shared lookback window."""
     bounded_hours = max(1, hours)
-    now = datetime.utcnow()
+    now = utcnow()
     window_start = now - timedelta(hours=bounded_hours)
     query_days = max(1, math.ceil(bounded_hours / 24))
 

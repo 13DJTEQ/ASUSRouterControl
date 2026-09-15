@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.models import Device, WANStatus
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def export_soundshield_json(
 ) -> None:
     """Write enriched device/network data for SoundShield consumption."""
     payload = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": utcnow().isoformat() + "Z",
         "devices": [
             {
                 "mac": d.mac,

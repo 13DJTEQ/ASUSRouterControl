@@ -32,7 +32,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ### Core shape
 - The project is a Python package (`src/asusroutercontrol`) with two primary entrypoints:
-  - CLI (`cli.py`, exposed as `asusrouter`)
+  - CLI (`cli/` package, exposed as `asusrouter`)
   - Menu bar app (`menubar.py`, exposed as `asusroutermonitor`)
 - Both entrypoints rely on shared config, credentials, backend adapters, SSH probes, and SQLite persistence.
 
@@ -42,9 +42,10 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with 1Password and keychain fallback migration helpers.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
-  - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).
-  - `backends/merlin.py` uses the `asusrouter` API (read + selected write operations).
-  - `backends/freshtomato.py` is SSH-driven and currently read-only for write operations.
+  - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` | `stock` | `asuswrt`; `freshtomato` hard-fails as deferred).
+  - `backends/asuswrt.py` (`AsusWrtBackend`) uses the `asusrouter` API for stock AsusWRT and Merlin (`flavor` gates JFFS/Entware/SSH probes).
+  - `backends/merlin.py` is a one-cycle compatibility alias of `AsusWrtBackend(flavor="merlin")`.
+  - `backends/freshtomato.py` remains an in-tree stub; selecting it raises `BackendDeferredError`.
   - `ssh.py` provides async SSH execution plus host-key trust/pinning logic (`strict`, `tofu_confirm`, `tofu_auto`).
 - **Persistence**
   - `datastore.py` is the central async SQLite layer (`router.db`) with schema creation, lightweight migrations, inserts, queries, retention pruning, and notification cooldown tracking.
@@ -60,7 +61,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - periodic recommendation generation,
   - daily retention pruning.
 - Scheduler loops use timeouts, rollback on failed DB cycles, and backoff after repeated failures.
-- Scheduler `_poll_loop` uses `backends.factory.create_backend` (respects `ROUTER_BACKEND`). Menubar reboot still constructs `MerlinBackend` directly in places — prefer factory for new code; Phase 2 renames that HTTP backend to `AsusWrtBackend`.
+- Scheduler `_poll_loop` and menubar reboot both use `backends.factory.create_backend` (respects `ROUTER_BACKEND`).
 
 ### Analysis, optimization, reporting pipeline
 - **Probes** (`probes.py`) gather low-level router signals over SSH, including tracked NVRAM snapshots and diffs.

@@ -22,39 +22,39 @@ from asusroutercontrol.models import ClientLoad, ConnectionType, Device
 
 
 def test_health_dot_green_low_load() -> None:
-    assert _health_dot(10.0, -50) == "🟢"
+    assert _health_dot(10.0, -50) == "ok"
 
 
 def test_health_dot_yellow_medium_load() -> None:
-    assert _health_dot(60.0, -50) == "🟡"
+    assert _health_dot(60.0, -50) == "warn"
 
 
 def test_health_dot_red_high_load() -> None:
-    assert _health_dot(85.0, -50) == "🔴"
+    assert _health_dot(85.0, -50) == "critical"
 
 
 def test_health_dot_red_weak_signal() -> None:
     """Weak RSSI forces red even at low load."""
-    assert _health_dot(10.0, -80) == "🔴"
+    assert _health_dot(10.0, -80) == "critical"
 
 
 def test_health_dot_green_no_rssi() -> None:
     """None RSSI should not force red."""
-    assert _health_dot(10.0, None) == "🟢"
+    assert _health_dot(10.0, None) == "ok"
 
 
 def test_health_dot_boundary_warn() -> None:
-    assert _health_dot(LOAD_WARN_PCT, -50) == "🟡"
+    assert _health_dot(LOAD_WARN_PCT, -50) == "warn"
 
 
 def test_health_dot_boundary_crit() -> None:
-    assert _health_dot(LOAD_CRIT_PCT, -50) == "🔴"
+    assert _health_dot(LOAD_CRIT_PCT, -50) == "critical"
 
 
 def test_health_dot_boundary_rssi() -> None:
     """Exactly at threshold is not weak."""
-    assert _health_dot(10.0, RSSI_WEAK_DBM) == "🟢"
-    assert _health_dot(10.0, RSSI_WEAK_DBM - 1) == "🔴"
+    assert _health_dot(10.0, RSSI_WEAK_DBM) == "ok"
+    assert _health_dot(10.0, RSSI_WEAK_DBM - 1) == "critical"
 
 
 # --- compute_client_loads ---
@@ -84,7 +84,7 @@ def test_compute_loads_basic() -> None:
     assert cl.mac == "AA:BB:CC:DD:EE:FF"
     # 300 / 600 * 100 = 50%
     assert cl.load_pct == 50.0
-    assert cl.health == "🟡"
+    assert cl.health == "warn"
 
 
 def test_compute_loads_wired() -> None:
@@ -99,7 +99,7 @@ def test_compute_loads_24ghz() -> None:
     loads = compute_client_loads([dev])
     # 120 / 150 * 100 = 80%
     assert loads[0].load_pct == 80.0
-    assert loads[0].health == "🔴"
+    assert loads[0].health == "critical"
 
 
 def test_compute_loads_skips_offline() -> None:
@@ -112,7 +112,7 @@ def test_compute_loads_zero_rates() -> None:
     dev = _make_device(tx_rate_mbps=0.0, rx_rate_mbps=0.0)
     loads = compute_client_loads([dev])
     assert loads[0].load_pct == 0.0
-    assert loads[0].health == "🟢"
+    assert loads[0].health == "ok"
 
 
 def test_compute_loads_none_rates() -> None:
@@ -157,7 +157,7 @@ def test_compute_loads_uses_connection_as_band_fallback() -> None:
 def test_client_load_defaults() -> None:
     cl = ClientLoad(mac="AA:BB:CC:DD:EE:FF")
     assert cl.load_pct == 0.0
-    assert cl.health == "🟢"
+    assert cl.health == "ok"
     assert cl.timestamp is not None
 
 

@@ -3,7 +3,11 @@
 Public surface::
 
     from asusroutercontrol.backends import BackendOperationUnsupported
-    from asusroutercontrol.backends.factory import create_backend, UnknownBackendError
+    from asusroutercontrol.backends.factory import (
+        create_backend,
+        UnknownBackendError,
+        BackendDeferredError,
+    )
 """
 
 from asusroutercontrol.backends.base import BackendOperationUnsupported, FirmwareBackend

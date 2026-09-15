@@ -11,7 +11,7 @@ asusrouter setup
 
 The `setup` command stores router credentials securely in Bitwarden via the `bw` CLI (default).
 Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
-Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
+Set `ROUTER_BACKEND=merlin` (default), `stock`, or `asuswrt` in `.env`. FreshTomato is deferred (hard-fail if selected). Optional ISP plan: `PLAN_DOWNLOAD_MBPS` / `PLAN_UPLOAD_MBPS` (defaults 300/35).
 
 ## Developer validation
 
@@ -87,9 +87,10 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 
 **Firmware Backends** (strategy pattern)
 - `backends/base.py` — `FirmwareBackend` ABC with `BackendOperationUnsupported` exception
-- `backends/merlin.py` — uses `asusrouter` library API (read + selected write operations)
-- `backends/freshtomato.py` — SSH-driven, currently read-only for write operations
-- `backends/factory.py` — selects backend via `ROUTER_BACKEND` env var
+- `backends/asuswrt.py` — `AsusWrtBackend` for stock AsusWRT + Merlin (`flavor` capability gates)
+- `backends/merlin.py` — compatibility alias of `AsusWrtBackend(flavor="merlin")`
+- `backends/freshtomato.py` — deferred stub (factory hard-fails if selected)
+- `backends/factory.py` — selects via `ROUTER_BACKEND` (`merlin`|`stock`|`asuswrt`)
 
 **SSH & Probes**
 - `ssh.py` — async SSH with host-key trust modes (`strict`, `tofu_confirm`, `tofu_auto`)
@@ -109,9 +110,8 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - `optimizer.py` → `executor.py` → `rollout.py` — NVRAM optimization with whitelist safeguards, snapshots, config-event recording
 - `reporting.py` — aggregates datastore windows into structured health reports
 
-**CLI Decomposition** (in progress)
-- `cli.py` (136K monolith) being split into `cli/` package (`core.py` = 14K extracted)
-- `_cli_legacy.py` = archived monolith copy
+**CLI**
+- `cli/` package is the sole CLI entrypoint (duplicate monoliths removed in 0.2.0)
 
 ### Dependencies
 - **Core**: `asusrouter>=1.21`, `aiohttp`, `keyring`, `pydantic>=2.0`, `click`, `aiosqlite`, `rich`, `asyncssh`

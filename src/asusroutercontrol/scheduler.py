@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Literal
 
 from asusroutercontrol._time import utcnow
+from asusroutercontrol.analysis.clients import _health_status
 from asusroutercontrol.config import Config, ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import get_router_credentials
 from asusroutercontrol.datastore import DataStore
@@ -605,13 +606,7 @@ class MonitorScheduler:
             load_pct = min(100.0, (peak / link_rate) * 100.0) if link_rate > 0 else 0.0
 
             rssi = snap.get("rssi")
-            health = "\U0001f7e2"
-            if rssi is not None and rssi < -75:
-                health = "\U0001f534"
-            elif load_pct >= 80:
-                health = "\U0001f534"
-            elif load_pct >= 50:
-                health = "\U0001f7e1"
+            health = _health_status(load_pct, rssi)
             row = device_rows.get(mac_key)
 
             cl = ClientLoad(
@@ -665,7 +660,7 @@ class MonitorScheduler:
                     rx_rate_mbps=None,
                     rssi=None,
                     load_pct=0.0,
-                    health="\U0001f7e2",
+                    health="ok",
                 ),
                 commit=False,
             )
@@ -791,7 +786,7 @@ class MonitorScheduler:
                 tx_rate_mbps=tx_rate_mbps,
                 rx_rate_mbps=rx_rate_mbps,
                 load_pct=load_pct,
-                health="🟢",
+                health=_health_status(load_pct or 0.0, None),
             )
             await self._store.insert_device_perf(cl, commit=False)
             presence_rows += 1

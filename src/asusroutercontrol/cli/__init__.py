@@ -1311,12 +1311,36 @@ def live_dhcp_auth(mac: str | None, seconds: int, poll_seconds: float):
     asyncio.run(_watch())
 
 
+
+def _require_merlin_capability(capability: str) -> None:
+    """Fail fast when stock AsusWRT lacks a Merlin-only capability."""
+    from asusroutercontrol.backends.asuswrt import AsusWrtBackend
+    from asusroutercontrol.backends.base import BackendOperationUnsupported
+    from asusroutercontrol.backends.factory import BackendDeferredError, create_backend
+    from asusroutercontrol.config import load_config
+    from asusroutercontrol.credentials import get_router_credentials
+
+    cfg = load_config()
+    username, password = get_router_credentials()
+    if not username or not password:
+        raise click.ClickException("Router credentials not configured. Run: asusrouter setup")
+    try:
+        backend = create_backend(cfg, username=username, password=password)
+    except (BackendDeferredError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if isinstance(backend, AsusWrtBackend):
+        try:
+            backend.require_capability(capability)
+        except BackendOperationUnsupported as exc:
+            raise click.ClickException(str(exc)) from exc
+
 # --- Merlin: JFFS Scripts ---
 
 
 @cli.group()
 def scripts():
     """Manage JFFS custom scripts (Merlin)."""
+    _require_merlin_capability("jffs")
 
 
 @scripts.command("list")
@@ -1455,6 +1479,7 @@ def scripts_hooks():
 @cli.group()
 def entware():
     """Manage Entware packages (opkg)."""
+    _require_merlin_capability("entware")
 
 
 @entware.command("status")

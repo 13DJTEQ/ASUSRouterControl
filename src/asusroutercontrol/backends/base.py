@@ -24,7 +24,8 @@ class BackendOperationUnsupported(NotImplementedError):
 class FirmwareBackend(ABC):
     """Contract for all router firmware integrations.
 
-    Implementations: MerlinBackend (asusrouter lib), FreshTomatoBackend (future).
+    Implementations: AsusWrtBackend (stock|merlin flavor via asusrouter),
+    FreshTomatoBackend (deferred stub).
     """
 
     @abstractmethod

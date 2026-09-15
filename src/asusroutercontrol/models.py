@@ -228,7 +228,7 @@ class ClientLoad(BaseModel):
     tx_rate_mbps: float | None = None
     rx_rate_mbps: float | None = None
     load_pct: float = 0.0  # max(tx, rx) / link_rate * 100
-    health: str = "🟢"  # 🟢 <50%, 🟡 50-80%, 🔴 >80% or weak signal
+    health: str = "ok"  # ok | warn | critical | unknown (presentation maps to UI)
 
 
 class RouterSnapshot(BaseModel):

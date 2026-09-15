@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
 
+from asusroutercontrol._time import utcnow
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.models import ClientLoad, Device
 
@@ -26,20 +26,40 @@ LOAD_CRIT_PCT = 80.0
 RSSI_WEAK_DBM = -75
 
 
-def _health_dot(load_pct: float, rssi: int | None) -> str:
-    """Color-coded health indicator."""
+def _health_status(load_pct: float, rssi: int | None) -> str:
+    """Stable health token for models/persistence (not presentation)."""
     if rssi is not None and rssi < RSSI_WEAK_DBM:
-        return "🔴"
+        return "critical"
     if load_pct >= LOAD_CRIT_PCT:
-        return "🔴"
+        return "critical"
     if load_pct >= LOAD_WARN_PCT:
-        return "🟡"
-    return "🟢"
+        return "warn"
+    return "ok"
+
+
+# Back-compat alias used by older tests/call sites.
+def _health_dot(load_pct: float, rssi: int | None) -> str:
+    return _health_status(load_pct, rssi)
+
+
+HEALTH_EMOJI = {
+    "ok": "🟢",
+    "warn": "🟡",
+    "critical": "🔴",
+    "unknown": "⚪",
+}
+
+
+def health_to_emoji(token: str | None) -> str:
+    """Map stable health tokens to presentation emoji."""
+    if not token:
+        return HEALTH_EMOJI["unknown"]
+    return HEALTH_EMOJI.get(str(token).lower(), HEALTH_EMOJI["unknown"])
 
 
 def compute_client_loads(devices: list[Device]) -> list[ClientLoad]:
     """Compute load percentage for each device based on tx/rx vs band link rate."""
-    now = datetime.utcnow()
+    now = utcnow()
     results: list[ClientLoad] = []
 
     for dev in devices:
@@ -53,7 +73,7 @@ def compute_client_loads(devices: list[Device]) -> list[ClientLoad]:
         # Determine link rate from connection type
         link_rate = BAND_LINK_RATES.get(dev.connection.value, DEFAULT_LINK_RATE)
         load_pct = min(100.0, (peak / link_rate) * 100.0) if link_rate > 0 else 0.0
-        health = _health_dot(load_pct, dev.rssi)
+        health = _health_status(load_pct, dev.rssi)
 
         results.append(ClientLoad(
             timestamp=now,

@@ -46,7 +46,11 @@ from asusroutercontrol.analysis.clients import (
     format_client_load_display,
     format_client_rate_display,
 )
-from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
+from asusroutercontrol.config import (
+    ensure_runtime_data_dir_isolation,
+    load_config,
+    plan_download_bps,
+)
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -54,7 +58,8 @@ from asusroutercontrol.scheduler import MonitorScheduler
 log = logging.getLogger(__name__)
 
 # Thresholds for notifications
-PLAN_SPEED_DOWN = 300_000_000  # 300 Mbps
+
+PLAN_SPEED_DOWN = plan_download_bps()
 TEMP_WARN_C = 85.0
 LOSS_WARN_PCT = 5.0
 SPEED_DROP_RATIO = 0.70  # notify if < 70% of plan
@@ -1173,7 +1178,11 @@ class AppDelegate(NSObject):
 
     def _do_reboot(self):
         try:
-            from asusroutercontrol.backends.merlin import MerlinBackend
+            from asusroutercontrol.backends.base import BackendOperationUnsupported
+            from asusroutercontrol.backends.factory import (
+                BackendDeferredError,
+                create_backend,
+            )
             from asusroutercontrol.credentials import get_router_credentials
 
             username, password = get_router_credentials()
@@ -1182,12 +1191,8 @@ class AppDelegate(NSObject):
                 return
 
             async def _reboot():
-                backend = MerlinBackend(
-                    hostname=self._cfg.router_host,
-                    username=username,
-                    password=password,
-                    use_ssl=self._cfg.use_ssl,
-                    port=self._cfg.router_port,
+                backend = create_backend(
+                    self._cfg, username=username, password=password
                 )
                 await backend.connect()
                 try:
@@ -1200,6 +1205,9 @@ class AppDelegate(NSObject):
                 _notify("🔄 Router Rebooting", "", "Allow 2-3 min to reconnect")
             else:
                 _notify("Reboot Failed", "", "Router did not accept command")
+        except (BackendOperationUnsupported, BackendDeferredError) as exc:
+            log.warning("Reboot unsupported: %s", exc)
+            _notify("Reboot Unsupported", "", str(exc)[:100])
         except Exception as exc:
             log.exception("Reboot action failed")
             _notify("Reboot Error", "", str(exc)[:100])

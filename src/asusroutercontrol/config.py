@@ -19,7 +19,9 @@ _RUNTIME_ENV_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]*$")
 @dataclass(frozen=True)
 class Config:
     runtime_env: str = _PROD_RUNTIME_ENV
-    router_backend: str = "merlin"  # merlin | freshtomato
+    router_backend: str = "merlin"  # merlin | stock | asuswrt (freshtomato deferred)
+    plan_download_mbps: float = 300.0
+    plan_upload_mbps: float = 35.0
     router_host: str = "router.asus.com"
     router_port: int = 80
     use_ssl: bool = False
@@ -143,6 +145,8 @@ def load_config(
     cfg = Config(
         runtime_env=resolved_runtime_env,
         router_backend=os.environ.get("ROUTER_BACKEND", "merlin").strip().lower(),
+        plan_download_mbps=float(os.environ.get("PLAN_DOWNLOAD_MBPS", "300")),
+        plan_upload_mbps=float(os.environ.get("PLAN_UPLOAD_MBPS", "35")),
         router_host=os.environ.get("ROUTER_HOST", "router.asus.com"),
         router_port=int(os.environ.get("ROUTER_PORT", "80")),
         use_ssl=os.environ.get("USE_SSL", "false").lower() in ("true", "1", "yes"),
@@ -179,3 +183,19 @@ def load_config(
     )
     ensure_runtime_data_dir_isolation(cfg, runtime_env=resolved_runtime_env)
     return cfg
+
+def plan_download_bps(cfg=None) -> float:
+    """ISP plan download rate in bits/sec (config-driven; default 300 Mbps)."""
+    if cfg is None:
+        from asusroutercontrol.config import load_config
+        cfg = load_config()
+    return float(cfg.plan_download_mbps) * 1_000_000
+
+
+def plan_upload_bps(cfg=None) -> float:
+    """ISP plan upload rate in bits/sec (config-driven; default 35 Mbps)."""
+    if cfg is None:
+        from asusroutercontrol.config import load_config
+        cfg = load_config()
+    return float(cfg.plan_upload_mbps) * 1_000_000
+

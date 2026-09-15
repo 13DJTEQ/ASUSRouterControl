@@ -12,12 +12,14 @@ from datetime import datetime, timedelta
 from statistics import mean
 
 from asusroutercontrol.analyzer import analyze_isp_sla, analyze_patterns, analyze_trends
+from asusroutercontrol.config import plan_download_bps, plan_upload_bps
 from asusroutercontrol.datastore import DataStore
 
 log = logging.getLogger(__name__)
 
-PLAN_SPEED_DOWN = 300_000_000
-PLAN_SPEED_UP = 35_000_000
+
+PLAN_SPEED_DOWN = plan_download_bps()
+PLAN_SPEED_UP = plan_upload_bps()
 MIN_TREND_SAMPLES = 10
 R2_MEDIUM = 0.5
 R2_HIGH = 0.7

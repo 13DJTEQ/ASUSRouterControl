@@ -42,8 +42,12 @@ def _get_backend():
         sys.exit(1)
     try:
         return create_backend(cfg, username=username, password=password)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        # UnknownBackendError / BackendDeferredError
+        from asusroutercontrol.backends.factory import BackendDeferredError, UnknownBackendError
+        if isinstance(exc, (ValueError, BackendDeferredError, UnknownBackendError)):
+            raise click.ClickException(str(exc)) from exc
+        raise
 
 
 def _normalize_mac(mac: str | None) -> str | None:
