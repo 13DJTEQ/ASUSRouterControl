@@ -254,6 +254,10 @@ async def test_setup_skips_transport_retry_on_credential_reject(
         )
 
     monkeypatch.setattr("asusroutercontrol.connect.probe_connection", _probe)
+    monkeypatch.setattr(
+        "asusroutercontrol.connect.diagnose_http_admin",
+        lambda host, **kwargs: "tcp:80=open (mocked)",
+    )
 
     with pytest.raises(ConnectionError, match="rejected login"):
         await setup_router_connection(
@@ -266,7 +270,7 @@ async def test_setup_skips_transport_retry_on_credential_reject(
             cfg=Config(data_dir=tmp_path),
         )
     assert len(calls) == 1
-    assert calls[0] == ("router.asus.com", 80, False)
+    assert calls[0] == ("router.asus.com", 8443, True)
 
 
 @pytest.mark.asyncio
@@ -304,5 +308,26 @@ async def test_setup_retries_asus_https_8443_on_reachability_failure(
     assert result.probe.http_ok is True
     assert result.profile.http_port == 8443
     assert result.profile.use_ssl is True
-    assert ("router.asus.com", 80, False) in calls
+    # HTTPS:8443 is attempted first now.
+    assert calls[0] == ("router.asus.com", 8443, True)
     assert ("router.asus.com", 8443, True) in calls
+
+
+def test_http_transport_attempts_prefers_https():
+    from asusroutercontrol.connect import _http_transport_attempts
+
+    attempts = _http_transport_attempts("192.168.50.1", http_port=80, use_ssl=False)
+    assert attempts[0] == ("192.168.50.1", 8443, True)
+    assert ("192.168.50.1", 80, False) in attempts
+
+
+def test_format_http_probe_error_mentions_router_settings():
+    from asusroutercontrol.connect import format_http_probe_error
+
+    msg = format_http_probe_error(
+        RuntimeError("Cannot access EndpointService.LOGIN. Failed in `async_connect`"),
+        host="router.asus.com",
+        username="admin",
+    )
+    assert "captcha" in msg.lower()
+    assert "8443" in msg or "authentication method" in msg.lower()

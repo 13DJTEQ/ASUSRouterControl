@@ -78,6 +78,11 @@ def format_http_probe_error(
     raw = str(exc).strip() or exc.__class__.__name__
     low = raw.lower()
     user_hint = f" (tried user {username!r})" if username else ""
+    settings_hint = (
+        " Router checks: Administration → System → Local Access Config → "
+        "Authentication Method = BOTH (or HTTPS); temporarily disable Captcha; "
+        "confirm HTTP LAN port 80 / HTTPS 8443; reboot router after changing."
+    )
 
     access_code, access_attrs = _asus_access_error_details(exc)
     code_name = getattr(access_code, "name", None) or (
@@ -88,24 +93,28 @@ def format_http_probe_error(
             f"Router rejected login for {host}{user_hint}. "
             "Username/password are wrong — use the router admin credentials "
             "from the Bitwarden login item (not Wi‑Fi password / item title)."
+            + settings_hint
         )
     if code_name == "CAPTCHA":
         return (
             f"Router requires a captcha for {host}. "
-            "Open the web admin UI in a browser, complete the captcha, "
-            "then retry Connect."
+            "Open the web admin UI in a browser, complete the captcha "
+            "(or Administration → System → disable Captcha temporarily), "
+            "reboot the router, then retry Connect. "
+            "APP/API logins cannot solve captcha."
         )
     if code_name == "TRY_AGAIN":
         timeout = access_attrs.get("timeout")
         wait = f" Wait ~{timeout}s." if timeout else " Wait a minute."
         return (
             f"Router login temporarily locked on {host}.{wait} "
-            "Too many failed attempts."
+            "Too many failed attempts — or disable Captcha and reboot."
         )
     if code_name == "AUTHORIZATION":
         return (
             f"Router authorization failed on {host}{user_hint}. "
             "Re-check admin username/password and try again."
+            + settings_hint
         )
     if code_name == "RESET_REQUIRED":
         return (
@@ -117,8 +126,10 @@ def format_http_probe_error(
         return (
             f"HTTP admin login failed on {host}{user_hint}. "
             "If the password came from Bitwarden, confirm it is the admin "
-            "login (not Wi‑Fi). Also try the gateway LAN IP if "
-            "router.asus.com fails."
+            "login (not Wi‑Fi). Prefer HTTPS :8443. "
+            "Captcha/lockout also produce this error — disable Captcha, "
+            "reboot, retry."
+            + settings_hint
         )
     if "ssl" in low and "certificate" in low:
         return (
@@ -133,8 +144,109 @@ def format_http_probe_error(
         return (
             f"Connection refused by {host}. "
             f"Check HTTP(S) admin port (ASUS HTTPS is usually {_ASUS_HTTPS_PORT})."
+            + settings_hint
+        )
+    if "ascii" in low and "codec" in low:
+        return (
+            f"Password/username for {host} contains non‑ASCII characters the "
+            "ASUS login API cannot encode. Simplify the admin password in the "
+            "web UI, then update Bitwarden."
         )
     return f"{raw}"
+
+
+def diagnose_http_admin(host: str, *, timeout: float = 2.0) -> str:
+    """Best-effort TCP/HTTP reachability notes for Connect failure alerts/logs."""
+    import socket
+    import ssl
+    import urllib.request
+
+    notes: list[str] = []
+    for port in (_ASUS_HTTP_PORT, _ASUS_HTTPS_PORT, 443):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                notes.append(f"tcp:{port}=open")
+        except OSError as exc:
+            notes.append(f"tcp:{port}=closed({exc.__class__.__name__})")
+
+    ctx = ssl._create_unverified_context()  # noqa: S323 — router self-signed
+
+    def _probe(url: str, *, https: bool) -> str:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "asusrouter-diagnostic"},
+                method="GET",
+            )
+            kwargs = (
+                {"timeout": timeout, "context": ctx}
+                if https
+                else {"timeout": timeout}
+            )
+            with urllib.request.urlopen(req, **kwargs) as resp:
+                body = resp.read(4096).decode("utf-8", errors="replace").lower()
+                markers = [
+                    name
+                    for name in ("asus", "login.cgi", "main_login", "routersupport")
+                    if name in body
+                ]
+                mark = ",".join(markers) if markers else "no-asus-markers"
+                return f"{url} -> HTTP {resp.status} ({mark})"
+        except Exception as exc:  # noqa: BLE001
+            return f"{url} -> {exc.__class__.__name__}: {exc}"
+
+    notes.append(_probe(f"http://{host}/", https=False))
+    notes.append(_probe(f"https://{host}:{_ASUS_HTTPS_PORT}/", https=True))
+    summary = "; ".join(notes)
+    log.info("HTTP admin preflight for %s: %s", host, summary)
+    return summary
+
+
+def _http_transport_attempts(
+    host: str,
+    *,
+    http_port: int,
+    use_ssl: bool,
+) -> list[tuple[str, int, bool]]:
+    """Ordered (host, port, ssl) attempts — HTTPS:8443 preferred for Merlin/APP login."""
+    host = host.strip()
+    if use_ssl or http_port not in {_ASUS_HTTP_PORT, 0}:
+        attempts = [(host, http_port or _ASUS_HTTPS_PORT, use_ssl)]
+    else:
+        # Prefer HTTPS first: more stable for APP/API sessions on recent Merlin.
+        attempts = [
+            (host, _ASUS_HTTPS_PORT, True),
+            (host, _ASUS_HTTP_PORT, False),
+            (host, 443, True),
+        ]
+
+    host_l = host.lower()
+    if host_l in {"router.asus.com", "www.asusrouter.com", "router.asus.com."}:
+        try:
+            from asusroutercontrol.discovery import default_gateway_ipv4
+
+            gateway = default_gateway_ipv4()
+        except Exception:  # noqa: BLE001
+            gateway = None
+        if gateway and gateway != host:
+            if use_ssl or http_port not in {_ASUS_HTTP_PORT, 0}:
+                attempts.append((gateway, http_port or _ASUS_HTTPS_PORT, use_ssl))
+            else:
+                attempts.extend(
+                    [
+                        (gateway, _ASUS_HTTPS_PORT, True),
+                        (gateway, _ASUS_HTTP_PORT, False),
+                        (gateway, 443, True),
+                    ]
+                )
+    # Dedupe while preserving order
+    seen: set[tuple[str, int, bool]] = set()
+    ordered: list[tuple[str, int, bool]] = []
+    for item in attempts:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
 
 
 
@@ -251,12 +363,16 @@ async def setup_router_connection(
 
     namespace = credential_namespace or base.runtime_env
     backend_kind = backend if backend in ("merlin", "freshtomato") else "merlin"
+    attempts = _http_transport_attempts(
+        resolved_host, http_port=http_port, use_ssl=use_ssl
+    )
+    first_host, first_port, first_ssl = attempts[0]
     profile = RouterProfile(
         id=new_profile_id(display_name or resolved_host),
         display_name=display_name or resolved_host,
-        host=resolved_host,
-        http_port=http_port,
-        use_ssl=use_ssl,
+        host=first_host,
+        http_port=first_port,
+        use_ssl=first_ssl,
         backend=backend_kind,  # type: ignore[arg-type]
         ssh_enabled=ssh_enabled,
         ssh_port=ssh_port,
@@ -264,76 +380,61 @@ async def setup_router_connection(
         ssh_host_key_fingerprint=base.ssh_host_key_fingerprint,
         credential_namespace=namespace,
     )
-    effective = apply_profile(base, profile)
-    probe = await probe_connection(
-        effective,
-        username,
-        password,
-        try_ssh=ssh_enabled,
-    )
-    # Retry alternate transports when the first HTTP probe fails.
-    # Skip transport retries when the router already rejected credentials —
-    # HTTPS won't help a wrong password.
-    err_l = (probe.http_error or "").lower()
-    credential_rejected = (
-        "rejected login" in err_l
-        or "authorization failed" in err_l
-        or "captcha" in err_l
-        or "temporarily locked" in err_l
-        or "password reset" in err_l
-    )
-    if not probe.http_ok and not credential_rejected:
-        attempts: list[tuple[str, int, bool]] = []
-        if not use_ssl and http_port == _ASUS_HTTP_PORT:
-            # ASUS stock HTTPS is 8443 (asusrouter default), not 443.
-            attempts.append((resolved_host, _ASUS_HTTPS_PORT, True))
-            attempts.append((resolved_host, 443, True))
-        # router.asus.com only works on-LAN via ASUS DNS — also try gateway IP.
-        host_l = resolved_host.strip().lower()
-        if host_l in {"router.asus.com", "www.asusrouter.com", "router.asus.com."}:
-            try:
-                from asusroutercontrol.discovery import default_gateway_ipv4
 
-                gateway = default_gateway_ipv4()
-            except Exception:  # noqa: BLE001
-                gateway = None
-            if gateway and gateway != resolved_host:
-                attempts.append((gateway, http_port, use_ssl))
-                if not use_ssl and http_port == _ASUS_HTTP_PORT:
-                    attempts.append((gateway, _ASUS_HTTPS_PORT, True))
-                    attempts.append((gateway, 443, True))
-
+    probe: ConnectionProbeResult | None = None
+    last_error: str | None = None
+    for attempt_host, attempt_port, attempt_ssl in attempts:
+        profile = replace(
+            profile,
+            host=attempt_host,
+            http_port=attempt_port,
+            use_ssl=attempt_ssl,
+        )
+        effective = apply_profile(base, profile)
+        log.info(
+            "HTTP login attempt %s:%s ssl=%s user=%r",
+            attempt_host,
+            attempt_port,
+            attempt_ssl,
+            username,
+        )
+        probe = await probe_connection(
+            effective,
+            username,
+            password,
+            try_ssh=ssh_enabled,
+        )
         last_error = probe.http_error
-        for attempt_host, attempt_port, attempt_ssl in attempts:
-            log.info(
-                "HTTP probe failed for %s (%s); retrying %s:%s ssl=%s",
-                resolved_host,
-                last_error,
-                attempt_host,
-                attempt_port,
-                attempt_ssl,
+        if probe.http_ok:
+            resolved_host = attempt_host
+            break
+        err_l = (probe.http_error or "").lower()
+        # Wrong password / captcha / lockout — other transports won't help.
+        if (
+            "rejected login" in err_l
+            or "authorization failed" in err_l
+            or "captcha" in err_l
+            or "temporarily locked" in err_l
+            or "password reset" in err_l
+        ):
+            log.warning(
+                "Stopping transport retries after auth rejection: %s",
+                probe.http_error,
             )
-            profile = replace(
-                profile,
-                host=attempt_host,
-                http_port=attempt_port,
-                use_ssl=attempt_ssl,
-            )
-            effective = apply_profile(base, profile)
-            probe = await probe_connection(
-                effective,
-                username,
-                password,
-                try_ssh=ssh_enabled,
-            )
-            last_error = probe.http_error
-            if probe.http_ok:
-                resolved_host = attempt_host
-                break
+            break
 
+    assert probe is not None
     if not probe.http_ok:
+        preflight = ""
+        try:
+            preflight = diagnose_http_admin(resolved_host)
+        except Exception:  # noqa: BLE001
+            log.debug("HTTP admin preflight failed", exc_info=True)
+        detail = last_error or probe.http_error or "unknown error"
+        if preflight:
+            detail = f"{detail}\nPreflight: {preflight}"
         raise ConnectionError(
-            f"HTTP admin login failed for {resolved_host}: {probe.http_error}"
+            f"HTTP admin login failed for {resolved_host}: {detail}"
         )
 
     profile = update_capability_flags(
@@ -344,7 +445,7 @@ async def setup_router_connection(
     if ssh_enabled and probe.ssh_ok is False:
         profile = replace(profile, ssh_enabled=False, ssh_ok=False)
 
-    target_dir = data_dir or effective.data_dir
+    target_dir = data_dir or apply_profile(base, profile).data_dir
     store = load_profiles(target_dir, runtime_env=namespace)
     store.upsert(profile, make_active=True)
     path = save_profiles(store, target_dir, runtime_env=namespace)
