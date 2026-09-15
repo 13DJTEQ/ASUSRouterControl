@@ -459,6 +459,19 @@ class TestBitwardenRouterItemLookup:
         assert defaults["credential_backend"] == "bitwarden"
         assert "1313" in str(defaults.get("store_detail") or "")
 
+    def test_bw_password_strips_whitespace(self):
+        from asusroutercontrol.credentials import _credentials_from_bitwarden_item
+
+        item = {
+            "login": {
+                "username": " admin ",
+                "password": " s3cret\n",
+            }
+        }
+        user, pw = _credentials_from_bitwarden_item(item)
+        assert user == "admin"
+        assert pw == "s3cret"
+
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
 

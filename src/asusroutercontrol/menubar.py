@@ -1337,7 +1337,7 @@ class AppDelegate(NSObject):
 
         host = host_field.stringValue().strip()
         username = user_field.stringValue().strip() or "admin"
-        password = pass_field.stringValue() or stored_password
+        password = (pass_field.stringValue() or stored_password).strip()
         credential_backend = backend_popup.titleOfSelectedItem() or "keychain"
         if credential_backend not in ("keychain", "bitwarden"):
             credential_backend = "keychain"

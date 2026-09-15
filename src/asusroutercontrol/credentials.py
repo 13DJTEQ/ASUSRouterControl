@@ -923,7 +923,12 @@ def _credentials_from_bitwarden_item(item: dict) -> tuple[str | None, str | None
     username = login.get("username")
     password = login.get("password")
     user = str(username).strip() if isinstance(username, str) and username.strip() else None
-    pw = str(password) if isinstance(password, str) and password else None
+    # Strip accidental whitespace/newlines from vault paste — they break router login.
+    pw = (
+        str(password).strip()
+        if isinstance(password, str) and password.strip()
+        else None
+    )
     return user, pw
 
 

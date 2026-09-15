@@ -174,6 +174,135 @@ def test_format_http_probe_error_login_endpoint():
     msg = format_http_probe_error(
         RuntimeError("Cannot access EndpointService.LOGIN. Failed in `async_connect`"),
         host="router.asus.com",
+        username="admin",
     )
-    assert "router admin credentials" in msg.lower() or "gateway ip" in msg.lower()
     assert "router.asus.com" in msg
+    assert "admin" in msg
+    assert "bitwarden" in msg.lower() or "admin" in msg.lower()
+
+
+def test_format_http_probe_error_credentials_cause():
+    from asusrouter.error import AsusRouterAccessError
+    from asusrouter.modules.endpoint.error import AccessError
+
+    from asusroutercontrol.connect import format_http_probe_error
+
+    cause = AsusRouterAccessError("Access error", AccessError.CREDENTIALS, {})
+    try:
+        raise AsusRouterAccessError(
+            "Cannot access EndpointService.LOGIN. Failed in `async_connect`"
+        ) from cause
+    except AsusRouterAccessError as exc:
+        msg = format_http_probe_error(exc, host="192.168.50.1", username="admin")
+    assert "rejected login" in msg.lower()
+    assert "192.168.50.1" in msg
+    assert "admin" in msg
+
+
+def test_format_http_probe_error_captcha_cause():
+    from asusrouter.error import AsusRouterAccessError
+    from asusrouter.modules.endpoint.error import AccessError
+
+    from asusroutercontrol.connect import format_http_probe_error
+
+    cause = AsusRouterAccessError("Access error", AccessError.CAPTCHA, {})
+    try:
+        raise AsusRouterAccessError(
+            "Cannot access EndpointService.LOGIN. Failed in `async_connect`"
+        ) from cause
+    except AsusRouterAccessError as exc:
+        msg = format_http_probe_error(exc, host="router.asus.com")
+    assert "captcha" in msg.lower()
+
+
+def test_format_http_probe_error_lockout_cause():
+    from asusrouter.error import AsusRouterAccessError
+    from asusrouter.modules.endpoint.error import AccessError
+
+    from asusroutercontrol.connect import format_http_probe_error
+
+    cause = AsusRouterAccessError(
+        "Access error", AccessError.TRY_AGAIN, {"timeout": 42}
+    )
+    try:
+        raise AsusRouterAccessError(
+            "Cannot access EndpointService.LOGIN. Failed in `async_connect`"
+        ) from cause
+    except AsusRouterAccessError as exc:
+        msg = format_http_probe_error(exc, host="router.asus.com")
+    assert "locked" in msg.lower()
+    assert "42" in msg
+
+
+@pytest.mark.asyncio
+async def test_setup_skips_transport_retry_on_credential_reject(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Wrong password should not burn time retrying HTTPS ports."""
+    calls: list[tuple[str, int, bool]] = []
+
+    async def _probe(cfg, username, password, *, try_ssh=True):
+        calls.append((cfg.router_host, cfg.router_port, cfg.use_ssl))
+        return ConnectionProbeResult(
+            http_ok=False,
+            ssh_ok=None,
+            http_error=(
+                "Router rejected login for router.asus.com (tried user 'admin'). "
+                "Username/password are wrong."
+            ),
+        )
+
+    monkeypatch.setattr("asusroutercontrol.connect.probe_connection", _probe)
+
+    with pytest.raises(ConnectionError, match="rejected login"):
+        await setup_router_connection(
+            host="router.asus.com",
+            username="admin",
+            password="wrong",
+            ssh_enabled=False,
+            data_dir=tmp_path,
+            discover=False,
+            cfg=Config(data_dir=tmp_path),
+        )
+    assert len(calls) == 1
+    assert calls[0] == ("router.asus.com", 80, False)
+
+
+@pytest.mark.asyncio
+async def test_setup_retries_asus_https_8443_on_reachability_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[tuple[str, int, bool]] = []
+
+    async def _probe(cfg, username, password, *, try_ssh=True):
+        calls.append((cfg.router_host, cfg.router_port, cfg.use_ssl))
+        if cfg.use_ssl and cfg.router_port == 8443:
+            return ConnectionProbeResult(http_ok=True, ssh_ok=None)
+        return ConnectionProbeResult(
+            http_ok=False,
+            ssh_ok=None,
+            http_error="Timed out reaching router.asus.com",
+        )
+
+    monkeypatch.setattr("asusroutercontrol.connect.probe_connection", _probe)
+    monkeypatch.setattr(
+        "asusroutercontrol.connect.store_router_credentials",
+        lambda *a, **k: "keychain",
+    )
+
+    result = await setup_router_connection(
+        host="router.asus.com",
+        username="admin",
+        password="pw",
+        ssh_enabled=False,
+        data_dir=tmp_path,
+        discover=False,
+        cfg=Config(data_dir=tmp_path),
+    )
+    assert result.probe.http_ok is True
+    assert result.profile.http_port == 8443
+    assert result.profile.use_ssl is True
+    assert ("router.asus.com", 80, False) in calls
+    assert ("router.asus.com", 8443, True) in calls

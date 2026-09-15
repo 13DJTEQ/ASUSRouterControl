@@ -27,16 +27,98 @@ from asusroutercontrol.ssh import RouterSSH
 log = logging.getLogger(__name__)
 
 
-def format_http_probe_error(exc: BaseException, *, host: str) -> str:
+# ASUS HTTP(S) admin defaults used by the asusrouter library.
+_ASUS_HTTP_PORT = 80
+_ASUS_HTTPS_PORT = 8443
+
+
+def _iter_exception_chain(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _asus_access_error_details(
+    exc: BaseException,
+) -> tuple[object | None, dict]:
+    """Pull AccessError code + attributes from an asusrouter exception chain."""
+    try:
+        from asusrouter.modules.endpoint.error import AccessError
+    except Exception:  # noqa: BLE001 — library optional at import time in tests
+        AccessError = None  # type: ignore[misc, assignment]
+
+    for item in _iter_exception_chain(exc):
+        args = getattr(item, "args", ())
+        code = None
+        attrs: dict = {}
+        for arg in args:
+            if AccessError is not None and isinstance(arg, AccessError):
+                code = arg
+            elif isinstance(arg, dict) and arg:
+                attrs = arg
+        if code is not None:
+            return code, attrs
+        # Fallback: stringly-typed AccessError name in message.
+        text = str(item)
+        if "AccessError.CREDENTIALS" in text or "credentials" == text.lower():
+            return ("CREDENTIALS", attrs)
+    return None, {}
+
+
+def format_http_probe_error(
+    exc: BaseException,
+    *,
+    host: str,
+    username: str | None = None,
+) -> str:
     """Turn asusrouter/network failures into actionable Connect UI text."""
     raw = str(exc).strip() or exc.__class__.__name__
     low = raw.lower()
+    user_hint = f" (tried user {username!r})" if username else ""
+
+    access_code, access_attrs = _asus_access_error_details(exc)
+    code_name = getattr(access_code, "name", None) or (
+        str(access_code) if access_code is not None else None
+    )
+    if code_name == "CREDENTIALS":
+        return (
+            f"Router rejected login for {host}{user_hint}. "
+            "Username/password are wrong — use the router admin credentials "
+            "from the Bitwarden login item (not Wi‑Fi password / item title)."
+        )
+    if code_name == "CAPTCHA":
+        return (
+            f"Router requires a captcha for {host}. "
+            "Open the web admin UI in a browser, complete the captcha, "
+            "then retry Connect."
+        )
+    if code_name == "TRY_AGAIN":
+        timeout = access_attrs.get("timeout")
+        wait = f" Wait ~{timeout}s." if timeout else " Wait a minute."
+        return (
+            f"Router login temporarily locked on {host}.{wait} "
+            "Too many failed attempts."
+        )
+    if code_name == "AUTHORIZATION":
+        return (
+            f"Router authorization failed on {host}{user_hint}. "
+            "Re-check admin username/password and try again."
+        )
+    if code_name == "RESET_REQUIRED":
+        return (
+            f"Router requires a password reset before API login on {host}. "
+            "Complete that in the web UI, then retry."
+        )
+
     if "cannot access" in low and "login" in low:
         return (
-            f"Cannot reach HTTP admin login on {host}. "
-            "Check you are on the router LAN/Wi‑Fi, username/password are the "
-            "router admin credentials (not the Bitwarden item label), and try "
-            "the gateway IP if router.asus.com fails."
+            f"HTTP admin login failed on {host}{user_hint}. "
+            "If the password came from Bitwarden, confirm it is the admin "
+            "login (not Wi‑Fi). Also try the gateway LAN IP if "
+            "router.asus.com fails."
         )
     if "ssl" in low and "certificate" in low:
         return (
@@ -48,7 +130,10 @@ def format_http_probe_error(exc: BaseException, *, host: str) -> str:
     if "name or service not known" in low or "nodename nor servname" in low:
         return f"Could not resolve host {host}. Use the router LAN IP instead."
     if "connection refused" in low:
-        return f"Connection refused by {host}. Check HTTP(S) admin port."
+        return (
+            f"Connection refused by {host}. "
+            f"Check HTTP(S) admin port (ASUS HTTPS is usually {_ASUS_HTTPS_PORT})."
+        )
     return f"{raw}"
 
 
@@ -80,7 +165,18 @@ async def probe_http(cfg: Config, username: str, password: str) -> tuple[bool, s
         await backend.connect()
         return True, None
     except Exception as exc:  # noqa: BLE001 — surface any connect failure to setup UX
-        return False, format_http_probe_error(exc, host=cfg.router_host)
+        log.warning(
+            "HTTP probe failed for %s:%s ssl=%s user=%r: %s",
+            cfg.router_host,
+            cfg.router_port,
+            cfg.use_ssl,
+            username,
+            exc,
+            exc_info=True,
+        )
+        return False, format_http_probe_error(
+            exc, host=cfg.router_host, username=username
+        )
     finally:
         try:
             await backend.disconnect()
@@ -176,9 +272,21 @@ async def setup_router_connection(
         try_ssh=ssh_enabled,
     )
     # Retry alternate transports when the first HTTP probe fails.
-    if not probe.http_ok:
+    # Skip transport retries when the router already rejected credentials —
+    # HTTPS won't help a wrong password.
+    err_l = (probe.http_error or "").lower()
+    credential_rejected = (
+        "rejected login" in err_l
+        or "authorization failed" in err_l
+        or "captcha" in err_l
+        or "temporarily locked" in err_l
+        or "password reset" in err_l
+    )
+    if not probe.http_ok and not credential_rejected:
         attempts: list[tuple[str, int, bool]] = []
-        if not use_ssl and http_port == 80:
+        if not use_ssl and http_port == _ASUS_HTTP_PORT:
+            # ASUS stock HTTPS is 8443 (asusrouter default), not 443.
+            attempts.append((resolved_host, _ASUS_HTTPS_PORT, True))
             attempts.append((resolved_host, 443, True))
         # router.asus.com only works on-LAN via ASUS DNS — also try gateway IP.
         host_l = resolved_host.strip().lower()
@@ -191,7 +299,8 @@ async def setup_router_connection(
                 gateway = None
             if gateway and gateway != resolved_host:
                 attempts.append((gateway, http_port, use_ssl))
-                if not use_ssl and http_port == 80:
+                if not use_ssl and http_port == _ASUS_HTTP_PORT:
+                    attempts.append((gateway, _ASUS_HTTPS_PORT, True))
                     attempts.append((gateway, 443, True))
 
         last_error = probe.http_error
