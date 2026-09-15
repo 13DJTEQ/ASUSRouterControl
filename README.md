@@ -24,13 +24,6 @@ The validation script runs lint (`ruff`), tests (`pytest`), and syntax checks (`
 If required dev tools are missing, it exits with an actionable install command.
 For app-level verification in each development cycle, run `make verify-dev-app` to rebuild the DEV app bundle, relaunch it, and perform a runtime smoke-check.
 
-## Memory Palace workflow
-For day-to-day planning, implementation checkpoints, and review summaries, follow:
-- `docs/skills/memory-palace/references/mcp-workflow.md`
-- `docs/skills/memory-palace/references/trigger-samples.md`
-
-This keeps durable task context discoverable across sessions and contributors.
-
 ## CI/CD pipeline
 
 ### CI (`.github/workflows/ci.yml`)

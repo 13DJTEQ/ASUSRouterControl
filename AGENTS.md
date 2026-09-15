@@ -15,13 +15,6 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - `make test` — run full pytest suite.
 - `python3 -m pytest tests/path/to/test_file.py::test_name` — run a single test.
 
-### Memory Palace workflow
-- Use `docs/skills/memory-palace/references/mcp-workflow.md` as the canonical planning -> implementation -> review procedure.
-- Before first memory operation in a session, call `read_memory("system://boot")`.
-- If URI is unknown, run `search_memory(..., include_session=true)` before selecting a target.
-- Read target memory before any mutation (`create_memory`, `update_memory`, `delete_memory`, `add_alias`).
-- Treat `guard_action=NOOP|UPDATE|DELETE` as a stop-and-inspect signal; inspect `guard_target_uri` / `guard_target_id` first.
-
 ### Running the app
 - `asusrouter setup` — write router credentials to Bitwarden via `bw` (required before most commands).
 - `asusrouter status` / `asusrouter devices` / `asusrouter monitor` — primary CLI entrypoints.
@@ -31,7 +24,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - DEV builds must be generated with `make build-dev-app` and output to `testbuilds/` under the repository root.
 - Every development cycle must run a fresh `make build-dev-app` before functionality verification, and verification must use that rebuilt DEV bundle (`make verify-dev-app`).
 - DEV app bundle is labeled `ASUSRouterControl DEV.app` with a red `DEV` icon for immediate visual separation from production.
-- Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
+- Production DMG packaging is not currently exposed as a Make target; do not claim `make build-prod-dmg` until that target exists. Prefer DEV verification via `make build-dev-app` / `make verify-dev-app`.
 - Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
 - When failures occur, standard workflow is mandatory: analyze root cause, apply the minimal repair, then relaunch/rerun to verify the failure is resolved.
 
@@ -67,7 +60,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - periodic recommendation generation,
   - daily retention pruning.
 - Scheduler loops use timeouts, rollback on failed DB cycles, and backoff after repeated failures.
-- Important implementation detail: `_poll_loop` currently instantiates `MerlinBackend` directly instead of using `backends.factory.create_backend`; `ROUTER_BACKEND` selection is respected in CLI paths, but not this scheduler poll path.
+- Scheduler `_poll_loop` uses `backends.factory.create_backend` (respects `ROUTER_BACKEND`). Menubar reboot still constructs `MerlinBackend` directly in places — prefer factory for new code; Phase 2 renames that HTTP backend to `AsusWrtBackend`.
 
 ### Analysis, optimization, reporting pipeline
 - **Probes** (`probes.py`) gather low-level router signals over SSH, including tracked NVRAM snapshots and diffs.

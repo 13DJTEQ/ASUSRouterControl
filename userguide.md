@@ -27,13 +27,15 @@ Verify: `asusrouter --version`
 
 ## Initial Setup
 
-### 1. Store credentials in 1Password
+### 1. Store credentials in Bitwarden
 
 ```bash
 asusrouter setup
 ```
 
-Prompts for router username (default: `admin`) and password. Credentials are stored securely in 1Password item titles matching `universal-keychain-asusroutercontrol-<env>-<key>`. Secrets are **never** written to disk or `.env`.
+Prompts for router username (default: `admin`) and password. Credentials are stored securely in Bitwarden via the `bw` CLI (default). Item titles match `universal-keychain-asusroutercontrol-<env>-<key>`. Secrets are **never** written to disk or `.env`.
+
+Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
 
 ### 2. Configure environment
 
@@ -78,7 +80,7 @@ Backend selection:
 ## CLI Commands
 
 ### `asusrouter setup`
-Interactive credential storage. Saves username and password to 1Password.
+Interactive credential storage. Saves username and password to Bitwarden (default; or the configured credential backend).
 
 ---
 
@@ -358,9 +360,9 @@ All data lives in `~/.asusroutercontrol/` (configurable via `DATA_DIR`).
 
 | Operation | Method |
 |---|---|
-| Store | `asusrouter setup` |
-| Retrieve | 1Password first; falls back to keychain migration entries, then env vars `ROUTER_USERNAME` / `ROUTER_PASSWORD` |
-| View / delete | `op item get universal-keychain-asusroutercontrol-prod-router_password` (or use 1Password app) |
+| Store | `asusrouter setup` (Bitwarden via `bw` by default) |
+| Retrieve | Bitwarden first; falls back to 1Password/keychain migration entries, then env vars `ROUTER_USERNAME` / `ROUTER_PASSWORD` |
+| View / delete | `bw get item universal-keychain-asusroutercontrol-prod-router_password` (or Bitwarden app). For 1Password backend: `op item get …` |
 
 ---
 
