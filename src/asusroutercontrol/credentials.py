@@ -107,16 +107,28 @@ def _op_vault() -> str | None:
     return os.environ.get(_OP_VAULT_ENV_FALLBACK, "").strip() or None
 
 
+_op_cli_found: bool | None = None
+
+
 def _op_run(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
+    global _op_cli_found  # noqa: PLW0603
+    if _op_cli_found is False:
+        return None
     try:
-        return subprocess.run(
+        result = subprocess.run(
             ["op", *arguments],
             check=False,
             capture_output=True,
             text=True,
         )
+        _op_cli_found = True
+        return result
     except FileNotFoundError:
-        log.error("1Password CLI ('op') not found. Install it to manage project credentials.")
+        if _op_cli_found is not False:
+            log.warning(
+                "1Password CLI ('op') not found; skipping 1Password credential backend"
+            )
+        _op_cli_found = False
         return None
     except OSError as exc:
         log.error("Failed to execute 1Password CLI command: %s", exc)
@@ -689,6 +701,8 @@ def get_credential(key: str, *, env: str = DEFAULT_ENV) -> str | None:
     # Fall back through remaining backends (reads only)
     for fallback_name in _READ_FALLBACK_ORDER:
         if fallback_name == active.name:
+            continue
+        if fallback_name == "1password" and _op_cli_found is False:
             continue
         backend = _BACKENDS[fallback_name]
         for try_env in _fallback_envs(env):

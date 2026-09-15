@@ -289,6 +289,9 @@ class AppDelegate(NSObject):
         self._connection_state = ConnectionMonitorState(phase="unknown")
         self._last_notified_connection_phase = None
         self._connection_last_error = None
+        self._health_fail_count = 0
+        self._health_retry_seconds = 60.0
+        self._health_retries_paused = False
         self._spinner_timer = None
         self._spinner_frame = 0
 
@@ -350,14 +353,16 @@ class AppDelegate(NSObject):
         try:
             asyncio.run(_check_backend())
         except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
             log.warning(
                 "Router backend unreachable: %s — entering degraded mode",
-                exc,
+                detail,
             )
             self._degraded = True
-            self._connection_last_error = str(exc)[:120]
+            self._health_fail_count += 1
+            self._connection_last_error = detail[:200]
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "showUnableStatus:", str(exc)[:120], False
+                "showUnableStatus:", detail[:200], False
             )
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "enterDegradedMode:", None, False
@@ -375,12 +380,32 @@ class AppDelegate(NSObject):
 
         log.info("Router reachable — starting scheduler")
         self._degraded = False
+        self._health_fail_count = 0
+        self._health_retry_seconds = 60.0
+        self._health_retries_paused = False
         self._connection_last_error = None
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "showConnectedStatus:", None, False
         )
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "startAfterHealthCheck:", None, False
+        )
+
+    @staticmethod
+    def _is_login_auth_failure(detail: str | None) -> bool:
+        text = (detail or "").lower()
+        return any(
+            token in text
+            for token in (
+                "cannot access",
+                "endpointservice.login",
+                "async_connect",
+                "rejected login",
+                "captcha",
+                "temporarily locked",
+                "wrong credentials",
+                "access error",
+            )
         )
 
     @objc.typedSelector(b"v@:@")
@@ -397,17 +422,41 @@ class AppDelegate(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def enterDegradedMode_(self, _):
-        """Router backend unreachable — run in degraded mode and retry health check."""
+        """Router backend unreachable — run degraded; back off LOGIN retries hard."""
         self._set_status_icon("Degraded (retrying health)")
         self._mi_sched_status.setTitle_("Scheduler: ● Running (degraded, retrying health)")
         self._ensure_runtime_started()
+
+        auth_fail = self._is_login_auth_failure(self._connection_last_error)
+        if auth_fail and self._health_fail_count >= 3:
+            self._health_retries_paused = True
+            self._mi_sched_status.setTitle_(
+                "Scheduler: ● Degraded — use Connect Router (LOGIN retries paused)"
+            )
+            log.warning(
+                "Paused automatic health LOGIN retries after %s failures "
+                "(avoids Captcha lockout). Fix credentials/Captcha, then Connect Router.",
+                self._health_fail_count,
+            )
+            return
+
+        if auth_fail:
+            # 5 → 10 → 15 min — repeated LOGIN failures trigger router Captcha.
+            delay = min(900.0, max(300.0, self._health_retry_seconds * 2))
+        else:
+            delay = min(300.0, max(60.0, self._health_retry_seconds * 1.5))
+        self._health_retry_seconds = delay
+        log.info("Scheduling health retry in %.0fs (auth_fail=%s)", delay, auth_fail)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            60.0, self, "retryHealthCheck:", None, False
+            delay, self, "retryHealthCheck:", None, False
         )
 
     @objc.typedSelector(b"v@:@")
     def retryHealthCheck_(self, _):
-        """Retry the health check."""
+        """Retry the health check unless LOGIN retries were paused."""
+        if self._health_retries_paused:
+            log.info("Health LOGIN retries paused — waiting for Connect Router")
+            return
         threading.Thread(
             target=self._startup_health_check, name="health-retry", daemon=True
         ).start()
@@ -1417,6 +1466,9 @@ class AppDelegate(NSObject):
                 )
             )
             self._connection_last_error = None
+            self._health_fail_count = 0
+            self._health_retry_seconds = 60.0
+            self._health_retries_paused = False
             # Reload config so subsequent actions see the new profile.
             self._cfg = load_config()
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
