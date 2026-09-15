@@ -804,7 +804,7 @@ class AppDelegate(NSObject):
             "🔴": "Connection alert",
         }.get(status_dot, "Connection status unknown")
         self._set_status_icon(status_label)
-        self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
+        self._mi_model.setTitle_(f"Router: RT-BE92U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
         if sys_snap:

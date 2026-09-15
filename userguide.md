@@ -1,6 +1,6 @@
 # ASUSRouterControl User Guide
 
-CLI management and analysis tool for the ASUS RT-AC68U running AsusWRT-Merlin.
+CLI management and analysis tool for ASUS routers. Primary lab target: **RT-BE92U** on stock AsusWRT; AsusWRT-Merlin flavor also supported.
 
 ---
 
@@ -53,8 +53,13 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `SOUNDSHIELD_EXPORT_PATH` | `~/.asusroutercontrol/soundshield_network.json` | SoundShield JSON export |
 
 Backend selection:
-- `ROUTER_BACKEND=merlin` (default): full feature set, including write operations.
-- `ROUTER_BACKEND=freshtomato`: read-only MVP backend (write operations like reboot/WiFi/port-forward updates are intentionally unsupported).
+- `ROUTER_BACKEND=merlin` (default): `AsusWrtBackend(flavor=merlin)` — full feature set including JFFS scripts / Entware.
+- `ROUTER_BACKEND=stock` or `asuswrt`: `AsusWrtBackend(flavor=stock)` — HTTP read/write via `asusrouter`; JFFS/Entware CLI commands hard-fail with a clear unsupported error.
+- `ROUTER_BACKEND=freshtomato`: **deferred** — selecting it hard-fails; stub retained in-tree for a later experimental pass.
+
+Optional ISP plan speeds (SLA math):
+- `PLAN_DOWNLOAD_MBPS` (default `300`)
+- `PLAN_UPLOAD_MBPS` (default `35`)
 
 **SSH (Merlin features)**
 

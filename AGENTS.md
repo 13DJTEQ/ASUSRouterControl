@@ -70,6 +70,11 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - **Optimization/execution** (`optimizer.py`, `executor.py`, `rollout.py`) turns findings into suggested/applied NVRAM changes with whitelist safeguards, snapshots, and config-event recording.
 - **Reporting** (`reporting.py`) aggregates datastore windows into structured health reports and recommendation summaries.
 
+## Hardware / firmware targets
+- Primary HITL: **RT-BE92U** on stock AsusWRT (`ROUTER_BACKEND=stock` or `asuswrt`).
+- Merlin flavor (`ROUTER_BACKEND=merlin`) remains supported via capability flags; Merlin HITL on BE92U is N/A until a Merlin image exists for this model.
+- FreshTomato is deferred (factory hard-fail; stub retained).
+
 ## Repository-specific guardrails
 - Keep backend behavior aligned with `FirmwareBackend` operation support; unsupported operations should surface via `BackendOperationUnsupported` (or equivalent explicit failure), not silent no-ops.
 - Any change that affects telemetry collection should keep `datastore.py` schema/query compatibility in mind; this project relies heavily on longitudinal reads (trends, reports, recommendation cooldowns).

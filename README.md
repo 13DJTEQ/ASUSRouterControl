@@ -1,6 +1,6 @@
 # ASUSRouterControl
 
-Management and analysis tool for ASUS RT-AC68U routers running stock AsusWRT or AsusWRT-Merlin firmware.
+Management and analysis tool for ASUS routers (primary lab target: **RT-BE92U** on stock AsusWRT; Merlin flavor also supported). Legacy RT-AC68U references may remain in older notes.
 
 ## Setup
 
@@ -126,7 +126,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - Production-ready: dev→prod deployment with rollback, self-hosted macOS runner, environment isolation
 
 **Market Constraints**
-- **Narrow hardware scope**: Targets RT-AC68U (2014 hardware, end-of-life), limiting addressable market
+- **Hardware focus**: Primary HITL target is RT-BE92U (stock AsusWRT); older AC68U notes are legacy
 - **Firmware dependency**: Primary backend relies on `asusrouter` library for Merlin firmware; FreshTomato backend is read-only
 - **Competitive pressure**: ASUS's newer routers (WiFi 6E/7) increasingly expose native APIs via mobile apps, eroding differentiation
 - **Niche audience**: Viable for power users and home lab enthusiasts running Merlin firmware on legacy hardware
@@ -137,7 +137,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 - ⚠️ **Commercial product**: Not viable without pivoting to broader hardware support (WiFi 6E/7 mesh systems) and SaaS telemetry layer
 - ⚠️ **Scalability**: Single-router focus; no multi-site or fleet management capabilities
 
-**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability requires hardware scope expansion beyond AC68U and a cloud-based telemetry/management layer.
+**Strategic Recommendation**: Continue as a personal tool and open-source project. Commercial viability benefits from multi-model coverage (BE92U+) and a cloud-based telemetry/management layer.
 
 ## Performance metrics source methodology
 
