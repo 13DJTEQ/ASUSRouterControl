@@ -1,4 +1,4 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app local-dev-app
 
 VENV_PYTHON := .venv/bin/python
 SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
