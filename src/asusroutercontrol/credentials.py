@@ -768,6 +768,47 @@ def _bw_custom_field_value(item: dict, field_names: set[str]) -> str | None:
     return None
 
 
+def _bw_fuzzy_ssh_port_field(item: dict) -> str | None:
+    """Match custom fields whose names look like SSH port (e.g. 'Router SSH Port')."""
+    fields = item.get("fields", [])
+    if not isinstance(fields, list):
+        return None
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("name", "")).strip().lower()
+        normalized = name.replace("_", " ").replace("-", " ")
+        if "ssh" in normalized and "port" in normalized:
+            value = field.get("value")
+            if value is None:
+                continue
+            text_value = str(value).strip()
+            if text_value:
+                return text_value
+    return None
+
+
+def _bw_uri_ssh_port(item: dict) -> str | None:
+    """Parse ssh://user@host:port URIs on the login item."""
+    import re
+
+    login = item.get("login")
+    if not isinstance(login, dict):
+        return None
+    uris = login.get("uris", [])
+    if not isinstance(uris, list):
+        return None
+    for entry in uris:
+        if isinstance(entry, dict):
+            uri = str(entry.get("uri", ""))
+        else:
+            uri = str(entry)
+        match = re.search(r"(?i)^ssh://[^/]*:(\d{1,5})(?:/|$)", uri.strip())
+        if match:
+            return match.group(1)
+    return None
+
+
 def _bw_notes_ssh_port(notes: str | None) -> str | None:
     if not notes:
         return None
@@ -775,6 +816,7 @@ def _bw_notes_ssh_port(notes: str | None) -> str | None:
 
     patterns = (
         r"(?im)^\s*ssh[\s_-]*port\s*[:=]\s*(\d{1,5})\s*$",
+        r"(?im)^\s*ssh\s*[:=]\s*(\d{1,5})\s*$",
         r"(?im)^\s*port\s*[:=]\s*(\d{1,5})\s*$",
     )
     for pattern in patterns:
@@ -858,13 +900,24 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
     Preference order:
     1. ASUSROUTERCONTROL_BW_ROUTER_ITEM exact title/id
     2. Search/list match against host hints (title or URI)
+    3. Broad search for titles containing router.asus.com that have SSH Port
     """
     explicit = os.environ.get(_BW_ROUTER_ITEM_ENV, "").strip()
     if explicit:
         item = _bw_get_item_json(explicit)
         if item is not None:
             return item
-        log.debug("Configured BW router item %r was not found", explicit)
+        # Title search when exact get fails (common with parentheses in names).
+        for candidate in _bw_search_items(explicit):
+            name = str(candidate.get("name", ""))
+            if name.lower() == explicit.lower() or explicit.lower() in name.lower():
+                item_id = candidate.get("id")
+                if isinstance(item_id, str) and item_id:
+                    full = _bw_get_item_json(item_id)
+                    if full is not None:
+                        return full
+                return candidate
+        log.info("Configured BW router item %r was not found", explicit)
 
     for hint in _bw_item_host_hints(host_hint):
         matches: list[dict] = []
@@ -874,7 +927,16 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
                 item_id = candidate.get("id")
                 if isinstance(item_id, str) and item_id:
                     full = _bw_get_item_json(item_id)
-                    matches.append(full or candidate)
+                    if full is None:
+                        log.warning(
+                            "Bitwarden search hit id=%s name=%r but get item failed; "
+                            "SSH Port custom fields may be missing from search payload",
+                            item_id,
+                            candidate.get("name"),
+                        )
+                        matches.append(candidate)
+                    else:
+                        matches.append(full)
                 else:
                     matches.append(candidate)
         # Exact title get as secondary path
@@ -888,6 +950,20 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
                 return candidate
         if matches:
             return matches[0]
+
+    # Last resort: any item titled like router.asus.com that carries SSH Port.
+    for candidate in _bw_search_items("router.asus.com"):
+        name = str(candidate.get("name", "")).lower()
+        if "router.asus.com" not in name and "asusrouter" not in name:
+            continue
+        item_id = candidate.get("id")
+        full = (
+            _bw_get_item_json(item_id)
+            if isinstance(item_id, str) and item_id
+            else candidate
+        ) or candidate
+        if _ssh_port_from_bitwarden_item(full) is not None:
+            return full
     return None
 
 
@@ -904,6 +980,10 @@ def _ssh_port_from_bitwarden_item(item: dict) -> int | None:
             # Intentionally omit bare "port" — too ambiguous on human items.
         },
     )
+    if raw is None:
+        raw = _bw_fuzzy_ssh_port_field(item)
+    if raw is None:
+        raw = _bw_uri_ssh_port(item)
     if raw is None:
         raw = _bw_notes_ssh_port(item.get("notes") if isinstance(item.get("notes"), str) else None)
     if raw is None:
@@ -1024,7 +1104,7 @@ def resolve_connect_login_defaults(
     # Ensure .env values (including BW_SESSION) are visible before vault calls.
     # GUI .app launches often have a non-repo cwd, so probe known locations.
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
 
         candidates = [
             Path.cwd() / ".env",
@@ -1040,6 +1120,15 @@ def resolve_connect_login_defaults(
             try:
                 if candidate.is_file():
                     load_dotenv(dotenv_path=str(candidate), override=False)
+                    # BW_SESSION must refresh after `bw unlock` without relaunch quirks.
+                    values = dotenv_values(candidate)
+                    session = (
+                        values.get("BW_SESSION")
+                        or values.get("BITWARDEN_SESSION")
+                        or ""
+                    ).strip()
+                    if session:
+                        os.environ[_BW_SESSION_ENV] = session
                     loaded = True
             except OSError:
                 continue
@@ -1048,62 +1137,84 @@ def resolve_connect_login_defaults(
     except Exception:  # noqa: BLE001
         pass
     _ensure_bw_session_env()
+    # Allow a later unlock to recover after an earlier "bw missing" sticky miss.
+    global _bw_cli_found  # noqa: PLW0603
+    if _bw_cli_found is False:
+        _bw_cli_found = None
 
     bw_status = bitwarden_vault_status()
     item = lookup_bitwarden_router_item(host_hint=suggested_host)
     item_name = str(item.get("name")) if isinstance(item, dict) and item.get("name") else None
+    item_ssh_port = _ssh_port_from_bitwarden_item(item) if item is not None else None
 
     username, password = get_router_credentials(host_hint=suggested_host)
     stored_port = get_router_ssh_port(host_hint=suggested_host)
     active = _active_backend_name()
     if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
         backend = preferred_backend
+    elif bw_status == "unlocked":
+        backend = "bitwarden"
     elif active in _GUI_CREDENTIAL_BACKENDS:
         backend = active
     else:
         backend = "keychain"
     ssh_port = stored_port if stored_port is not None else int(config_ssh_port or 22)
 
+    # Always surface vault status — SSH port prefills depend on it even when
+    # the user stores new credentials to Keychain.
     detail: str | None = None
-    if backend == "bitwarden":
-        if (
-            bw_status == "unlocked"
-            and item_name
-            and username
-            and password
-            and stored_port is not None
-        ):
-            detail = (
-                f"Bitwarden: loaded login + SSH port {stored_port} from '{item_name}'"
-            )
-        elif bw_status == "unlocked" and item_name and username and password:
-            detail = (
-                f"Bitwarden: loaded login from '{item_name}' "
-                f"(no SSH Port field; using {ssh_port})"
-            )
-        elif bw_status == "unlocked" and item_name and stored_port is not None:
-            detail = f"Bitwarden: loaded SSH port {stored_port} from '{item_name}'"
-        elif bw_status == "unlocked" and item_name:
-            detail = (
-                f"Bitwarden: found '{item_name}' but no SSH Port custom field; "
-                f"using port {ssh_port}"
-            )
-        elif bw_status == "unlocked":
-            detail = (
-                f"Bitwarden unlocked, but no login matched host '{suggested_host}'. "
-                "Check the item title/URI."
-            )
-        elif bw_status == "locked":
-            detail = (
-                "Bitwarden vault is locked. In Terminal run: "
-                "bw unlock  (then put BW_SESSION=... into .env and relaunch)"
-            )
-        elif bw_status == "cli_not_found":
-            detail = "Bitwarden CLI ('bw') not found for this app launch PATH."
-        elif bw_status == "unauthenticated":
-            detail = "Bitwarden not logged in. Run: bw login"
-        else:
-            detail = f"Bitwarden status: {bw_status}"
+    if (
+        bw_status == "unlocked"
+        and item_name
+        and username
+        and password
+        and item_ssh_port is not None
+    ):
+        detail = (
+            f"Bitwarden: loaded login + SSH port {item_ssh_port} from '{item_name}'"
+        )
+    elif bw_status == "unlocked" and item_name and username and password:
+        detail = (
+            f"Bitwarden: loaded login from '{item_name}' "
+            f"but no SSH Port custom field — using {ssh_port}. "
+            "Add a custom field named 'SSH Port'."
+        )
+    elif bw_status == "unlocked" and item_name and item_ssh_port is not None:
+        detail = f"Bitwarden: loaded SSH port {item_ssh_port} from '{item_name}'"
+    elif bw_status == "unlocked" and item_name:
+        detail = (
+            f"Bitwarden: found '{item_name}' but no SSH Port custom field; "
+            f"using port {ssh_port}"
+        )
+    elif bw_status == "unlocked":
+        detail = (
+            f"Bitwarden unlocked, but no login matched host '{suggested_host}'. "
+            "Set ASUSROUTERCONTROL_BW_ROUTER_ITEM to the exact item title "
+            "(e.g. router.asus.com (13Maschine))."
+        )
+    elif bw_status == "locked":
+        detail = (
+            "Bitwarden vault is locked — SSH port will stay at 22 until unlocked. "
+            "In Terminal: bw unlock  → put BW_SESSION=... into .env → relaunch app"
+        )
+    elif bw_status == "cli_not_found":
+        detail = (
+            "Bitwarden CLI ('bw') not found for this app launch PATH — "
+            "SSH port cannot be read from the vault."
+        )
+    elif bw_status == "unauthenticated":
+        detail = "Bitwarden not logged in. Run: bw login"
+    else:
+        detail = f"Bitwarden status: {bw_status}"
+
+    log.info(
+        "Connect defaults: bw_status=%s item=%r ssh_port=%s user=%r backend=%s",
+        bw_status,
+        item_name,
+        ssh_port,
+        username,
+        backend,
+    )
 
     return {
         "host": suggested_host,
@@ -1114,6 +1225,7 @@ def resolve_connect_login_defaults(
         "password_from_store": bool(password),
         "bw_status": bw_status,
         "bw_item_name": item_name,
+        "bw_ssh_port": item_ssh_port,
         "store_detail": detail,
     }
 

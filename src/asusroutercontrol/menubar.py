@@ -1345,6 +1345,22 @@ class AppDelegate(NSObject):
             ssh_port = int(ssh_field.stringValue().strip() or "22")
         except ValueError:
             ssh_port = 22
+        # Safety net: if the dialog still shows default 22, re-read Bitwarden
+        # using the host the user actually entered (vault may have unlocked
+        # after the dialog opened, or search needed the typed host).
+        if ssh_port == 22:
+            try:
+                from asusroutercontrol.credentials import get_router_ssh_port
+
+                bw_port = get_router_ssh_port(host_hint=host or suggested)
+                if bw_port is not None and bw_port != 22:
+                    log.info(
+                        "Connect: overriding SSH port 22 with Bitwarden port %s",
+                        bw_port,
+                    )
+                    ssh_port = bw_port
+            except Exception:
+                log.debug("Connect SSH port re-resolve failed", exc_info=True)
         if not host or not password:
             _notify(
                 "Connect Failed",

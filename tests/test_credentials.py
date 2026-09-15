@@ -493,6 +493,34 @@ class TestBitwardenRouterItemLookup:
         assert user == "admin"
         assert pw == "s3cret"
 
+    def test_fuzzy_and_uri_ssh_port_parsing(self):
+        from asusroutercontrol.credentials import _ssh_port_from_bitwarden_item
+
+        fuzzy = {
+            "fields": [{"name": "Router SSH Port Number", "value": "1313"}],
+            "login": {"uris": []},
+        }
+        assert _ssh_port_from_bitwarden_item(fuzzy) == 1313
+
+        uri_item = {
+            "fields": [],
+            "login": {"uris": [{"uri": "ssh://admin@router.asus.com:2222"}]},
+        }
+        assert _ssh_port_from_bitwarden_item(uri_item) == 2222
+
+    def test_locked_vault_detail_always_shown(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            preferred_backend="keychain",
+        )
+        assert defaults["ssh_port"] == 22
+        assert "locked" in str(defaults.get("store_detail") or "").lower()
+
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
 
