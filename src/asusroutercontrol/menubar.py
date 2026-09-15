@@ -51,6 +51,14 @@ from asusroutercontrol.analysis.clients import (
     format_client_rate_display,
 )
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
+from asusroutercontrol.connection_monitor import (
+    ConnectionMonitorState,
+    connected_state,
+    connecting_state,
+    should_notify_transition,
+    state_from_profile,
+    unable_state,
+)
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
 from asusroutercontrol.scheduler import MonitorScheduler
@@ -277,6 +285,9 @@ class AppDelegate(NSObject):
         self._last_device_count = None
         self._last_saturation_notify = None
         self._degraded = False
+        self._connection_state = ConnectionMonitorState(phase="unknown")
+        self._last_notified_connection_phase = None
+        self._connection_last_error = None
         self._spinner_timer = None
         self._spinner_frame = 0
 
@@ -305,6 +316,10 @@ class AppDelegate(NSObject):
 
     def _startup_health_check(self):
         """Check router backend reachability before starting scheduler."""
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showConnectingStatus:", host, False
+        )
         from asusroutercontrol.backends.factory import create_backend
         from asusroutercontrol.credentials import get_router_credentials
         from asusroutercontrol.ssh import RouterSSH
@@ -339,6 +354,10 @@ class AppDelegate(NSObject):
                 exc,
             )
             self._degraded = True
+            self._connection_last_error = str(exc)[:120]
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "showUnableStatus:", str(exc)[:120], False
+            )
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "enterDegradedMode:", None, False
             )
@@ -355,6 +374,10 @@ class AppDelegate(NSObject):
 
         log.info("Router reachable — starting scheduler")
         self._degraded = False
+        self._connection_last_error = None
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showConnectedStatus:", None, False
+        )
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "startAfterHealthCheck:", None, False
         )
@@ -447,11 +470,12 @@ class AppDelegate(NSObject):
 
         self._mi_speedtest = _add_action(menu, "▶ Run Speed Test", "runSpeedTest:", self)
         self._mi_report = _add_action(menu, "📊 Generate Report", "genReport:", self)
-        _add_action(menu, "🔌 Connect Router...", "connectRouter:", self)
+        self._mi_connect = _add_action(menu, "🔌 Connect Router...", "connectRouter:", self)
         _add_action(menu, "🔄 Reboot Router...", "rebootRouter:", self)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self._mi_sched_status = _add_info(menu, "Scheduler: starting...")
+        self._mi_connection = _add_info(menu, "Connection: Unknown")
         self._mi_capabilities = _add_info(menu, "Capabilities: checking...")
         _add_action(menu, "Open Log File", "openLog:", self)
         menu.addItem_(NSMenuItem.separatorItem())
@@ -1033,6 +1057,33 @@ class AppDelegate(NSObject):
         self._mi_sched_status.setTitle_(f"Scheduler: {dot} {status}")
         self._refresh_capability_status()
 
+
+    def _set_connection_state(
+        self,
+        state: ConnectionMonitorState,
+        *,
+        notify: bool = True,
+    ) -> None:
+        """Update connection menu/tooltip and optionally notify on transitions."""
+        previous = getattr(self, "_connection_state", None)
+        self._connection_state = state
+        if state.phase == "unable" and state.detail:
+            self._connection_last_error = state.detail
+        try:
+            self._mi_connection.setTitle_(state.menu_title)
+        except Exception:
+            log.debug("Connection menu item not ready", exc_info=True)
+        try:
+            self._set_status_icon(state.tooltip)
+        except Exception:
+            log.debug("Status icon update failed", exc_info=True)
+
+        if notify and should_notify_transition(previous, state):
+            note = state.notification
+            if note:
+                _notify(note[0], note[1], note[2])
+            self._last_notified_connection_phase = state.phase
+
     def _refresh_capability_status(self) -> None:
         """Show HTTP/SSH capability chips from the active router profile."""
         try:
@@ -1045,6 +1096,14 @@ class AppDelegate(NSObject):
             profile = None
         if profile is None:
             self._mi_capabilities.setTitle_("Capabilities: HTTP ? · SSH ?")
+            if (
+                getattr(self, "_connection_state", None) is None
+                or self._connection_state.phase != "connecting"
+            ):
+                self._set_connection_state(
+                    ConnectionMonitorState(phase="unknown"),
+                    notify=False,
+                )
             return
         http = "✓" if profile.http_ok else ("—" if profile.http_ok is False else "?")
         if not profile.ssh_enabled:
@@ -1056,6 +1115,21 @@ class AppDelegate(NSObject):
         else:
             ssh = "?"
         self._mi_capabilities.setTitle_(f"Capabilities: HTTP {http} · SSH {ssh}")
+        # Keep connection monitor in sync with profile capability flags.
+        if (
+            getattr(self, "_connection_state", None) is None
+            or self._connection_state.phase != "connecting"
+        ):
+            self._set_connection_state(
+                state_from_profile(
+                    host=getattr(profile, "host", None) if profile else None,
+                    http_ok=getattr(profile, "http_ok", None) if profile else None,
+                    ssh_ok=getattr(profile, "ssh_ok", None) if profile else None,
+                    ssh_enabled=bool(getattr(profile, "ssh_enabled", True)) if profile else True,
+                    last_error=self._connection_last_error,
+                ),
+                notify=False,
+            )
 
     # ------------------------------------------------------------------
     # Actions
@@ -1248,6 +1322,12 @@ class AppDelegate(NSObject):
             _notify("Connect Failed", "", "Host and password are required")
             return
 
+        self._set_connection_state(connecting_state(host), notify=True)
+        try:
+            self._mi_connect.setTitle_("🔌 Connecting…")
+            self._mi_connect.setEnabled_(False)
+        except Exception:
+            pass
         threading.Thread(
             target=self._do_connect,
             kwargs={
@@ -1280,29 +1360,97 @@ class AppDelegate(NSObject):
                     discover=False,
                 )
             )
-            ssh_note = (
-                "SSH ✓"
-                if result.probe.ssh_ok
-                else ("SSH —" if result.probe.ssh_ok is False else "SSH skipped")
-            )
-            _notify(
-                "Router Connected",
-                f"{result.profile.host}",
-                f"HTTP ✓ · {ssh_note} · creds:{result.credentials_backend}",
-            )
+            self._connection_last_error = None
             # Reload config so subsequent actions see the new profile.
             self._cfg = load_config()
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "refreshCapabilityStatus:", None, False
+                "finishConnectSuccess:", result.profile.host, False
             )
         except Exception as exc:
             log.exception("Connect router failed")
-            _notify("Connect Failed", "", str(exc)[:120])
+            self._connection_last_error = str(exc)[:120]
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "finishConnectFailure:", str(exc)[:120], False
+            )
 
     @objc.typedSelector(b"v@:@")
     def refreshCapabilityStatus_(self, _):
         self._refresh_capability_status()
 
+    @objc.typedSelector(b"v@:@")
+    def showConnectingStatus_(self, host):
+        host_s = str(host) if host else "router"
+        self._set_connection_state(connecting_state(host_s), notify=True)
+        try:
+            self._mi_connect.setTitle_("🔌 Connecting…")
+            self._mi_connect.setEnabled_(False)
+        except Exception:
+            pass
+
+    @objc.typedSelector(b"v@:@")
+    def showUnableStatus_(self, detail):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self._set_connection_state(
+            unable_state(host, str(detail) if detail else "unreachable"),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+
+    @objc.typedSelector(b"v@:@")
+    def showConnectedStatus_(self, _):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self._set_connection_state(
+            connected_state(host, http_ok=True, ssh_ok=None, ssh_enabled=True),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+        self._refresh_capability_status()
+
+
+    @objc.typedSelector(b"v@:@")
+    def finishConnectSuccess_(self, host):
+        host_s = str(host) if host else getattr(self._cfg, "router_host", None) or "router"
+        try:
+            from asusroutercontrol.profile import load_profiles
+            profile = load_profiles(self._cfg.data_dir, runtime_env=self._cfg.runtime_env).active
+        except Exception:
+            profile = None
+        self._set_connection_state(
+            connected_state(
+                host_s,
+                http_ok=True,
+                ssh_ok=getattr(profile, "ssh_ok", None) if profile else None,
+                ssh_enabled=bool(getattr(profile, "ssh_enabled", True)) if profile else True,
+            ),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
+        self._refresh_capability_status()
+
+    @objc.typedSelector(b"v@:@")
+    def finishConnectFailure_(self, detail):
+        host = getattr(self._cfg, "router_host", None) or "router"
+        self._set_connection_state(
+            unable_state(host, str(detail) if detail else "connect failed"),
+            notify=True,
+        )
+        try:
+            self._mi_connect.setTitle_("🔌 Connect Router...")
+            self._mi_connect.setEnabled_(True)
+        except Exception:
+            pass
     @objc.typedSelector(b"v@:@")
     def rebootRouter_(self, sender):
         alert = NSAlert.new()
