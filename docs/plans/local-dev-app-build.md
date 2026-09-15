@@ -2,31 +2,23 @@
 
 `ASUSRouterControl DEV.app` is a macOS menubar bundle. The launcher embeds **absolute paths** to this checkout’s `.venv`, so the app must be built on the same Mac you will use for testing. Linux/cloud agents cannot produce a runnable copy.
 
-## Build on your Mac
+## Build on your Mac (recommended)
 
-Run these from a clone of the repo (not from `~`). First-time setup:
-
-```bash
-cd ~
-git clone https://github.com/13DJTEQ/ASUSRouterControl.git
-cd ASUSRouterControl
-git fetch origin
-git checkout cursor/phase1-docs-agent-cleanup-451c
-git pull --ff-only
-make local-dev-app
-open "testbuilds/ASUSRouterControl DEV.app"
-```
-
-If you already have a clone:
+From **any** directory (including `~`), run the bootstrap script. It moves a broken/non-git `~/ASUSRouterControl` aside, clones, checks out the branch, builds, and opens the DEV app:
 
 ```bash
-cd /path/to/ASUSRouterControl   # must contain Makefile and .git
-git fetch origin
-git checkout cursor/phase1-docs-agent-cleanup-451c
-git pull --ff-only
-make local-dev-app
-open "testbuilds/ASUSRouterControl DEV.app"
+curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/phase1-docs-agent-cleanup-451c/scripts/bootstrap_local_dev_app_mac.sh | bash
 ```
+
+Or download then run:
+
+```bash
+curl -fsSL -o /tmp/bootstrap_local_dev_app_mac.sh \
+  https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/phase1-docs-agent-cleanup-451c/scripts/bootstrap_local_dev_app_mac.sh
+bash /tmp/bootstrap_local_dev_app_mac.sh
+```
+
+Optional env overrides: `ASUSROUTERCONTROL_DIR`, `ASUSROUTERCONTROL_BRANCH`, `ASUSROUTERCONTROL_OPEN_APP=0`.
 
 Optional full smoke (rebuild + relaunch + runtime checks):
 
