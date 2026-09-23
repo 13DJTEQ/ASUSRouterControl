@@ -19,10 +19,11 @@ from rich.table import Table
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
     _active_backend_name,
+    bitwarden_unlock_status,
     delete_bitwarden_master_password,
     delete_legacy_credentials,
     ensure_bitwarden_unlocked,
-    get_bitwarden_master_password,
+    get_last_bitwarden_unlock_error,
     migrate_legacy_credentials,
     store_bitwarden_master_password,
     store_credential,
@@ -845,7 +846,7 @@ def credentials_cleanup():
     "--status",
     "do_status",
     is_flag=True,
-    help="Show whether a master password is stored.",
+    help="Show Keychain MP presence, vault status, and last unlock error.",
 )
 def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
     """Manage Bitwarden master password in Keychain for automated unlock."""
@@ -853,10 +854,25 @@ def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
     if flags != 1:
         raise click.UsageError("Specify exactly one of --set, --delete, or --status")
     if do_status:
-        stored = get_bitwarden_master_password() is not None
-        state = ensure_bitwarden_unlocked()
+        info = bitwarden_unlock_status(attempt_unlock=True)
+        stored = bool(info.get("master_password_stored"))
+        state = str(info.get("vault_status") or "unknown")
+        err = info.get("last_unlock_error")
+        session = bool(info.get("bw_session_present"))
         console.print(f"Keychain master password: {'present' if stored else 'missing'}")
         console.print(f"Bitwarden vault: {state}")
+        console.print(f"BW_SESSION in env: {'yes' if session else 'no'}")
+        if err:
+            console.print(f"Last unlock error: {err}")
+        elif state == "unlocked":
+            console.print("Last unlock error: (none)")
+        else:
+            console.print("Last unlock error: (none recorded)")
+        if not stored and state == "locked":
+            console.print(
+                "[yellow]One-time setup:[/yellow] "
+                "[cyan]asusrouter credentials bw-master --set[/cyan]"
+            )
         return
     if do_delete:
         if delete_bitwarden_master_password():
@@ -870,6 +886,9 @@ def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
     state = ensure_bitwarden_unlocked()
     console.print("[green]Stored Bitwarden master password in macOS Keychain.[/green]")
     console.print(f"Vault status after unlock attempt: [bold]{state}[/bold]")
+    err = get_last_bitwarden_unlock_error()
+    if err and state != "unlocked":
+        console.print(f"[yellow]Unlock error:[/yellow] {err}")
 
 
 @cli.command()

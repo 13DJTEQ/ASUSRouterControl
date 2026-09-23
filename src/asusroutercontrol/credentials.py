@@ -240,8 +240,45 @@ def _ensure_bw_session_env() -> None:
 # Keychain-only secret used to unlock Bitwarden without an interactive prompt.
 # Never stored in the Bitwarden vault itself (chicken-and-egg).
 _BW_MASTER_PASSWORD_KEY = "bw_master_password"
+# Earlier experiments / docs may have used alternate key or env names.
+_BW_MASTER_PASSWORD_FALLBACK_KEYS = (
+    "bw_master_password",
+    "bitwarden_master_password",
+    "master_password",
+    "bw_password",
+)
+_BW_MASTER_PASSWORD_FALLBACK_ENVS = ("prod", "shared", "dev")
+# Pre-universal-keychain or ad-hoc Keychain locations (service, account).
+_BW_MASTER_PASSWORD_LEGACY_LOCATIONS: tuple[tuple[str, str], ...] = (
+    (f"{_LEGACY_SERVICE}.bw_master_password", "default"),
+    (f"{_LEGACY_SERVICE}.bitwarden_master_password", "default"),
+    (f"{_LEGACY_SERVICE}.master_password", "default"),
+    (PROJECT, "bw_master_password"),
+    (PROJECT, "bitwarden_master_password"),
+)
 _BW_PASSWORD_ENV = "BW_PASSWORD"
 _BW_SESSION_TOKEN_RE = re.compile(r'BW_SESSION="?([^"\s]+)"?')
+
+# Last auto-unlock failure reason (never includes the master password itself).
+_last_bw_unlock_error: str | None = None
+
+
+def _set_bw_unlock_error(message: str | None) -> None:
+    global _last_bw_unlock_error  # noqa: PLW0603
+    _last_bw_unlock_error = (message or "").strip() or None
+
+
+def get_last_bitwarden_unlock_error() -> str | None:
+    """Return the most recent Keychain auto-unlock failure reason, if any."""
+    return _last_bw_unlock_error
+
+
+def _normalize_bw_master_password(secret: str) -> bool:
+    """Write the master password to the canonical Keychain location."""
+    backend = _BACKENDS.get("keychain")
+    if backend is None:
+        return False
+    return bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
 
 
 def store_bitwarden_master_password(password: str) -> bool:
@@ -257,22 +294,104 @@ def store_bitwarden_master_password(password: str) -> bool:
 
 
 def get_bitwarden_master_password() -> str | None:
-    """Read the Bitwarden master password from macOS Keychain, if present."""
+    """Read the Bitwarden master password from macOS Keychain, if present.
+
+    Searches the canonical universal-keychain location first, then alternate
+    key/env names and legacy Keychain pairs. When found under a non-canonical
+    location, normalizes by writing the canonical entry for future reads.
+    """
     backend = _BACKENDS.get("keychain")
     if backend is None:
         return None
+
+    # 1) Canonical prod key.
     value = backend.get(_BW_MASTER_PASSWORD_KEY, env=DEFAULT_ENV)
     if isinstance(value, str) and value.strip():
         return value.strip()
+
+    if not _ensure_secure_keyring_backend():
+        return None
+
+    # 2) Alternate key / env combinations used by earlier store attempts.
+    for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
+        for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+            if try_env == DEFAULT_ENV and try_key == _BW_MASTER_PASSWORD_KEY:
+                continue
+            found = backend.get(try_key, env=try_env)
+            if isinstance(found, str) and found.strip():
+                secret = found.strip()
+                if _normalize_bw_master_password(secret):
+                    log.info(
+                        "Normalized Bitwarden master password Keychain entry "
+                        "from %s/%s → canonical %s/%s",
+                        _service_name(try_key, try_env),
+                        _account_name(try_key, try_env),
+                        _service_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV),
+                        _account_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV),
+                    )
+                return secret
+
+    # 3) Legacy / ad-hoc service+account pairs.
+    for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
+        try:
+            found = keyring.get_password(service, account)
+        except Exception as exc:
+            log.debug("Legacy Keychain read %s/%s failed: %s", service, account, exc)
+            continue
+        if isinstance(found, str) and found.strip():
+            secret = found.strip()
+            if _normalize_bw_master_password(secret):
+                log.info(
+                    "Normalized Bitwarden master password Keychain entry "
+                    "from legacy %s/%s → canonical location",
+                    service,
+                    account,
+                )
+            return secret
     return None
 
 
 def delete_bitwarden_master_password() -> bool:
-    """Remove the Bitwarden master password from macOS Keychain."""
+    """Remove the Bitwarden master password from macOS Keychain (canonical + fallbacks)."""
     backend = _BACKENDS.get("keychain")
     if backend is None:
         return False
-    return bool(backend.delete(_BW_MASTER_PASSWORD_KEY, env=DEFAULT_ENV))
+    removed = False
+    for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
+        for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+            if backend.delete(try_key, env=try_env):
+                removed = True
+    if _ensure_secure_keyring_backend():
+        for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
+            try:
+                keyring.delete_password(service, account)
+                removed = True
+            except Exception:
+                continue
+    return removed
+
+
+def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | bool | None]:
+    """Diagnostics for Keychain MP + vault state.
+
+    When attempt_unlock is True, runs ensure_bitwarden_unlocked() first so
+    last_unlock_error reflects the latest auto-unlock attempt.
+    """
+    vault: str
+    if attempt_unlock:
+        vault = ensure_bitwarden_unlocked()
+    else:
+        backend = _BACKENDS.get("bitwarden")
+        if backend is None or not isinstance(backend, _BitwardenBackend):
+            vault = "unknown"
+        else:
+            vault = backend.login_check()
+    return {
+        "master_password_stored": get_bitwarden_master_password() is not None,
+        "vault_status": vault,
+        "last_unlock_error": get_last_bitwarden_unlock_error(),
+        "bw_session_present": bool(os.environ.get(_BW_SESSION_ENV, "").strip()),
+    }
 
 
 def _persist_bw_session(session: str) -> None:
@@ -317,26 +436,55 @@ def _parse_bw_session_token(stdout: str, stderr: str = "") -> str:
     return match.group(1) if match else ""
 
 
+def _classify_bw_unlock_failure(stderr: str, stdout: str = "") -> str:
+    """Map bw unlock stderr/stdout into a short operator-facing reason."""
+    blob = f"{stdout}\n{stderr}".strip().lower()
+    if not blob:
+        return "bw unlock failed with no error output"
+    if "invalid master password" in blob or "incorrect master password" in blob:
+        return "wrong master password in Keychain"
+    if ("keychain" in blob and "locked" in blob) or "mac os keychain" in blob:
+        return "macOS Keychain locked or unavailable"
+    if "session key is invalid" in blob or "invalid session" in blob:
+        return "invalid BW_SESSION"
+    if "not logged in" in blob or "unauthenticated" in blob:
+        return "Bitwarden not logged in (run: bw login)"
+    # Keep a truncated raw snippet for unexpected failures (never the password).
+    raw = f"{stdout}\n{stderr}".strip().replace("\n", " ")
+    return f"bw unlock failed: {raw[:180]}"
+
+
 def ensure_bitwarden_unlocked() -> str:
     """Unlock Bitwarden using Keychain master password when the vault is locked.
 
-    Returns the post-attempt vault status string from login_check().
+    Never prompts on stdin. Returns the post-attempt vault status string from
+    login_check(). Records a human-readable failure via get_last_bitwarden_unlock_error().
     """
     backend = _BACKENDS.get("bitwarden")
     if backend is None or not isinstance(backend, _BitwardenBackend):
+        _set_bw_unlock_error("Bitwarden backend unavailable")
         return "unknown"
     state = backend.login_check()
     if state == "unlocked":
+        _set_bw_unlock_error(None)
         return state
     if state != "locked":
+        if state == "cli_not_found":
+            _set_bw_unlock_error("Bitwarden CLI ('bw') not found on PATH")
+        elif state == "unauthenticated":
+            _set_bw_unlock_error("Bitwarden not logged in (run: bw login)")
+        else:
+            _set_bw_unlock_error(f"Bitwarden vault status: {state}")
         return state
 
     master = get_bitwarden_master_password()
     if not master:
-        log.info(
+        msg = (
             "Bitwarden vault locked and no master password in Keychain. "
             "Run: asusrouter credentials bw-master --set"
         )
+        _set_bw_unlock_error(msg)
+        log.info(msg)
         return state
 
     result = _bw_run(
@@ -344,19 +492,28 @@ def ensure_bitwarden_unlocked() -> str:
         extra_env={_BW_PASSWORD_ENV: master},
     )
     if result is None:
+        _set_bw_unlock_error("Bitwarden CLI ('bw') not found on PATH")
         return "cli_not_found"
     if result.returncode != 0:
-        err = f"{result.stdout}\n{result.stderr}".strip()
-        log.warning("Bitwarden unlock via Keychain master password failed: %s", err[:200])
+        reason = _classify_bw_unlock_failure(result.stderr or "", result.stdout or "")
+        _set_bw_unlock_error(reason)
+        log.warning("Bitwarden unlock via Keychain master password failed: %s", reason)
         return "locked"
     token = _parse_bw_session_token(result.stdout or "", result.stderr or "")
     if not token:
-        log.warning("Bitwarden unlock succeeded but no session token was parsed")
+        reason = "bw unlock succeeded but no session token was parsed"
+        _set_bw_unlock_error(reason)
+        log.warning(reason)
         return "locked"
     _persist_bw_session(token)
     state = backend.login_check()
     if state == "unlocked":
+        _set_bw_unlock_error(None)
         log.info("Bitwarden vault unlocked via Keychain master password")
+    else:
+        _set_bw_unlock_error(
+            f"bw unlock produced a session but vault still reports: {state}"
+        )
     return state
 
 
@@ -365,7 +522,11 @@ def _bw_run(
     *,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
-    """Execute a Bitwarden CLI command, returning None if bw is unavailable."""
+    """Execute a Bitwarden CLI command, returning None if bw is unavailable.
+
+    stdin is always DEVNULL so menubar/GUI never blocks on interactive prompts
+    (e.g. accidental `bw unlock` without --passwordenv).
+    """
     global _bw_cli_found  # noqa: PLW0603
     _ensure_bw_session_env()
     env = os.environ.copy()
@@ -387,6 +548,7 @@ def _bw_run(
                 capture_output=True,
                 text=True,
                 env=env,
+                stdin=subprocess.DEVNULL,
             )
             _bw_cli_found = True
             return result
@@ -1471,11 +1633,14 @@ def resolve_connect_login_defaults(
             "(e.g. router.asus.com (13Maschine))."
         )
     elif bw_status == "locked":
+        unlock_err = get_last_bitwarden_unlock_error()
         detail = (
             "Bitwarden vault is locked — store the master password for auto-unlock: "
-            "asusrouter credentials bw-master --set "
-            "(or run bw unlock once). Router Login Name may not be 'admin'."
+            "asusrouter credentials bw-master --set. "
+            "Router Login Name may not be 'admin'."
         )
+        if unlock_err:
+            detail = f"{detail} ({unlock_err})"
     elif bw_status == "cli_not_found":
         detail = (
             "Bitwarden CLI ('bw') not found for this app launch PATH — "

@@ -715,6 +715,7 @@ class TestBitwardenMasterPasswordUnlock:
         assert os.environ.get("BW_SESSION") == "tok-abc-session-value"
         env_text = (home / ".asusroutercontrol.dev" / ".env").read_text(encoding="utf-8")
         assert "BW_SESSION=tok-abc-session-value" in env_text
+        assert creds.get_last_bitwarden_unlock_error() is None
 
     def test_ensure_unlock_raw_token(self, monkeypatch, mem_keyring):
         from types import SimpleNamespace
@@ -748,6 +749,7 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
         # Ensure no leftover master password
         creds.delete_bitwarden_master_password()
+        creds._set_bw_unlock_error(None)
 
         def fake_login_check(self):
             return "locked"
@@ -758,6 +760,9 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
         assert creds.ensure_bitwarden_unlocked() == "locked"
+        err = creds.get_last_bitwarden_unlock_error() or ""
+        assert "bw-master --set" in err
+        assert "no master password" in err.lower()
 
     def test_ensure_stays_locked_when_unlock_fails(self, monkeypatch, mem_keyring):
         from types import SimpleNamespace
@@ -766,6 +771,7 @@ class TestBitwardenMasterPasswordUnlock:
 
         monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
         assert creds.store_bitwarden_master_password("wrong-mp") is True
+        creds._set_bw_unlock_error(None)
 
         def fake_login_check(self):
             return "locked"
@@ -776,6 +782,44 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
         assert creds.ensure_bitwarden_unlocked() == "locked"
+        err = creds.get_last_bitwarden_unlock_error() or ""
+        assert "wrong master password" in err.lower()
+
+    def test_unlock_status_reports_fields(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        creds.delete_bitwarden_master_password()
+        creds._set_bw_unlock_error("probe error")
+        monkeypatch.delenv("BW_SESSION", raising=False)
+
+        def fake_login_check(self):
+            return "locked"
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        info = creds.bitwarden_unlock_status(attempt_unlock=False)
+        assert info["master_password_stored"] is False
+        assert info["vault_status"] == "locked"
+        assert info["last_unlock_error"] == "probe error"
+        assert info["bw_session_present"] is False
+
+    def test_bw_run_passes_stdin_devnull(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        seen: dict = {}
+
+        def fake_run(*args, **kwargs):
+            seen["stdin"] = kwargs.get("stdin")
+            return SimpleNamespace(returncode=0, stdout='{"status":"locked"}', stderr="")
+
+        monkeypatch.setattr(creds.subprocess, "run", fake_run)
+        monkeypatch.setattr(creds, "_bw_binaries", lambda: ["/usr/bin/bw"])
+        monkeypatch.setattr(creds, "_ensure_bw_session_env", lambda: None)
+        result = creds._bw_run(["status"])
+        assert result is not None
+        assert seen["stdin"] is creds.subprocess.DEVNULL
 
     def test_parse_bw_session_token_variants(self):
         from asusroutercontrol.credentials import _parse_bw_session_token
@@ -785,6 +829,14 @@ class TestBitwardenMasterPasswordUnlock:
             _parse_bw_session_token('export BW_SESSION="quoted-token"\n') == "quoted-token"
         )
         assert _parse_bw_session_token("Enter master password:") == ""
+
+    def test_classify_bw_unlock_failure(self):
+        from asusroutercontrol.credentials import _classify_bw_unlock_failure
+
+        assert "wrong master password" in _classify_bw_unlock_failure(
+            "Invalid master password."
+        ).lower()
+        assert "not logged in" in _classify_bw_unlock_failure("You are not logged in").lower()
 
     def test_is_login_blocked_error_detects_captcha(self):
         from asusroutercontrol.scheduler import _is_login_blocked_error
