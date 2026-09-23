@@ -56,17 +56,21 @@ def test_menubar_cancels_health_timer_on_connect() -> None:
     assert "def _cancel_health_retry_timer" in src
     assert "def _set_connect_in_flight" in src
     assert "self._set_connect_in_flight(True)" in src
-    assert "_restart_runtime_with_profile" in src
+    assert "def _restart_runtime_with_profile" in src
     assert "_http_transport_attempts" in src
     assert "pause_login_attempts" in src
     begin = src.index("def _begin_connect_activity")
     begin_chunk = src[begin : begin + 500]
     assert "_set_connect_in_flight(True)" in begin_chunk
     success = src.index("def finishConnectSuccess_")
-    success_chunk = src[success : success + 1800]
+    success_end = src.index("def finishConnectFailure_", success)
+    success_chunk = src[success:success_end]
     assert "_restart_runtime_with_profile" in success_chunk
     assert "_cancel_health_retry_timer" in success_chunk
     failure = src.index("def finishConnectFailure_")
-    failure_chunk = src[failure : failure + 900]
+    failure_end = src.find("\n    def ", failure + 1)
+    if failure_end < 0:
+        failure_end = failure + 1200
+    failure_chunk = src[failure:failure_end]
     assert "_cancel_health_retry_timer" in failure_chunk
     assert "_connect_in_flight = False" in failure_chunk
