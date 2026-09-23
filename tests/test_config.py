@@ -67,11 +67,18 @@ class TestConfigFromEnv:
         with pytest.raises(ValueError, match="Runtime environment must match"):
             load_config()
 
-    def test_non_prod_runtime_rejects_prod_data_dir(self, env_clean, monkeypatch):
+    def test_non_prod_runtime_remaps_prod_data_dir(self, env_clean, monkeypatch):
         monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
         monkeypatch.setenv("DATA_DIR", str(production_data_dir()))
-        with pytest.raises(ValueError, match="cannot use production DATA_DIR"):
-            load_config()
+        monkeypatch.setenv(
+            "SOUNDSHIELD_EXPORT_PATH",
+            str(production_data_dir() / "soundshield_network.json"),
+        )
+        cfg = load_config()
+        assert cfg.data_dir == default_data_dir_for_runtime("dev")
+        assert cfg.soundshield_export_path == (
+            default_data_dir_for_runtime("dev") / "soundshield_network.json"
+        )
     def test_router_backend_env(self, env_clean, monkeypatch):
         monkeypatch.setenv("ROUTER_BACKEND", "freshtomato")
         cfg = load_config()

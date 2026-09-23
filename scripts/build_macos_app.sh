@@ -114,6 +114,16 @@ VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 DEV_RUNTIME_EXE="${dev_runtime_exe}"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
 SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+LAUNCH_LOG="\${HOME}/.asusroutercontrol.dev/launcher.log"
+mkdir -p "\${HOME}/.asusroutercontrol.dev" 2>/dev/null || true
+_log() {
+  printf '%s %s\n' "\$(date '+%Y-%m-%dT%H:%M:%S%z')" "\$*" >> "\${LAUNCH_LOG}" 2>/dev/null || true
+}
+_fail_alert() {
+  local msg="\$1"
+  _log "FAIL: \${msg}"
+  /usr/bin/osascript -e "display alert \\"ASUSRouterControl DEV cannot start\\" message \\"\${msg}\\"" 2>/dev/null || true
+}
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
 # Absolute .app path so Restart can relaunch when not under launchd.
 export ASUSROUTERCONTROL_APP_BUNDLE="\$(cd "\${SELF_DIR}/../.." && pwd)"
@@ -122,26 +132,46 @@ if [[ -f "\${PROJECT_ROOT}/.env" ]]; then
   export ASUSROUTERCONTROL_ENV_FILE="\${PROJECT_ROOT}/.env"
 fi
 export ASUSROUTERCONTROL_PROJECT_ROOT="\${PROJECT_ROOT}"
+# Force DEV-scoped data dirs before python-dotenv loads a shared project .env
+# that often pins production DATA_DIR=~/.asusroutercontrol (dotenv does not
+# override pre-set variables).
+export DATA_DIR="\${HOME}/.asusroutercontrol.dev"
+export SOUNDSHIELD_EXPORT_PATH="\${HOME}/.asusroutercontrol.dev/soundshield_network.json"
+_log "launch start bundle=\${ASUSROUTERCONTROL_APP_BUNDLE} env_file=\${ASUSROUTERCONTROL_ENV_FILE:-none}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then
   export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
-  "\${VENV_PY}" -m asusroutercontrol.menubar
+  _log "trying venv: \${VENV_PY}"
+  "\${VENV_PY}" -m asusroutercontrol.menubar >>"\${LAUNCH_LOG}" 2>&1
   venv_exit=\$?
   if [[ \${venv_exit} -eq 0 ]]; then
     exit 0
   fi
+  _log "venv exit=\${venv_exit}"
 fi
 # Fallback to DEV-specific self-contained runtime built from current source.
 if [[ -x "\${DEV_RUNTIME_EXE}" ]]; then
-  exec "\${DEV_RUNTIME_EXE}"
+  _log "trying DEV runtime: \${DEV_RUNTIME_EXE}"
+  "\${DEV_RUNTIME_EXE}" >>"\${LAUNCH_LOG}" 2>&1
+  rt_exit=\$?
+  if [[ \${rt_exit} -eq 0 ]]; then
+    exit 0
+  fi
+  _log "DEV runtime exit=\${rt_exit}"
 fi
 # Final fallback to shared dist runtime.
 if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
-  exec "\${SELF_CONTAINED_EXE}"
+  _log "trying dist runtime: \${SELF_CONTAINED_EXE}"
+  "\${SELF_CONTAINED_EXE}" >>"\${LAUNCH_LOG}" 2>&1
+  dist_exit=\$?
+  if [[ \${dist_exit} -eq 0 ]]; then
+    exit 0
+  fi
+  _log "dist runtime exit=\${dist_exit}"
 fi
 
-/usr/bin/osascript -e 'display alert "ASUSRouterControl cannot start" message "No usable runtime found. Build the app or run make setup in the project folder."'
+_fail_alert "No usable runtime found (see ~/.asusroutercontrol.dev/launcher.log). Run make setup then make build-dev-app in the project folder."
 exit 1
 EOF
   chmod +x "${launcher}"

@@ -142,6 +142,24 @@ def load_config(
     )
     default_data_dir = default_data_dir_for_runtime(resolved_runtime_env)
     data_dir = Path(os.environ.get("DATA_DIR", str(default_data_dir))).expanduser()
+    # Shared project .env often pins production DATA_DIR. Never let non-prod
+    # runtimes (DEV.app / test) share the production data directory.
+    if (
+        resolved_runtime_env != _PROD_RUNTIME_ENV
+        and data_dir.resolve() == production_data_dir().resolve()
+    ):
+        data_dir = default_data_dir
+    soundshield_default = data_dir / "soundshield_network.json"
+    soundshield_export_path = Path(
+        os.environ.get("SOUNDSHIELD_EXPORT_PATH", str(soundshield_default))
+    ).expanduser()
+    if resolved_runtime_env != _PROD_RUNTIME_ENV:
+        try:
+            soundshield_export_path.resolve().relative_to(production_data_dir().resolve())
+        except ValueError:
+            pass
+        else:
+            soundshield_export_path = soundshield_default
     cfg = Config(
         runtime_env=resolved_runtime_env,
         router_backend=os.environ.get("ROUTER_BACKEND", "merlin").strip().lower(),
@@ -160,9 +178,7 @@ def load_config(
         ssh_known_hosts_path=(
             _resolve_ssh_known_hosts_path(resolved_runtime_env)
         ),
-        soundshield_export_path=Path(
-            os.environ.get("SOUNDSHIELD_EXPORT_PATH", str(data_dir / "soundshield_network.json"))
-        ).expanduser(),
+        soundshield_export_path=soundshield_export_path,
         speedtest_times=_parse_int_tuple(
             os.environ.get("SPEEDTEST_TIMES", ""),
             _DEFAULT_SPEEDTEST_TIMES,

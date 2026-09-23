@@ -58,8 +58,9 @@ from asusroutercontrol.scheduler import MonitorScheduler
 log = logging.getLogger(__name__)
 
 # Thresholds for notifications
-
-PLAN_SPEED_DOWN = plan_download_bps()
+# Default plan rate — do not call load_config() at import time (Finder-launched
+# DEV.app may point at a shared project .env before main() remaps DATA_DIR).
+PLAN_SPEED_DOWN = 300_000_000.0
 TEMP_WARN_C = 85.0
 LOSS_WARN_PCT = 5.0
 SPEED_DROP_RATIO = 0.70  # notify if < 70% of plan
@@ -1390,9 +1391,27 @@ def main() -> None:
             pass
         sys.exit(78)  # EX_CONFIG
     runtime_env = _runtime_environment()
-    cfg = load_config(runtime_env=runtime_env)
-    ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
-    cfg = load_config(runtime_env=runtime_env)
+    try:
+        cfg = load_config(runtime_env=runtime_env)
+        ensure_runtime_data_dir_isolation(cfg, runtime_env=runtime_env)
+    except Exception as exc:
+        msg = f"FATAL: config load failed — {exc}"
+        print(msg, file=sys.stderr, flush=True)
+        try:
+            fallback_dir = Path.home() / f".asusroutercontrol.{runtime_env or 'dev'}"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            with open(fallback_dir / "scheduler.log", "a", encoding="utf-8") as f:
+                from datetime import datetime as _dt
+
+                f.write(f"{_dt.now().isoformat()} CRITICAL menubar: {msg}\n")
+        except Exception:
+            pass
+        sys.exit(78)  # EX_CONFIG
+    global PLAN_SPEED_DOWN
+    try:
+        PLAN_SPEED_DOWN = plan_download_bps(cfg)
+    except Exception:
+        pass
     cfg.ensure_dirs()
     log_path = cfg.data_dir / "scheduler.log"
     logging.basicConfig(
