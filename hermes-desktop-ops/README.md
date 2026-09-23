@@ -74,6 +74,15 @@ If ops tools are already installed:
 /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-archive.sh
 ```
 
+### Repair (dry-run default)
+
+Fast→Slow repair after a recent archive (or the script will offer/run collector). Default is dry-run; use `--apply` only after review. Live progress uses the same `LIVE.log` / heartbeats as the collector.
+
+```bash
+/bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-repair.sh
+/bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-repair.sh --apply
+```
+
 ### Install tools only — no collect
 
 ```bash
