@@ -72,83 +72,111 @@ build_dev_app() {
   local launcher="${macos_dir}/asusroutercontrol-launcher"
   local plist_path="${contents_dir}/Info.plist"
   local dest_app="${TEST_BUILDS_DIR}/${app_name}"
+  local bundle_executable="asusroutercontrol-launcher"
+  local home_dir="${HOME}"
+  local env_file_path=""
 
   rm -rf "${app_dir}"
   mkdir -p "${macos_dir}" "${resources_dir}"
 
-  # Build a DEV-specific self-contained runtime when PyInstaller is available.
-  # This keeps fallback launches aligned with current source behavior.
-  if "${VENV_PY}" -c "import PyInstaller" >/dev/null 2>&1; then
-    rm -rf "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}" "${dev_runtime_app}"
-    mkdir -p "${dev_runtime_dir}" "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}"
-    cat > "${dev_runtime_entrypoint}" <<'EOF'
+  if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    env_file_path="${PROJECT_ROOT}/.env"
+  fi
+
+  # Sequoia ControlCenter will not reliably show NSStatusItem for a bash
+  # CFBundleExecutable that exec's CPython. Embed a real Mach-O GUI binary
+  # from PyInstaller as the app executable instead.
+  if ! "${VENV_PY}" -c "import PyInstaller" >/dev/null 2>&1; then
+    echo "PyInstaller is required for DEV.app (menubar icon on modern macOS)." >&2
+    echo "Run: ${VENV_PY} -m pip install pyinstaller" >&2
+    exit 1
+  fi
+
+  rm -rf "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}" "${dev_runtime_app}"
+  mkdir -p "${dev_runtime_dir}" "${dev_runtime_work_dir}" "${dev_runtime_spec_dir}"
+  cat > "${dev_runtime_entrypoint}" <<'EOF'
 from asusroutercontrol.menubar import main
 
 if __name__ == "__main__":
     main()
 EOF
-    "${VENV_PY}" -m PyInstaller \
-      --noconfirm \
-      --clean \
-      --windowed \
-      --name "${dev_runtime_name}" \
-      --hidden-import AppKit \
-      --hidden-import Foundation \
-      --distpath "${dev_runtime_dir}" \
-      --workpath "${dev_runtime_work_dir}" \
-      --specpath "${dev_runtime_spec_dir}" \
-      --osx-bundle-identifier "dev.mediawavetech.asusroutercontrol.devruntime" \
-      "${dev_runtime_entrypoint}"
+  "${VENV_PY}" -m PyInstaller \
+    --noconfirm \
+    --clean \
+    --windowed \
+    --name "${dev_runtime_name}" \
+    --hidden-import AppKit \
+    --hidden-import Foundation \
+    --distpath "${dev_runtime_dir}" \
+    --workpath "${dev_runtime_work_dir}" \
+    --specpath "${dev_runtime_spec_dir}" \
+    --osx-bundle-identifier "${bundle_id}" \
+    "${dev_runtime_entrypoint}"
 
-    # Ensure inner runtime also declares LSUIElement so macOS treats it as a status-bar app.
-    # Without this, the inner runtime fails scene activation when another LSUIElement app is running.
-    if [[ -f "${dev_runtime_app}/Contents/Info.plist" ]]; then
-      plutil -replace LSUIElement -bool true "${dev_runtime_app}/Contents/Info.plist"
-    fi
+  if [[ ! -x "${dev_runtime_exe}" ]]; then
+    echo "PyInstaller did not produce ${dev_runtime_exe}" >&2
+    exit 1
   fi
 
+  # Copy Mach-O + support files into our DEV.app bundle.
+  # Keep the binary name as CFBundleExecutable so dyld finds _internal/Frameworks.
+  bundle_executable="${dev_runtime_name}"
+  # shellcheck disable=SC2045
+  for entry in "${dev_runtime_app}/Contents/MacOS/"*; do
+    cp -R "${entry}" "${macos_dir}/"
+  done
+  if [[ -d "${dev_runtime_app}/Contents/Frameworks" ]]; then
+    rm -rf "${contents_dir}/Frameworks"
+    cp -R "${dev_runtime_app}/Contents/Frameworks" "${contents_dir}/Frameworks"
+  fi
+  if [[ -d "${dev_runtime_app}/Contents/Resources" ]]; then
+    # Merge PyInstaller resources; our Icon.icns is written after this.
+    cp -R "${dev_runtime_app}/Contents/Resources/." "${resources_dir}/"
+  fi
+
+  # Optional escape hatch: bash launcher that prefers live venv source.
+  # Not the CFBundleExecutable — only for manual/debug use.
   cat > "${launcher}" <<EOF
 #!/usr/bin/env bash
+# Debug launcher (not used by Finder). Prefer:
+#   open "testbuilds/ASUSRouterControl DEV.app"
 PROJECT_ROOT="${PROJECT_ROOT}"
 VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
-DEV_RUNTIME_EXE="${dev_runtime_exe}"
-SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
 SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+BUNDLED_EXE="\${SELF_DIR}/${dev_runtime_name}"
+LAUNCH_LOG="\${HOME}/.asusroutercontrol.dev/launcher.log"
+mkdir -p "\${HOME}/.asusroutercontrol.dev" 2>/dev/null || true
+_log() {
+  printf '%s %s\n' "\$(date '+%Y-%m-%dT%H:%M:%S%z')" "\$*" >> "\${LAUNCH_LOG}" 2>/dev/null || true
+}
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
-# Absolute .app path so Restart can relaunch when not under launchd.
 export ASUSROUTERCONTROL_APP_BUNDLE="\$(cd "\${SELF_DIR}/../.." && pwd)"
-# Load project .env even when Finder launches the app with cwd=/
+export ASUSROUTERCONTROL_PROJECT_ROOT="\${PROJECT_ROOT}"
 if [[ -f "\${PROJECT_ROOT}/.env" ]]; then
   export ASUSROUTERCONTROL_ENV_FILE="\${PROJECT_ROOT}/.env"
 fi
-export ASUSROUTERCONTROL_PROJECT_ROOT="\${PROJECT_ROOT}"
-# Prefer source-tree runtime for dev builds so the process remains associated
-# with the DEV app bundle identity in the menubar.
-if [[ -x "\${VENV_PY}" ]]; then
+export DATA_DIR="\${HOME}/.asusroutercontrol.dev"
+export SOUNDSHIELD_EXPORT_PATH="\${HOME}/.asusroutercontrol.dev/soundshield_network.json"
+_log "debug launcher start bundle=\${ASUSROUTERCONTROL_APP_BUNDLE}"
+if [[ "\${ASUSROUTERCONTROL_DEV_USE_VENV:-}" == "1" && -x "\${VENV_PY}" ]]; then
   export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
-  "\${VENV_PY}" -m asusroutercontrol.menubar
-  venv_exit=\$?
-  if [[ \${venv_exit} -eq 0 ]]; then
-    exit 0
-  fi
+  _log "exec venv (ASUSROUTERCONTROL_DEV_USE_VENV=1)"
+  exec "\${VENV_PY}" -m asusroutercontrol.menubar >>"\${LAUNCH_LOG}" 2>&1
 fi
-# Fallback to DEV-specific self-contained runtime built from current source.
-if [[ -x "\${DEV_RUNTIME_EXE}" ]]; then
-  exec "\${DEV_RUNTIME_EXE}"
+if [[ -x "\${BUNDLED_EXE}" ]]; then
+  _log "exec bundled Mach-O: \${BUNDLED_EXE}"
+  exec "\${BUNDLED_EXE}"
 fi
-# Final fallback to shared dist runtime.
-if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
-  exec "\${SELF_CONTAINED_EXE}"
-fi
-
-/usr/bin/osascript -e 'display alert "ASUSRouterControl cannot start" message "No usable runtime found. Build the app or run make setup in the project folder."'
+_log "FAIL: no runtime"
 exit 1
 EOF
   chmod +x "${launcher}"
+  chmod +x "${macos_dir}/${dev_runtime_name}"
 
   "${VENV_PY}" "${SCRIPT_DIR}/generate_dev_icon.py" --output "${icon_icns}"
   cp "${icon_icns}" "${resources_dir}/Icon.icns"
 
+  # LSEnvironment injects env into the Mach-O GUI process (no bash wrapper).
   cat > "${plist_path}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -159,7 +187,7 @@ EOF
   <key>CFBundleDisplayName</key>
   <string>${display_name}</string>
   <key>CFBundleExecutable</key>
-  <string>asusroutercontrol-launcher</string>
+  <string>${bundle_executable}</string>
   <key>CFBundleIdentifier</key>
   <string>${bundle_id}</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -176,6 +204,27 @@ EOF
   <string>Icon</string>
   <key>LSUIElement</key>
   <true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>ASUSROUTERCONTROL_RUNTIME_ENV</key>
+    <string>dev</string>
+    <key>ASUSROUTERCONTROL_PROJECT_ROOT</key>
+    <string>${PROJECT_ROOT}</string>
+    <key>ASUSROUTERCONTROL_APP_BUNDLE</key>
+    <string>${dest_app}</string>
+    <key>DATA_DIR</key>
+    <string>${home_dir}/.asusroutercontrol.dev</string>
+    <key>SOUNDSHIELD_EXPORT_PATH</key>
+    <string>${home_dir}/.asusroutercontrol.dev/soundshield_network.json</string>
+EOF
+  if [[ -n "${env_file_path}" ]]; then
+    cat >> "${plist_path}" <<EOF
+    <key>ASUSROUTERCONTROL_ENV_FILE</key>
+    <string>${env_file_path}</string>
+EOF
+  fi
+  cat >> "${plist_path}" <<EOF
+  </dict>
 </dict>
 </plist>
 EOF
@@ -184,9 +233,14 @@ EOF
   rm -rf "${dest_app}"
   cp -R "${app_dir}" "${dest_app}"
   touch "${dest_app}/Contents/Resources/DEV_BUILD"
+  # Refresh Launch Services registration for the new executable name.
+  if command -v /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister >/dev/null 2>&1; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${dest_app}" >/dev/null 2>&1 || true
+  fi
 
   echo "Built ${app_name}"
   echo "Output: ${dest_app}"
+  echo "Executable: ${bundle_executable} (Mach-O GUI — required for Sequoia menubar icon)"
 }
 
 build_prod_dmg() {
