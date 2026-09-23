@@ -24,7 +24,6 @@ from asusroutercontrol.credentials import (
     delete_legacy_credentials,
     ensure_bitwarden_unlocked,
     get_bitwarden_master_password,
-    get_last_bitwarden_master_password_match,
     get_last_bitwarden_unlock_error,
     migrate_legacy_credentials,
     store_bitwarden_master_password,
