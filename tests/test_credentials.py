@@ -647,7 +647,76 @@ class TestBitwardenMasterPasswordUnlock:
         assert creds.delete_bitwarden_master_password() is True
         assert creds.get_bitwarden_master_password() is None
 
-    def test_ensure_unlocks_with_keychain_master(self, monkeypatch, mem_keyring):
+    def test_store_rejects_empty_password(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("   ") is False
+        assert creds.get_bitwarden_master_password() is None
+
+    def test_store_fails_without_keychain_backend(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", None)
+        assert creds.store_bitwarden_master_password("s3cret-mp") is False
+        assert creds.get_bitwarden_master_password() is None
+        assert creds.delete_bitwarden_master_password() is False
+
+    def test_ensure_already_unlocked_skips_unlock(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("s3cret-mp") is True
+        calls: list[list[str]] = []
+
+        def fake_login_check(self):
+            return "unlocked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            calls.append(list(arguments))
+            raise AssertionError("unlock must not run when already unlocked")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert calls == []
+
+    def test_ensure_unlocks_with_keychain_master(self, monkeypatch, mem_keyring, tmp_path):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("s3cret-mp") is True
+        states = {"n": 0}
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(creds.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.delenv("BW_SESSION", raising=False)
+
+        def fake_login_check(self):
+            states["n"] += 1
+            return "locked" if states["n"] == 1 else "unlocked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            assert arguments[:2] == ["unlock", "--passwordenv"]
+            assert arguments[2] == creds._BW_PASSWORD_ENV
+            assert "--raw" in arguments
+            assert extra_env == {creds._BW_PASSWORD_ENV: "s3cret-mp"}
+            return SimpleNamespace(
+                returncode=0,
+                stdout="export BW_SESSION=\"tok-abc-session-value\"\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert os.environ.get("BW_SESSION") == "tok-abc-session-value"
+        env_text = (home / ".asusroutercontrol.dev" / ".env").read_text(encoding="utf-8")
+        assert "BW_SESSION=tok-abc-session-value" in env_text
+
+    def test_ensure_unlock_raw_token(self, monkeypatch, mem_keyring):
         from types import SimpleNamespace
 
         from asusroutercontrol import credentials as creds
@@ -661,14 +730,61 @@ class TestBitwardenMasterPasswordUnlock:
             return "locked" if states["n"] == 1 else "unlocked"
 
         def fake_bw_run(arguments, *, extra_env=None):
-            assert arguments[:2] == ["unlock", "--passwordenv"]
-            assert extra_env == {"BW_PASSWORD": "s3cret-mp"}
             return SimpleNamespace(returncode=0, stdout="SESSIONTOKEN\n", stderr="")
 
         monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
-        monkeypatch.setattr(creds, "_persist_bw_session", lambda token: None)
+
+        def _persist(token: str) -> None:
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds, "_persist_bw_session", _persist)
         assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert os.environ.get("BW_SESSION") == "SESSIONTOKEN"
+
+    def test_ensure_stays_locked_without_master_password(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        # Ensure no leftover master password
+        creds.delete_bitwarden_master_password()
+
+        def fake_login_check(self):
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            raise AssertionError("unlock must not run without Keychain master password")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+
+    def test_ensure_stays_locked_when_unlock_fails(self, monkeypatch, mem_keyring):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("wrong-mp") is True
+
+        def fake_login_check(self):
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            return SimpleNamespace(returncode=1, stdout="", stderr="Invalid master password.")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+
+    def test_parse_bw_session_token_variants(self):
+        from asusroutercontrol.credentials import _parse_bw_session_token
+
+        assert _parse_bw_session_token("bare-token-value") == "bare-token-value"
+        assert (
+            _parse_bw_session_token('export BW_SESSION="quoted-token"\n') == "quoted-token"
+        )
+        assert _parse_bw_session_token("Enter master password:") == ""
 
     def test_is_login_blocked_error_detects_captcha(self):
         from asusroutercontrol.scheduler import _is_login_blocked_error

@@ -2,10 +2,11 @@
 # Unlock Bitwarden (if needed) and sync the lab router login item into DEV .env
 # so the menubar app can read username / SSH port / BW_SESSION.
 #
-# Item: router.asus.com (13Maschine)
+# Prefers Keychain master-password auto-unlock via
+# `asusrouter credentials bw-master --set` / ensure_bitwarden_unlocked().
+# Falls back to interactive `bw unlock` when no Keychain MP is stored.
 #
-# Prefers Keychain-stored master password via:
-#   asusrouter credentials bw-master --set
+# Item: router.asus.com (13Maschine)
 #
 # Usage:
 #   bash scripts/bw_sync_router_env.sh
@@ -30,6 +31,22 @@ if ! command -v bw >/dev/null 2>&1; then
   exit 1
 fi
 
+# Prefer repo venv Python so ensure_bitwarden_unlocked imports succeed.
+PY="$ROOT/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  PY="$(command -v python3)"
+fi
+
+# Seed BW_SESSION from the target .env when the shell has none (GUI sync path).
+if [[ -z "${BW_SESSION:-}" && -f "$ENV_FILE" ]]; then
+  seeded="$(
+    sed -n 's/^[[:space:]]*BW_SESSION=//p' "$ENV_FILE" | tail -n1 | tr -d '\r' | sed 's/^"//;s/"$//'
+  )"
+  if [[ -n "$seeded" ]]; then
+    export BW_SESSION="$seeded"
+  fi
+fi
+
 status="$(bw status 2>/dev/null | tr -d '\r' || true)"
 echo "bw status: ${status:-unknown}"
 
@@ -38,34 +55,70 @@ if echo "$status" | grep -qi 'unauthenticated'; then
   exit 1
 fi
 
+_try_keychain_unlock() {
+  # Prints session token on stdout when vault becomes unlocked; returns 0 on success.
+  ROOT="$ROOT" ENV_FILE="$ENV_FILE" "$PY" - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+sys.path.insert(0, str(root / "src"))
+
+from asusroutercontrol.credentials import (  # noqa: E402
+    ensure_bitwarden_unlocked,
+    get_bitwarden_master_password,
+)
+
+if not get_bitwarden_master_password():
+    sys.exit(2)
+
+state = ensure_bitwarden_unlocked()
+session = os.environ.get("BW_SESSION", "").strip()
+if state != "unlocked" or not session:
+    print(f"Keychain auto-unlock result: {state}", file=sys.stderr)
+    sys.exit(1)
+print(session)
+PY
+}
+
 if echo "$status" | grep -qi 'locked' || [[ -z "${BW_SESSION:-}" ]]; then
-  PY_BIN="${ROOT}/.venv/bin/python"
-  if [[ ! -x "$PY_BIN" ]]; then
-    PY_BIN="$(command -v python3 || true)"
+  unlocked=0
+  if session="$(_try_keychain_unlock 2>/tmp/bw_keychain_unlock.$$.err)"; then
+    export BW_SESSION="$session"
+    unlocked=1
+    echo "Unlocked Bitwarden via Keychain master password."
+  else
+    kc_rc=$?
+    if [[ -s /tmp/bw_keychain_unlock.$$.err ]]; then
+      cat /tmp/bw_keychain_unlock.$$.err >&2 || true
+    fi
+    rm -f /tmp/bw_keychain_unlock.$$.err
+    if [[ "$kc_rc" -eq 2 ]]; then
+      echo "No Bitwarden master password in Keychain."
+      echo "One-time setup: asusrouter credentials bw-master --set"
+    fi
   fi
-  session=""
-  if [[ -n "$PY_BIN" ]]; then
-    echo "Trying Keychain master-password unlock..."
-    session="$("$PY_BIN" -c 'import os,sys; sys.path.insert(0,"src"); from asusroutercontrol.credentials import ensure_bitwarden_unlocked; st=ensure_bitwarden_unlocked(); print(os.environ.get("BW_SESSION","") if st=="unlocked" else "")' 2>/dev/null || true)"
-  fi
-  if [[ -z "$session" ]]; then
+  rm -f /tmp/bw_keychain_unlock.$$.err
+
+  if [[ "$unlocked" -eq 0 ]]; then
     echo "Unlocking Bitwarden vault (enter master password when prompted)..."
     unlock_out="$(bw unlock --raw 2>/dev/null || true)"
     session="$(printf '%s\n' "$unlock_out" | tail -n1 | tr -d '\r')"
-    if [[ "$session" == *BW_SESSION=* ]]; then
+    if [[ "$session" == *BW_SESSION=* || "$session" == *" "* || -z "$session" ]]; then
       session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION="\([^"]*\)".*/\1/p' | tail -n1)"
       if [[ -z "$session" ]]; then
         session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION=\([^ ]*\).*/\1/p' | tail -n1)"
       fi
     fi
+    if [[ -z "$session" ]]; then
+      echo "Could not parse BW_SESSION from bw unlock output." >&2
+      echo "Store MP once: asusrouter credentials bw-master --set" >&2
+      echo "Or run: bw unlock   then re-run this script with BW_SESSION exported." >&2
+      exit 1
+    fi
+    export BW_SESSION="$session"
   fi
-  if [[ -z "$session" ]]; then
-    echo "Could not unlock Bitwarden." >&2
-    echo "Store master password once: asusrouter credentials bw-master --set" >&2
-    echo "Or run: bw unlock" >&2
-    exit 1
-  fi
-  export BW_SESSION="$session"
 fi
 
 echo "Fetching item: ${ITEM_NAME}"
@@ -137,6 +190,7 @@ lines.extend(
         f"ASUSROUTERCONTROL_BW_ROUTER_ITEM={item_name}",
         f"ASUSROUTERCONTROL_ROUTER_USERNAME={user}",
         f"ASUSROUTERCONTROL_ROUTER_SSH_PORT={port}",
+        # Config.load_config reads SSH_PORT for profile overlays / RouterSSH.
         f"SSH_PORT={port}",
     ]
 )

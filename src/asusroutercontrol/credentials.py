@@ -15,6 +15,7 @@ from __future__ import annotations
 import abc
 import logging
 import os
+import re
 import subprocess
 from json import JSONDecodeError
 from json import dumps as json_dumps
@@ -236,12 +237,11 @@ def _ensure_bw_session_env() -> None:
             continue
 
 
-
-
 # Keychain-only secret used to unlock Bitwarden without an interactive prompt.
 # Never stored in the Bitwarden vault itself (chicken-and-egg).
 _BW_MASTER_PASSWORD_KEY = "bw_master_password"
 _BW_PASSWORD_ENV = "BW_PASSWORD"
+_BW_SESSION_TOKEN_RE = re.compile(r'BW_SESSION="?([^"\s]+)"?')
 
 
 def store_bitwarden_master_password(password: str) -> bool:
@@ -303,6 +303,20 @@ def _persist_bw_session(session: str) -> None:
             log.debug("Could not persist BW_SESSION to %s", env_path, exc_info=True)
 
 
+def _parse_bw_session_token(stdout: str, stderr: str = "") -> str:
+    """Extract a BW_SESSION token from `bw unlock --raw` (or export-style) output."""
+    lines = [line.strip() for line in (stdout or "").strip().splitlines() if line.strip()]
+    token = lines[-1] if lines else ""
+    match = _BW_SESSION_TOKEN_RE.search(token)
+    if match:
+        return match.group(1)
+    # Bare --raw token: no whitespace. Reject multi-word prompt/help lines.
+    if token and " " not in token:
+        return token
+    match = _BW_SESSION_TOKEN_RE.search(f"{stdout}\n{stderr}")
+    return match.group(1) if match else ""
+
+
 def ensure_bitwarden_unlocked() -> str:
     """Unlock Bitwarden using Keychain master password when the vault is locked.
 
@@ -335,21 +349,7 @@ def ensure_bitwarden_unlocked() -> str:
         err = f"{result.stdout}\n{result.stderr}".strip()
         log.warning("Bitwarden unlock via Keychain master password failed: %s", err[:200])
         return "locked"
-    session = (result.stdout or "").strip().splitlines()
-    token = session[-1].strip() if session else ""
-    # Some bw versions still print export lines; prefer a bare token.
-    if "BW_SESSION=" in token:
-        import re as _re
-
-        m = _re.search(r'BW_SESSION="?([^"\s]+)"?', token)
-        token = m.group(1) if m else token
-    if not token or " " in token and len(token) < 20:
-        # Fallback: parse any BW_SESSION= from combined output
-        import re as _re
-
-        blob = f"{result.stdout}\n{result.stderr}"
-        m = _re.search(r'BW_SESSION="?([^"\s]+)"?', blob)
-        token = m.group(1) if m else ""
+    token = _parse_bw_session_token(result.stdout or "", result.stderr or "")
     if not token:
         log.warning("Bitwarden unlock succeeded but no session token was parsed")
         return "locked"
@@ -358,6 +358,7 @@ def ensure_bitwarden_unlocked() -> str:
     if state == "unlocked":
         log.info("Bitwarden vault unlocked via Keychain master password")
     return state
+
 
 def _bw_run(
     arguments: list[str],
