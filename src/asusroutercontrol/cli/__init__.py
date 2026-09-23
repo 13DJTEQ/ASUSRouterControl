@@ -23,6 +23,7 @@ from asusroutercontrol.credentials import (
     delete_bitwarden_master_password,
     delete_legacy_credentials,
     ensure_bitwarden_unlocked,
+    get_bitwarden_master_password,
     get_last_bitwarden_unlock_error,
     migrate_legacy_credentials,
     store_bitwarden_master_password,
@@ -848,17 +849,38 @@ def credentials_cleanup():
     is_flag=True,
     help="Show Keychain MP presence, vault status, and last unlock error.",
 )
-def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
+@click.option(
+    "--force",
+    "do_force",
+    is_flag=True,
+    help="With --set: replace an existing Keychain master password.",
+)
+@click.option(
+    "--replace",
+    "do_replace",
+    is_flag=True,
+    help="Alias for --force (replace existing Keychain master password).",
+)
+def credentials_bw_master(
+    do_set: bool,
+    do_delete: bool,
+    do_status: bool,
+    do_force: bool,
+    do_replace: bool,
+):
     """Manage Bitwarden master password in Keychain for automated unlock."""
     flags = sum(bool(x) for x in (do_set, do_delete, do_status))
     if flags != 1:
         raise click.UsageError("Specify exactly one of --set, --delete, or --status")
+    if (do_force or do_replace) and not do_set:
+        raise click.UsageError("--force/--replace only apply with --set")
     if do_status:
         info = bitwarden_unlock_status(attempt_unlock=True)
         stored = bool(info.get("master_password_stored"))
         state = str(info.get("vault_status") or "unknown")
         err = info.get("last_unlock_error")
         session = bool(info.get("bw_session_present"))
+        console.print(f"master_password_stored: {'true' if stored else 'false'}")
         console.print(f"Keychain master password: {'present' if stored else 'missing'}")
         console.print(f"Bitwarden vault: {state}")
         console.print(f"BW_SESSION in env: {'yes' if session else 'no'}")
@@ -879,6 +901,13 @@ def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
             console.print("[green]Removed Bitwarden master password from Keychain.[/green]")
         else:
             console.print("[yellow]Nothing removed (missing or Keychain error).[/yellow]")
+        return
+    # --set: never prompt when an entry already exists (unless --force/--replace).
+    if get_bitwarden_master_password() is not None and not (do_force or do_replace):
+        console.print("Bitwarden master password already stored in Keychain.")
+        console.print("Use --force or --replace to overwrite.")
+        state = ensure_bitwarden_unlocked()
+        console.print(f"Vault status: [bold]{state}[/bold]")
         return
     password = click.prompt("Bitwarden master password", hide_input=True, confirmation_prompt=True)
     if not store_bitwarden_master_password(password):

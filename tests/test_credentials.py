@@ -843,3 +843,76 @@ class TestBitwardenMasterPasswordUnlock:
 
         assert _is_login_blocked_error(Exception("AccessError.CAPTCHA"))
         assert not _is_login_blocked_error(Exception("timeout contacting host"))
+
+
+class TestBitwardenMasterPasswordFallbacks:
+    def test_get_reads_dev_env_and_normalizes(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        # Seed only under env=dev (not canonical prod).
+        assert creds._BACKENDS["keychain"].store(
+            "bw_master_password", "legacy-dev-mp", env="dev"
+        )
+        # Canonical prod must be empty before normalize.
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") is None
+
+        assert creds.get_bitwarden_master_password() == "legacy-dev-mp"
+        # Normalized to canonical prod location.
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") == "legacy-dev-mp"
+
+    def test_get_reads_alternate_key_name(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds._BACKENDS["keychain"].store(
+            "bitwarden_master_password", "alt-key-mp", env="prod"
+        )
+        assert creds.get_bitwarden_master_password() == "alt-key-mp"
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") == "alt-key-mp"
+
+    def test_get_reads_legacy_service_account(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        mem_keyring.set_password(
+            "com.asusroutercontrol.bw_master_password",
+            "default",
+            "legacy-svc-mp",
+        )
+        assert creds.get_bitwarden_master_password() == "legacy-svc-mp"
+        assert (
+            mem_keyring.get_password(
+                creds._service_name("bw_master_password", "prod"),
+                creds._account_name("bw_master_password", "prod"),
+            )
+            == "legacy-svc-mp"
+        )
+
+    def test_ensure_unlocks_using_fallback_entry(self, monkeypatch, mem_keyring):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds._BACKENDS["keychain"].store(
+            "bw_master_password", "fallback-mp", env="dev"
+        )
+        states = {"n": 0}
+
+        def fake_login_check(self):
+            states["n"] += 1
+            return "locked" if states["n"] == 1 else "unlocked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            assert extra_env == {creds._BW_PASSWORD_ENV: "fallback-mp"}
+            return SimpleNamespace(returncode=0, stdout="SESSIONFROMFALLBACK\n", stderr="")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        def _persist(token: str) -> None:
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds, "_persist_bw_session", _persist)
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert os.environ.get("BW_SESSION") == "SESSIONFROMFALLBACK"

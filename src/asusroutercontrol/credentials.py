@@ -356,18 +356,26 @@ def delete_bitwarden_master_password() -> bool:
     backend = _BACKENDS.get("keychain")
     if backend is None:
         return False
+    if not _ensure_secure_keyring_backend():
+        return False
     removed = False
+    # Prefer direct keyring deletes so missing fallbacks do not spam error logs.
     for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
         for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
-            if backend.delete(try_key, env=try_env):
-                removed = True
-    if _ensure_secure_keyring_backend():
-        for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
             try:
-                keyring.delete_password(service, account)
+                keyring.delete_password(
+                    _service_name(try_key, try_env),
+                    _account_name(try_key, try_env),
+                )
                 removed = True
             except Exception:
                 continue
+    for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
+        try:
+            keyring.delete_password(service, account)
+            removed = True
+        except Exception:
+            continue
     return removed
 
 
