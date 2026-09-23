@@ -294,6 +294,7 @@ class AppDelegate(NSObject):
         self._health_retries_paused = False
         self._spinner_timer = None
         self._spinner_frame = 0
+        self._spinner_reason = None
 
         self.statusbar = NSStatusBar.systemStatusBar()
         self.statusitem = self.statusbar.statusItemWithLength_(NSVariableStatusItemLength)
@@ -899,7 +900,14 @@ class AppDelegate(NSObject):
             "🟡": "Connection degraded",
             "🔴": "Connection alert",
         }.get(status_dot, "Connection status unknown")
-        self._set_status_icon(status_label)
+        # Keep Connecting / busy spinner visible — don't let refresh overwrite it.
+        busy = self._spinner_timer is not None
+        connecting = (
+            getattr(self, "_connection_state", None) is not None
+            and self._connection_state.phase == "connecting"
+        )
+        if not busy and not connecting:
+            self._set_status_icon(status_label)
         self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
 
         sys_snap = data.get("system")
@@ -1206,26 +1214,52 @@ class AppDelegate(NSObject):
     # Actions
     # ------------------------------------------------------------------
 
-    def _start_spinner(self):
+    def _start_spinner(self, reason: str = "Working…"):
         """Start the menubar icon spinner animation on the main thread."""
         self._spinner_frame = 0
-        self.statusitem.button().setTitle_(self._icon_prefix)
-        env_label = "DEV" if self._runtime_env != "prod" else "PROD"
-        self.statusitem.button().setToolTip_(
-            f"ASUSRouterControl {env_label} — Running speed test"
-        )
+        self._spinner_reason = reason
+        btn = self.statusitem.button()
+        if btn is not None:
+            btn.setTitle_(self._icon_prefix)
+            env_label = "DEV" if self._runtime_env != "prod" else "PROD"
+            btn.setToolTip_(f"ASUSRouterControl {env_label} — {reason}")
+        # Restart timer if already spinning (e.g. connect while speedtest)
+        if self._spinner_timer is not None:
+            try:
+                self._spinner_timer.invalidate()
+            except Exception:
+                pass
+            self._spinner_timer = None
         self._spinner_timer = (
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 _SPINNER_INTERVAL, self, "tickSpinner:", None, True
             )
         )
 
-    def _stop_spinner(self):
-        """Stop the spinner and restore the normal text icon."""
+    def _stop_spinner(self, restore: str | None = None):
+        """Stop the spinner and restore the status icon.
+
+        Prefer an explicit restore label (post-Connect success/failure). Otherwise
+        use the current connection tooltip, then fall back to Running.
+        """
         if self._spinner_timer:
             self._spinner_timer.invalidate()
             self._spinner_timer = None
-        self._set_status_icon("Running")
+        self._spinner_reason = None
+        if restore is None:
+            state = getattr(self, "_connection_state", None)
+            restore = getattr(state, "tooltip", None) if state is not None else None
+        self._set_status_icon(restore or "Running")
+
+    def _begin_connect_activity(self, host: str) -> None:
+        """Show connecting copy + spin the menubar icon until Connect finishes."""
+        self._set_connection_state(connecting_state(host), notify=True)
+        try:
+            self._mi_connect.setTitle_("🔌 Connecting…")
+            self._mi_connect.setEnabled_(False)
+        except Exception:
+            pass
+        self._start_spinner(f"Connecting to {host}…")
 
     @objc.typedSelector(b"v@:@")
     def tickSpinner_(self, _):
@@ -1237,15 +1271,18 @@ class AppDelegate(NSObject):
         self._spinner_frame += 1
 
     @objc.typedSelector(b"v@:@")
-    def startSpinner_(self, _):
+    def startSpinner_(self, reason):
         """Main-thread entry point to kick off the spinner."""
-        self._start_spinner()
+        msg = str(reason).strip() if reason else "Working…"
+        if msg in ("", "None"):
+            msg = "Working…"
+        self._start_spinner(msg)
 
     @objc.typedSelector(b"v@:@")
     def runSpeedTest_(self, sender):
         self._mi_speedtest.setTitle_("▶ Running Speed Test...")
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "startSpinner:", None, False
+            "startSpinner:", "Running speed test", False
         )
         threading.Thread(
             target=self._do_speedtest, name="speedtest", daemon=True
@@ -1441,12 +1478,7 @@ class AppDelegate(NSObject):
             )
             return
 
-        self._set_connection_state(connecting_state(host), notify=True)
-        try:
-            self._mi_connect.setTitle_("🔌 Connecting…")
-            self._mi_connect.setEnabled_(False)
-        except Exception:
-            pass
+        self._begin_connect_activity(host)
         threading.Thread(
             target=self._do_connect,
             kwargs={
@@ -1515,12 +1547,7 @@ class AppDelegate(NSObject):
     @objc.typedSelector(b"v@:@")
     def showConnectingStatus_(self, host):
         host_s = str(host) if host else "router"
-        self._set_connection_state(connecting_state(host_s), notify=True)
-        try:
-            self._mi_connect.setTitle_("🔌 Connecting…")
-            self._mi_connect.setEnabled_(False)
-        except Exception:
-            pass
+        self._begin_connect_activity(host_s)
 
     @objc.typedSelector(b"v@:@")
     def showUnableStatus_(self, detail):
@@ -1529,6 +1556,8 @@ class AppDelegate(NSObject):
             unable_state(host, str(detail) if detail else "unreachable"),
             notify=True,
         )
+        self._stop_spinner()
+
         try:
             self._mi_connect.setTitle_("🔌 Connect Router...")
             self._mi_connect.setEnabled_(True)
@@ -1542,6 +1571,8 @@ class AppDelegate(NSObject):
             connected_state(host, http_ok=True, ssh_ok=None, ssh_enabled=True),
             notify=True,
         )
+        self._stop_spinner()
+
         try:
             self._mi_connect.setTitle_("🔌 Connect Router...")
             self._mi_connect.setEnabled_(True)
@@ -1572,6 +1603,8 @@ class AppDelegate(NSObject):
             ),
             notify=True,
         )
+        self._stop_spinner()
+
         try:
             self._mi_connect.setTitle_("🔌 Connect Router...")
             self._mi_connect.setEnabled_(True)
@@ -1589,6 +1622,8 @@ class AppDelegate(NSObject):
             unable_state(host, detail_s),
             notify=True,
         )
+        self._stop_spinner()
+
         try:
             self._mi_connect.setTitle_("🔌 Connect Router...")
             self._mi_connect.setEnabled_(True)
