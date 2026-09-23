@@ -24,6 +24,11 @@ from asusroutercontrol.credentials import (
     store_credential,
 )
 from asusroutercontrol.datastore import DataStore
+from asusroutercontrol.menubar_launchd import (
+    environment_variables_xml,
+    program_arguments_xml,
+    resolve_menubar_launch_target,
+)
 
 from .core import (
     _DHCP_RESERVATION_PROFILES,
@@ -1718,15 +1723,16 @@ def menubar_install(deploy_environment: str, env_file: Path | None):
     python_bin = Path(sys.executable).resolve()
     project_root = Path(__file__).resolve().parents[2]
     src_path = project_root / "src"
-    env_vars = {"ASUSROUTERCONTROL_RUNTIME_ENV": deploy_environment}
-    if env_file is not None:
-        env_vars["ASUSROUTERCONTROL_ENV_FILE"] = str(env_file)
-    if src_path.exists():
-        env_vars["PYTHONPATH"] = str(src_path)
-    env_xml = "".join(
-        f"        <key>{key}</key>\n        <string>{value}</string>\n"
-        for key, value in env_vars.items()
+    target = resolve_menubar_launch_target(
+        environment=deploy_environment,
+        project_root=project_root,
+        python_bin=python_bin,
+        data_dir=cfg.data_dir,
+        env_file=env_file,
+        src_path=src_path,
     )
+    args_xml = program_arguments_xml(target.program_arguments)
+    env_xml = environment_variables_xml(target.environment)
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1736,14 +1742,13 @@ def menubar_install(deploy_environment: str, env_file: Path | None):
     <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{python_bin}</string>
-        <string>-u</string>
-        <string>-m</string>
-        <string>asusroutercontrol.menubar</string>
+{args_xml}
     </array>
     <key>EnvironmentVariables</key>
     <dict>
 {env_xml}    </dict>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -1781,9 +1786,26 @@ def menubar_install(deploy_environment: str, env_file: Path | None):
 
     console.print(f"[green]Installed and loaded:[/green] {plist_path}")
     console.print(f"Label: [bold]{label}[/bold]")
+    if target.uses_app_bundle:
+        console.print(
+            f"[green]Launch mode:[/green] app bundle Mach-O "
+            f"({target.app_bundle})"
+        )
+    else:
+        console.print(
+            "[yellow]Launch mode:[/yellow] python -m asusroutercontrol.menubar "
+            "(no .app found)"
+        )
+        console.print(
+            "[yellow]Warning:[/yellow] macOS Sequoia Control Center often hides "
+            "the menubar icon for bare Python launches. Install "
+            "ASUSRouterControl.app (prod) or build DEV.app "
+            "(make build-dev-app), then re-run "
+            f"asusrouter menubar install --environment {deploy_environment}."
+        )
     console.print("Menubar app will auto-start on login and restart on crash.")
     console.print("[dim]ThrottleInterval=30s prevents crash-loop death.[/dim]")
-
+    console.print("[dim]LimitLoadToSessionType=Aqua (GUI session only).[/dim]")
 
 @menubar.command("uninstall")
 @click.option(
