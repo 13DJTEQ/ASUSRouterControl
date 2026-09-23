@@ -37,9 +37,11 @@ import subprocess
 import time
 
 
-def _dev_runtime_pids() -> list[int]:
+def _classify_pids() -> tuple[list[int], list[int]]:
+    """Return (dev_pids, other_asus_pids). Other includes PROD and unscoped menubar."""
     out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
-    pids: list[int] = []
+    dev: list[int] = []
+    other: list[int] = []
     for line in out.splitlines():
         line = line.strip()
         if not line:
@@ -53,41 +55,73 @@ def _dev_runtime_pids() -> list[int]:
         except ValueError:
             continue
         cmd_l = cmd.lower()
-        is_dev_env = "ASUSROUTERCONTROL_RUNTIME_ENV=dev" in cmd
-        is_router_proc = "asusroutercontrol" in cmd_l
-        is_dev_app_path = "ASUSRouterControl DEV.app" in cmd
-        if (is_dev_env and is_router_proc) or is_dev_app_path:
-            pids.append(pid)
-    return sorted(set(pids))
+        is_router = (
+            "asusroutercontrol" in cmd_l
+            or "asusroutermonitor" in cmd_l
+            or "asusroutercontrol" in cmd  # bundle path casing
+        )
+        if not is_router and "ASUSRouterControl" not in cmd:
+            continue
+        is_dev = (
+            "ASUSROUTERCONTROL_RUNTIME_ENV=dev" in cmd
+            or "ASUSRouterControl DEV.app" in cmd
+        )
+        if is_dev:
+            dev.append(pid)
+        else:
+            other.append(pid)
+    return sorted(set(dev)), sorted(set(other))
 
 
-pids = _dev_runtime_pids()
-if not pids:
-    print("No existing DEV runtime process found.")
-    raise SystemExit(0)
-
-print(f"Stopping existing DEV runtime PIDs: {', '.join(str(p) for p in pids)}")
-for pid in pids:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-
-deadline = time.time() + 8.0
-while time.time() < deadline:
-    remaining = [pid for pid in _dev_runtime_pids() if pid in pids]
-    if not remaining:
-        raise SystemExit(0)
-    time.sleep(0.25)
-
-remaining = [pid for pid in _dev_runtime_pids() if pid in pids]
-if remaining:
-    print(f"Force-stopping lingering DEV runtime PIDs: {', '.join(str(p) for p in remaining)}")
-    for pid in remaining:
+def _stop_pids(pids: list[int], label: str) -> None:
+    if not pids:
+        print(f"No existing {label} runtime process found.")
+        return
+    print(f"Stopping existing {label} runtime PIDs: {', '.join(str(p) for p in pids)}")
+    for pid in pids:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+    deadline = time.time() + 8.0
+    target = set(pids)
+    while time.time() < deadline:
+        still = []
+        for pid in target:
+            try:
+                os.kill(pid, 0)
+                still.append(pid)
+            except ProcessLookupError:
+                pass
+        if not still:
+            return
+        time.sleep(0.25)
+    still = []
+    for pid in target:
+        try:
+            os.kill(pid, 0)
+            still.append(pid)
+        except ProcessLookupError:
+            pass
+    if still:
+        print(f"Force-stopping lingering {label} runtime PIDs: {', '.join(str(p) for p in still)}")
+        for pid in still:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+dev_pids, other_pids = _classify_pids()
+# Sequoia ControlCenter only shows one ASUSRouterControl status item.
+# Quit PROD/other first so the DEV 🧪 icon can appear.
+if other_pids:
+    print(
+        "WARNING: PROD/other ASUSRouterControl is running. "
+        "macOS Sequoia hides a second menubar icon — quitting it so DEV is visible."
+    )
+_stop_pids(other_pids, "PROD")
+_stop_pids(dev_pids, "DEV")
 PY
 
 open -n "${DEV_APP}"
@@ -274,6 +308,7 @@ while time.time() < deadline:
             print(f"Latest device_perf_history timestamp: {ts}")
         if wired_rows > 0 and wired_with_rates == 0:
             print("Note: wired clients present, but backend did not expose per-client wired tx/rx rates.")
+        print("Look for the 🧪 test-tube icon in the menu bar (DEV). If missing, quit PROD and relaunch.")
         raise SystemExit(0)
     time.sleep(2.0)
 
