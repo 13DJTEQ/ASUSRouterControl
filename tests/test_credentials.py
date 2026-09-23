@@ -465,7 +465,7 @@ class TestBitwardenRouterItemLookup:
 
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: item)
-        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "unlocked")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "unlocked")
 
         assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
         user, pw = creds.get_router_credentials(host_hint="router.asus.com")
@@ -514,7 +514,7 @@ class TestBitwardenRouterItemLookup:
     def test_locked_vault_detail_always_shown(self, monkeypatch):
         from asusroutercontrol import credentials as creds
 
-        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
         defaults = creds.resolve_connect_login_defaults(
@@ -530,7 +530,7 @@ class TestBitwardenRouterItemLookup:
         from asusroutercontrol import credentials as creds
 
         monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
-        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
         monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
@@ -625,7 +625,7 @@ class TestBitwardenRouterItemLookup:
 
         monkeypatch.delenv("ASUSROUTERCONTROL_ROUTER_SSH_PORT", raising=False)
         monkeypatch.delenv("SSH_PORT", raising=False)
-        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
         monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
@@ -635,3 +635,43 @@ class TestBitwardenRouterItemLookup:
         )
         assert defaults["ssh_port"] == 22
         assert "locked" in str(defaults.get("store_detail") or "").lower()
+
+
+class TestBitwardenMasterPasswordUnlock:
+    def test_store_and_get_bw_master_password(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("s3cret-mp") is True
+        assert creds.get_bitwarden_master_password() == "s3cret-mp"
+        assert creds.delete_bitwarden_master_password() is True
+        assert creds.get_bitwarden_master_password() is None
+
+    def test_ensure_unlocks_with_keychain_master(self, monkeypatch, mem_keyring):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("s3cret-mp") is True
+        states = {"n": 0}
+
+        def fake_login_check(self):
+            states["n"] += 1
+            return "locked" if states["n"] == 1 else "unlocked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            assert arguments[:2] == ["unlock", "--passwordenv"]
+            assert extra_env == {"BW_PASSWORD": "s3cret-mp"}
+            return SimpleNamespace(returncode=0, stdout="SESSIONTOKEN\n", stderr="")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        monkeypatch.setattr(creds, "_persist_bw_session", lambda token: None)
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+
+    def test_is_login_blocked_error_detects_captcha(self):
+        from asusroutercontrol.scheduler import _is_login_blocked_error
+
+        assert _is_login_blocked_error(Exception("AccessError.CAPTCHA"))
+        assert not _is_login_blocked_error(Exception("timeout contacting host"))

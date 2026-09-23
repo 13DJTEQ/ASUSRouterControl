@@ -19,8 +19,12 @@ from rich.table import Table
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
     _active_backend_name,
+    delete_bitwarden_master_password,
     delete_legacy_credentials,
+    ensure_bitwarden_unlocked,
+    get_bitwarden_master_password,
     migrate_legacy_credentials,
+    store_bitwarden_master_password,
     store_credential,
 )
 from asusroutercontrol.datastore import DataStore
@@ -822,6 +826,50 @@ def credentials_cleanup():
     for entry in removed:
         console.print(f"  [yellow]Removed[/yellow] {entry}")
     console.print("[green]Keychain fallback entries cleaned up.[/green]")
+
+
+@credentials.command("bw-master")
+@click.option(
+    "--set",
+    "do_set",
+    is_flag=True,
+    help="Store Bitwarden master password in macOS Keychain.",
+)
+@click.option(
+    "--delete",
+    "do_delete",
+    is_flag=True,
+    help="Remove stored Bitwarden master password.",
+)
+@click.option(
+    "--status",
+    "do_status",
+    is_flag=True,
+    help="Show whether a master password is stored.",
+)
+def credentials_bw_master(do_set: bool, do_delete: bool, do_status: bool):
+    """Manage Bitwarden master password in Keychain for automated unlock."""
+    flags = sum(bool(x) for x in (do_set, do_delete, do_status))
+    if flags != 1:
+        raise click.UsageError("Specify exactly one of --set, --delete, or --status")
+    if do_status:
+        stored = get_bitwarden_master_password() is not None
+        state = ensure_bitwarden_unlocked()
+        console.print(f"Keychain master password: {'present' if stored else 'missing'}")
+        console.print(f"Bitwarden vault: {state}")
+        return
+    if do_delete:
+        if delete_bitwarden_master_password():
+            console.print("[green]Removed Bitwarden master password from Keychain.[/green]")
+        else:
+            console.print("[yellow]Nothing removed (missing or Keychain error).[/yellow]")
+        return
+    password = click.prompt("Bitwarden master password", hide_input=True, confirmation_prompt=True)
+    if not store_bitwarden_master_password(password):
+        raise click.ClickException("Failed to store master password in Keychain")
+    state = ensure_bitwarden_unlocked()
+    console.print("[green]Stored Bitwarden master password in macOS Keychain.[/green]")
+    console.print(f"Vault status after unlock attempt: [bold]{state}[/bold]")
 
 
 @cli.command()

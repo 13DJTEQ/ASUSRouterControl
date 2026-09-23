@@ -236,7 +236,134 @@ def _ensure_bw_session_env() -> None:
             continue
 
 
-def _bw_run(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
+
+
+# Keychain-only secret used to unlock Bitwarden without an interactive prompt.
+# Never stored in the Bitwarden vault itself (chicken-and-egg).
+_BW_MASTER_PASSWORD_KEY = "bw_master_password"
+_BW_PASSWORD_ENV = "BW_PASSWORD"
+
+
+def store_bitwarden_master_password(password: str) -> bool:
+    """Persist the Bitwarden master password in macOS Keychain (Keychain backend only)."""
+    secret = (password or "").strip()
+    if not secret:
+        return False
+    backend = _BACKENDS.get("keychain")
+    if backend is None:
+        log.error("Keychain backend unavailable — cannot store Bitwarden master password")
+        return False
+    return bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+
+
+def get_bitwarden_master_password() -> str | None:
+    """Read the Bitwarden master password from macOS Keychain, if present."""
+    backend = _BACKENDS.get("keychain")
+    if backend is None:
+        return None
+    value = backend.get(_BW_MASTER_PASSWORD_KEY, env=DEFAULT_ENV)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def delete_bitwarden_master_password() -> bool:
+    """Remove the Bitwarden master password from macOS Keychain."""
+    backend = _BACKENDS.get("keychain")
+    if backend is None:
+        return False
+    return bool(backend.delete(_BW_MASTER_PASSWORD_KEY, env=DEFAULT_ENV))
+
+
+def _persist_bw_session(session: str) -> None:
+    """Write BW_SESSION into process env and the DEV runtime .env when possible."""
+    token = (session or "").strip()
+    if not token:
+        return
+    os.environ[_BW_SESSION_ENV] = token
+    targets = [
+        Path.home() / ".asusroutercontrol.dev" / ".env",
+        Path.home() / ".asusroutercontrol" / ".env",
+    ]
+    for env_path in targets:
+        try:
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            lines: list[str] = []
+            if env_path.is_file():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    key = line.split("=", 1)[0].strip() if "=" in line else ""
+                    if key in {_BW_SESSION_ENV, "BITWARDEN_SESSION"}:
+                        continue
+                    lines.append(line)
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines.append(f"{_BW_SESSION_ENV}={token}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            log.debug("Could not persist BW_SESSION to %s", env_path, exc_info=True)
+
+
+def ensure_bitwarden_unlocked() -> str:
+    """Unlock Bitwarden using Keychain master password when the vault is locked.
+
+    Returns the post-attempt vault status string from login_check().
+    """
+    backend = _BACKENDS.get("bitwarden")
+    if backend is None or not isinstance(backend, _BitwardenBackend):
+        return "unknown"
+    state = backend.login_check()
+    if state == "unlocked":
+        return state
+    if state != "locked":
+        return state
+
+    master = get_bitwarden_master_password()
+    if not master:
+        log.info(
+            "Bitwarden vault locked and no master password in Keychain. "
+            "Run: asusrouter credentials bw-master --set"
+        )
+        return state
+
+    result = _bw_run(
+        ["unlock", "--passwordenv", _BW_PASSWORD_ENV, "--raw"],
+        extra_env={_BW_PASSWORD_ENV: master},
+    )
+    if result is None:
+        return "cli_not_found"
+    if result.returncode != 0:
+        err = f"{result.stdout}\n{result.stderr}".strip()
+        log.warning("Bitwarden unlock via Keychain master password failed: %s", err[:200])
+        return "locked"
+    session = (result.stdout or "").strip().splitlines()
+    token = session[-1].strip() if session else ""
+    # Some bw versions still print export lines; prefer a bare token.
+    if "BW_SESSION=" in token:
+        import re as _re
+
+        m = _re.search(r'BW_SESSION="?([^"\s]+)"?', token)
+        token = m.group(1) if m else token
+    if not token or " " in token and len(token) < 20:
+        # Fallback: parse any BW_SESSION= from combined output
+        import re as _re
+
+        blob = f"{result.stdout}\n{result.stderr}"
+        m = _re.search(r'BW_SESSION="?([^"\s]+)"?', blob)
+        token = m.group(1) if m else ""
+    if not token:
+        log.warning("Bitwarden unlock succeeded but no session token was parsed")
+        return "locked"
+    _persist_bw_session(token)
+    state = backend.login_check()
+    if state == "unlocked":
+        log.info("Bitwarden vault unlocked via Keychain master password")
+    return state
+
+def _bw_run(
+    arguments: list[str],
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str] | None:
     """Execute a Bitwarden CLI command, returning None if bw is unavailable."""
     global _bw_cli_found  # noqa: PLW0603
     _ensure_bw_session_env()
@@ -247,6 +374,8 @@ def _bw_run(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
         if extra not in path_parts:
             path_parts.insert(0, extra)
     env["PATH"] = ":".join(p for p in path_parts if p)
+    if extra_env:
+        env.update(extra_env)
 
     last_error: Exception | None = None
     for binary in _bw_binaries():
@@ -532,13 +661,16 @@ class _BitwardenBackend(_CredentialBackend):
         if _bw_cli_found is False:
             log.debug("Bitwarden CLI was previously detected as missing; skipping health check.")
             return False
-        state = self.login_check()
+        state = ensure_bitwarden_unlocked()
         if state == "unlocked":
             return True
         if state == "cli_not_found":
             log.info("Bitwarden backend unhealthy: CLI not found.")
         elif state == "locked":
-            log.info("Bitwarden backend unhealthy: vault is locked. Run 'bw unlock'.")
+            log.info(
+                "Bitwarden backend unhealthy: vault is locked. "
+                "Store the master password with: asusrouter credentials bw-master --set"
+            )
         elif state == "unauthenticated":
             log.info("Bitwarden backend unhealthy: not logged in. Run 'bw login'.")
         else:
@@ -553,7 +685,7 @@ class _BitwardenBackend(_CredentialBackend):
 
     def get(self, key: str, *, env: str = DEFAULT_ENV) -> str | None:
         title = self._item_title(key, env)
-        state = self.login_check()
+        state = ensure_bitwarden_unlocked()
         if state == "cli_not_found":
             log.debug("Bitwarden get skipped: CLI not installed.")
             return None
@@ -917,6 +1049,8 @@ def lookup_bitwarden_router_item(*, host_hint: str | None = None) -> dict | None
     2. Search/list match against host hints (title or URI)
     3. Broad search for titles containing router.asus.com that have SSH Port
     """
+    ensure_bitwarden_unlocked()
+
     explicit = (
         os.environ.get(_BW_ROUTER_ITEM_ENV, "").strip() or _DEFAULT_BW_ROUTER_ITEM
     )
@@ -1283,7 +1417,7 @@ def resolve_connect_login_defaults(
     if _bw_cli_found is False:
         _bw_cli_found = None
 
-    bw_status = bitwarden_vault_status()
+    bw_status = ensure_bitwarden_unlocked()
     item = lookup_bitwarden_router_item(host_hint=suggested_host)
     item_name = str(item.get("name")) if isinstance(item, dict) and item.get("name") else None
     item_ssh_port = _ssh_port_from_bitwarden_item(item) if item is not None else None
@@ -1337,10 +1471,9 @@ def resolve_connect_login_defaults(
         )
     elif bw_status == "locked":
         detail = (
-            "Bitwarden vault is locked — SSH port will stay at 22 until unlocked. "
-            "In Terminal: bw unlock  → put BW_SESSION=... into .env → relaunch app. "
-            "Router Login Name may not be 'admin' "
-            "(check Administration → System)."
+            "Bitwarden vault is locked — store the master password for auto-unlock: "
+            "asusrouter credentials bw-master --set "
+            "(or run bw unlock once). Router Login Name may not be 'admin'."
         )
     elif bw_status == "cli_not_found":
         detail = (

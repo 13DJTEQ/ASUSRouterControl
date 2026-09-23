@@ -4,6 +4,9 @@
 #
 # Item: router.asus.com (13Maschine)
 #
+# Prefers Keychain-stored master password via:
+#   asusrouter credentials bw-master --set
+#
 # Usage:
 #   bash scripts/bw_sync_router_env.sh
 set -euo pipefail
@@ -36,15 +39,30 @@ if echo "$status" | grep -qi 'unauthenticated'; then
 fi
 
 if echo "$status" | grep -qi 'locked' || [[ -z "${BW_SESSION:-}" ]]; then
-  echo "Unlocking Bitwarden vault (enter master password when prompted)..."
-  unlock_out="$(bw unlock 2>/dev/null || true)"
-  session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION="\([^"]*\)".*/\1/p' | tail -n1)"
-  if [[ -z "$session" ]]; then
-    session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION=\([^ ]*\).*/\1/p' | tail -n1)"
+  PY_BIN="${ROOT}/.venv/bin/python"
+  if [[ ! -x "$PY_BIN" ]]; then
+    PY_BIN="$(command -v python3 || true)"
+  fi
+  session=""
+  if [[ -n "$PY_BIN" ]]; then
+    echo "Trying Keychain master-password unlock..."
+    session="$("$PY_BIN" -c 'import os,sys; sys.path.insert(0,"src"); from asusroutercontrol.credentials import ensure_bitwarden_unlocked; st=ensure_bitwarden_unlocked(); print(os.environ.get("BW_SESSION","") if st=="unlocked" else "")' 2>/dev/null || true)"
   fi
   if [[ -z "$session" ]]; then
-    echo "Could not parse BW_SESSION from bw unlock output." >&2
-    echo "Run: bw unlock   then re-run this script with BW_SESSION exported." >&2
+    echo "Unlocking Bitwarden vault (enter master password when prompted)..."
+    unlock_out="$(bw unlock --raw 2>/dev/null || true)"
+    session="$(printf '%s\n' "$unlock_out" | tail -n1 | tr -d '\r')"
+    if [[ "$session" == *BW_SESSION=* ]]; then
+      session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION="\([^"]*\)".*/\1/p' | tail -n1)"
+      if [[ -z "$session" ]]; then
+        session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION=\([^ ]*\).*/\1/p' | tail -n1)"
+      fi
+    fi
+  fi
+  if [[ -z "$session" ]]; then
+    echo "Could not unlock Bitwarden." >&2
+    echo "Store master password once: asusrouter credentials bw-master --set" >&2
+    echo "Or run: bw unlock" >&2
     exit 1
   fi
   export BW_SESSION="$session"
@@ -119,7 +137,6 @@ lines.extend(
         f"ASUSROUTERCONTROL_BW_ROUTER_ITEM={item_name}",
         f"ASUSROUTERCONTROL_ROUTER_USERNAME={user}",
         f"ASUSROUTERCONTROL_ROUTER_SSH_PORT={port}",
-        # Config.load_config reads SSH_PORT for profile overlays / RouterSSH.
         f"SSH_PORT={port}",
     ]
 )
