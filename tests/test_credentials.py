@@ -1095,8 +1095,9 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
         assert creds.ensure_bitwarden_unlocked() == "locked"
         err = creds.get_last_bitwarden_unlock_error() or ""
-        assert "bw-master --set" in err
+        assert "import-from-keychain" in err
         assert "no master password" in err.lower()
+        assert "bw-master --set" not in err or "import-from-keychain" in err
 
     def test_ensure_stays_locked_when_unlock_fails(self, monkeypatch, mem_keyring):
         from types import SimpleNamespace
