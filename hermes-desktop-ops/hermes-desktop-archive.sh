@@ -3,16 +3,24 @@
 # Canonical on-Mac location: ~/Desktop/hermes-desktop-ops/
 # Output on Desktop:
 #   hermes-incident-<host>-<ts>.zip
-#   hermes-incident-<host>-<ts>.report.md   ← paste into MOE plan
-#   hermes-incident-<host>-<ts>.report.json ← machine-readable plan feed
+#   hermes-incident-<host>-<ts>.report.md   — paste into MOE plan
+#   hermes-incident-<host>-<ts>.report.json — machine-readable plan feed
+# Live progress:
+#   ~/Desktop/hermes-desktop-ops/LIVE.log
+#   ~/Desktop/hermes-collect.live.log
+#   ~/Desktop/hermes-desktop-ops/LIVE.status
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DESKTOP="${HOME}/Desktop"
-OPS_DIR="${DESKTOP}/hermes-desktop-ops"
-LIVE_LOG="${OPS_DIR}/LIVE.log"
-DESKTOP_LIVE_LOG="${DESKTOP}/hermes-collect.live.log"
-LIVE_STATUS="${OPS_DIR}/LIVE.status"
+# shellcheck source=lib/live_progress.sh
+source "${SCRIPT_DIR}/lib/live_progress.sh"
+_live_init "archive"
+
+DESKTOP="${_LIVE_DESKTOP}"
+OPS_DIR="${_LIVE_OPS}"
+LIVE_LOG="${_LIVE_LOG}"
+DESKTOP_LIVE_LOG="${_LIVE_DESKTOP_LOG}"
+LIVE_STATUS="${_LIVE_STATUS}"
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 HOST_SHORT="$(hostname -s 2>/dev/null || hostname | cut -d. -f1)"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -23,109 +31,39 @@ REPORT_DIR="${STAGING}/report"
 COLLECT_DIR="${STAGING}/collect"
 LOG_TAIL_LINES="${HERMES_ARCHIVE_LOG_LINES:-400}"
 MAX_LOG_BYTES="${HERMES_ARCHIVE_MAX_LOG_BYTES:-1048576}"
-# Live progress: after this many seconds on a step, emit heartbeats
-PROGRESS_AFTER_SECS="${HERMES_PROGRESS_AFTER_SECS:-20}"
-PROGRESS_EVERY_SECS="${HERMES_PROGRESS_EVERY_SECS:-5}"
-RUN_START="${SECONDS}"
+PHASE_TOTAL=12
 
 mkdir -p "${DESKTOP}" "${OPS_DIR}" "${REPORT_DIR}" "${COLLECT_DIR}"/{doctor,gateway,install,launchd,ports,logs,crashes,auth,env}
-: >>"${LIVE_LOG}"
-: >>"${DESKTOP_LIVE_LOG}"
 
 cleanup() {
-  note "cleanup staging=${STAGING}"
-  status_set "exiting" "run_elapsed_s=$((SECONDS - RUN_START))"
+  # Do not overwrite a successful done status; only note cleanup.
+  if [[ -f "${LIVE_STATUS}" ]] && grep -q '^phase=done$' "${LIVE_STATUS}" 2>/dev/null; then
+    live_note "cleanup staging=${STAGING}"
+  else
+    live_note "cleanup staging=${STAGING}"
+    live_status "phase=exiting" "incident_id=${INCIDENT_ID}" "staging=${STAGING}"
+  fi
   rm -rf "${STAGING}"
 }
 trap cleanup EXIT
 
-live_append() {
-  local ts_local line
-  ts_local="$(date '+%Y-%m-%d %H:%M:%S')"
-  line="[${ts_local}] $*"
-  printf '%s\n' "${line}" >>"${LIVE_LOG}" 2>/dev/null || true
-  printf '%s\n' "${line}" >>"${DESKTOP_LIVE_LOG}" 2>/dev/null || true
-}
-
-status_set() {
-  # status_set <phase> [key=value ...]
-  local phase="$1"
-  shift || true
-  {
-    echo "phase=${phase}"
-    echo "updated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "pid=$$"
-    echo "incident_id=${INCIDENT_ID}"
-    echo "staging=${STAGING}"
-    echo "host=${HOST_SHORT}"
-    echo "run_elapsed_s=$((SECONDS - RUN_START))"
-    echo "progress_after_s=${PROGRESS_AFTER_SECS}"
-    local kv
-    for kv in "$@"; do
-      printf '%s\n' "${kv}"
-    done
-  } >"${LIVE_STATUS}" 2>/dev/null || true
-}
-
-note() {
-  printf '[archive] %s\n' "$*"
-  live_append "[archive] $*"
-}
-warn() {
-  printf '[archive] WARN: %s\n' "$*" >&2
-  live_append "[archive] WARN: $*"
-}
+note() { live_note "$*"; }
+warn() { live_warn "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+status_set() {
+  local phase="$1"
+  shift || true
+  live_status "phase=${phase}" "incident_id=${INCIDENT_ID}" "staging=${STAGING}" "host=${HOST_SHORT}" "$@"
+}
+
 run_capture() {
-  # Short/silent capture — no heartbeats
   local outfile="$1"
   shift
   {
     echo "\$ $*"
     "$@" 2>&1 || echo "EXIT:$?"
   } >"${outfile}" 2>&1 || true
-}
-
-# Long-step capture: if still running after PROGRESS_AFTER_SECS, emit live heartbeats.
-# Usage: run_capture_progress "label" outfile cmd [args...]
-run_capture_progress() {
-  local label="$1"
-  local outfile="$2"
-  shift 2
-  note "START: ${label}"
-  status_set "${label}" "state=running" "cmd=$*"
-  local start="${SECONDS}"
-  (
-    echo "\$ $*"
-    "$@" 2>&1 || echo "EXIT:$?"
-  ) >"${outfile}" 2>&1 &
-  local pid=$!
-  local announced=0
-  while kill -0 "${pid}" 2>/dev/null; do
-    local elapsed=$((SECONDS - start))
-    if (( elapsed >= PROGRESS_AFTER_SECS )); then
-      if (( announced == 0 )); then
-        note "STILL RUNNING (>${PROGRESS_AFTER_SECS}s): ${label} — elapsed ${elapsed}s; heartbeats every ${PROGRESS_EVERY_SECS}s"
-        note "check-in: /bin/bash ~/Desktop/hermes-desktop-monitor.sh --once   or   tail -f ~/Desktop/hermes-collect.live.log"
-        announced=1
-      else
-        note "progress: ${label} still running — elapsed ${elapsed}s  run_total=$((SECONDS - RUN_START))s"
-      fi
-      status_set "${label}" "state=running" "elapsed_s=${elapsed}" "cmd=$*"
-      sleep "${PROGRESS_EVERY_SECS}"
-    else
-      sleep 1
-    fi
-  done
-  wait "${pid}" || true
-  local elapsed=$((SECONDS - start))
-  if (( elapsed >= PROGRESS_AFTER_SECS )); then
-    note "DONE (long): ${label} finished in ${elapsed}s"
-  else
-    note "DONE: ${label} in ${elapsed}s"
-  fi
-  status_set "${label}" "state=done" "elapsed_s=${elapsed}"
 }
 
 safe_copy_tail() {
@@ -160,13 +98,15 @@ redact_file() {
 
 OS_NAME="$(uname -s)"
 ARCH_NAME="$(uname -m)"
+live_phase 1 "${PHASE_TOTAL}" "start"
 status_set "start" "os=${OS_NAME}" "arch=${ARCH_NAME}"
 note "incident=${INCIDENT_ID}"
 note "os=${OS_NAME} arch=${ARCH_NAME} hermes_home=${HERMES_HOME}"
 note "live_log=${LIVE_LOG}"
 note "desktop_live_log=${DESKTOP_LIVE_LOG}"
-note "live progress: any step >${PROGRESS_AFTER_SECS}s emits heartbeats every ${PROGRESS_EVERY_SECS}s"
+note "live progress: steps lasting >${HERMES_PROGRESS_AFTER_SECS}s emit heartbeats every ${HERMES_PROGRESS_EVERY_SECS}s"
 
+live_phase 2 "${PHASE_TOTAL}" "preflight"
 status_set "preflight"
 {
   echo "incident_id=${INCIDENT_ID}"
@@ -185,6 +125,7 @@ HERMES_BIN=""
 if have hermes; then
   HERMES_BIN="$(command -v hermes)"
 fi
+live_phase 3 "${PHASE_TOTAL}" "which_hermes"
 status_set "which_hermes" "hermes_bin=${HERMES_BIN:-missing}"
 {
   echo "hermes_in_path=$([[ -n "${HERMES_BIN}" ]] && echo yes || echo no)"
@@ -201,18 +142,20 @@ status_set "which_hermes" "hermes_bin=${HERMES_BIN:-missing}"
 } >"${COLLECT_DIR}/install/which-hermes.txt"
 
 if [[ -n "${HERMES_BIN}" ]]; then
+  live_phase 4 "${PHASE_TOTAL}" "doctor"
   status_set "doctor" "hermes_bin=${HERMES_BIN}"
-  run_capture_progress "hermes --version" "${COLLECT_DIR}/doctor/version.txt" "${HERMES_BIN}" --version
+  live_run_capture "hermes --version" "${COLLECT_DIR}/doctor/version.txt" "${HERMES_BIN}" --version
   note "hermes doctor can be slow on large installs"
-  run_capture_progress "hermes doctor" "${COLLECT_DIR}/doctor/doctor.txt" "${HERMES_BIN}" doctor
-  run_capture_progress "hermes gateway status" "${COLLECT_DIR}/gateway/status.txt" "${HERMES_BIN}" gateway status
+  live_run_capture "hermes doctor" "${COLLECT_DIR}/doctor/doctor.txt" "${HERMES_BIN}" doctor
+  live_run_capture "hermes gateway status" "${COLLECT_DIR}/gateway/status.txt" "${HERMES_BIN}" gateway status
   if "${HERMES_BIN}" backup --help >/dev/null 2>&1; then
-    note "hermes backup --quick — often the long step; heartbeats after ${PROGRESS_AFTER_SECS}s"
-    run_capture_progress "hermes backup --quick" "${COLLECT_DIR}/doctor/backup-quick.txt" \
+    live_phase 5 "${PHASE_TOTAL}" "backup"
+    note "hermes backup --quick — often the long step; heartbeats after ${HERMES_PROGRESS_AFTER_SECS}s"
+    live_run_capture "hermes backup --quick" "${COLLECT_DIR}/doctor/backup-quick.txt" \
       "${HERMES_BIN}" backup --quick -o "${COLLECT_DIR}/hermes-backup-quick.zip" || true
     if [[ ! -f "${COLLECT_DIR}/hermes-backup-quick.zip" ]]; then
       note "quick backup missing; trying full hermes backup"
-      run_capture_progress "hermes backup full" "${COLLECT_DIR}/doctor/backup-full.txt" \
+      live_run_capture "hermes backup full" "${COLLECT_DIR}/doctor/backup-full.txt" \
         "${HERMES_BIN}" backup -o "${COLLECT_DIR}/hermes-backup-full.zip" || true
     fi
   fi
@@ -221,6 +164,7 @@ else
   echo "hermes CLI not found on PATH" >"${COLLECT_DIR}/doctor/missing.txt"
 fi
 
+live_phase 6 "${PHASE_TOTAL}" "python_probe"
 status_set "python_probe"
 note "probing python / hermes_cli import"
 {
@@ -270,6 +214,7 @@ if [[ -f "${HERMES_HOME}/config.yaml" ]]; then
   redact_file "${COLLECT_DIR}/install/config-fingerprint.yaml"
 fi
 
+live_phase 7 "${PHASE_TOTAL}" "auth"
 status_set "auth"
 AUTH_JSON="${HERMES_HOME}/auth.json"
 AUTH_STATUS="missing"
@@ -337,6 +282,7 @@ fi
   echo "quarantine_or_revoke_hint=${QUARANTINE_HINT}"
 } >"${COLLECT_DIR}/auth/summary.txt"
 
+live_phase 8 "${PHASE_TOTAL}" "launchd"
 status_set "launchd"
 if [[ "${OS_NAME}" == "Darwin" ]]; then
   note "collecting launchd hermes agents"
@@ -356,6 +302,7 @@ else
   echo "non-Darwin: launchd skipped" >"${COLLECT_DIR}/launchd/skipped.txt"
 fi
 
+live_phase 9 "${PHASE_TOTAL}" "ports"
 status_set "ports"
 note "probing gateway port 9130"
 {
@@ -390,6 +337,7 @@ PY
 
 PORT_9130="$(grep -E '^port_9130=' "${COLLECT_DIR}/ports/9130.txt" | tail -n1 | cut -d= -f2 || echo unknown)"
 
+live_phase 10 "${PHASE_TOTAL}" "logs"
 status_set "logs" "port_9130=${PORT_9130}"
 note "copying log tails"
 if [[ -d "${HERMES_HOME}/logs" ]]; then
@@ -419,7 +367,7 @@ if [[ "${OS_NAME}" == "Darwin" ]]; then
   fi
 fi
 
-# Classify + write plan-pipe reports via helper
+live_phase 11 "${PHASE_TOTAL}" "report"
 status_set "report"
 note "building plan-pipe report"
 export INCIDENT_ID HOST_SHORT TS OS_NAME ARCH_NAME HERMES_HOME HERMES_BIN
@@ -427,19 +375,17 @@ export AUTH_STATUS NOUS_PRESENT RT_NULL QUARANTINE_HINT PORT_9130
 export COLLECT_DIR REPORT_DIR DESKTOP
 python3 "${SCRIPT_DIR}/lib/build_report.py"
 
-# Sidecar copies on Desktop for easy plan paste (no unzip required)
 cp "${REPORT_DIR}/report.md" "${DESKTOP}/${INCIDENT_ID}.report.md"
 cp "${REPORT_DIR}/report.json" "${DESKTOP}/${INCIDENT_ID}.report.json"
 
+live_phase 12 "${PHASE_TOTAL}" "zip"
 status_set "zip" "report_md=${INCIDENT_ID}.report.md"
 note "writing ${OUT_ZIP}"
 if have zip; then
-  run_capture_progress "zip archive" "${COLLECT_DIR}/doctor/zip-stdout.txt" \
-    bash -c "cd \"${STAGING}\" && zip -r -q \"${OUT_ZIP}\" collect report"
+  (cd "${STAGING}" && zip -r -q "${OUT_ZIP}" collect report)
 else
   OUT_ZIP="${DESKTOP}/${INCIDENT_ID}.tar.gz"
-  run_capture_progress "tar archive" "${COLLECT_DIR}/doctor/tar-stdout.txt" \
-    bash -c "cd \"${STAGING}\" && tar -czf \"${OUT_ZIP}\" collect report"
+  (cd "${STAGING}" && tar -czf "${OUT_ZIP}" collect report)
 fi
 
 PRIMARY="$(python3 -c 'import json; print(json.load(open("'"${REPORT_DIR}/report.json"'")).get("primary_hypothesis") or "unclassified")' 2>/dev/null || echo unclassified)"

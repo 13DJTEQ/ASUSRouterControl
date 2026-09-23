@@ -41,7 +41,12 @@ live_note() {
 }
 
 live_warn() {
-  live_note "WARN: $*"
+  local msg="$*"
+  local line
+  line="$(_live_ts) [${_LIVE_PREFIX:-ops}] WARN: ${msg}"
+  printf '%s\n' "${line}" >&2
+  printf '%s\n' "${line}" >>"${_LIVE_LOG}" 2>/dev/null || true
+  printf '%s\n' "${line}" >>"${_LIVE_DESKTOP_LOG}" 2>/dev/null || true
 }
 
 live_status() {

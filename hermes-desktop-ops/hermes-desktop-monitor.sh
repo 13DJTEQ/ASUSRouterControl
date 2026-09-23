@@ -3,7 +3,7 @@
 # Safe for zsh callers: invoke with /bin/bash.
 #
 # One-shot check-in:
-#   /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-monitor.sh
+#   /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-monitor.sh --once
 #
 # Follow live log:
 #   /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-monitor.sh --tail
@@ -11,8 +11,8 @@
 # Refresh every 5s:
 #   /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-monitor.sh --watch
 #
-# Fresh download if ops folder is old:
-#   curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/hermes-desktop-monitor.sh -o ~/Desktop/hermes-desktop-monitor.sh && chmod +x ~/Desktop/hermes-desktop-monitor.sh && /bin/bash ~/Desktop/hermes-desktop-monitor.sh
+# Fresh download while collector runs — paste as ONE line:
+#   curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/hermes-desktop-monitor.sh -o ~/Desktop/hermes-desktop-monitor.sh && chmod +x ~/Desktop/hermes-desktop-monitor.sh && /bin/bash ~/Desktop/hermes-desktop-monitor.sh --once
 set -euo pipefail
 
 DESKTOP="${HOME}/Desktop"
@@ -52,39 +52,29 @@ note() { printf '%s\n' "$*"; }
 hr() { printf '%s\n' "------------------------------------------------------------"; }
 
 find_pids() {
-  # Print PIDs matching collector-related processes. Exclude this monitor.
-  local self=$$
-  local lines=""
-  if command -v pgrep >/dev/null 2>&1; then
-    lines="$(pgrep -fl 'hermes-desktop-archive\.sh|bootstrap-desktop-collector\.sh|hermes backup|hermes doctor|hermes gateway' 2>/dev/null || true)"
-  else
-    lines="$(ps aux 2>/dev/null | grep -E 'hermes-desktop-archive\.sh|bootstrap-desktop-collector\.sh|hermes backup|hermes doctor|hermes gateway' | grep -v grep || true)"
-  fi
-  if [[ -z "${lines}" ]]; then
-    return 0
-  fi
-  # Drop monitor self / empty
-  printf '%s\n' "${lines}" | while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    case "${line}" in
-      *"hermes-desktop-monitor.sh"*) continue ;;
-    esac
-    # Skip our own PID if listed alone
-    local pid="${line%% *}"
-    [[ "${pid}" == "${self}" ]] && continue
-    printf '%s\n' "${line}"
-  done
+  # Match collector-related processes via ps+grep so the search pattern is not
+  # itself matched when this monitor or a wrapper shell embeds the regex.
+  # Tokens split intentionally so this script's source does not self-match.
+  local a b c d e
+  a="hermes-desktop-archive"
+  b="bootstrap-desktop-collector"
+  c="hermes"" ""backup"
+  d="hermes"" ""doctor"
+  e="hermes"" ""gateway"
+  ps -eo pid=,args= 2>/dev/null \
+    | grep -E "${a}\\.sh|${b}\\.sh|${c}|${d}|${e}" \
+    | grep -v 'hermes-desktop-monitor' \
+    | grep -v 'grep -E' \
+    || true
 }
 
 staging_dirs() {
-  # Temp staging left by archive (mktemp hermes-incident-*)
-  local roots=("${TMPDIR:-/tmp}" /tmp /var/folders)
+  local roots=("${TMPDIR:-/tmp}" /tmp)
   local r
   for r in "${roots[@]}"; do
     [[ -d "${r}" ]] || continue
     find "${r}" -maxdepth 3 -type d -name 'hermes-incident-*' 2>/dev/null | head -n 20 || true
   done
-  # macOS user temp often under /var/folders/.../T/
   if [[ "$(uname -s)" == "Darwin" ]]; then
     find /var/folders -maxdepth 6 -type d -name 'hermes-incident-*' 2>/dev/null | head -n 20 || true
   fi
@@ -116,7 +106,7 @@ snapshot() {
   if [[ -n "${procs}" ]]; then
     note "${procs}"
   else
-    note "(no collector/bootstrap/hermes backup|doctor processes found)"
+    note "no collector/bootstrap/hermes backup|doctor processes found"
   fi
 
   note ""
@@ -126,7 +116,7 @@ snapshot() {
     note ""
     note "mtime: $(ls -la "${LIVE_STATUS}" 2>/dev/null | awk '{print $5,$6,$7,$8,$9}')"
   else
-    note "(no ${LIVE_STATUS} yet — collector may be older build or still downloading)"
+    note "no ${LIVE_STATUS} yet — collector may be older build or still downloading"
   fi
 
   note ""
@@ -142,12 +132,12 @@ snapshot() {
       find "${d}" -type f 2>/dev/null | head -n 25 || true
     done <<<"${stages}"
   else
-    note "(no hermes-incident-* staging dirs found under /tmp)"
+    note "no hermes-incident-* staging dirs found under /tmp"
   fi
 
   note ""
   note "== Desktop incident outputs =="
-  ls -lt "${DESKTOP}"/hermes-incident-* 2>/dev/null | head -n 20 || note "(none yet)"
+  ls -lt "${DESKTOP}"/hermes-incident-* 2>/dev/null | head -n 20 || note "none yet"
 
   note ""
   note "== Recent log tail =="
@@ -157,8 +147,8 @@ snapshot() {
     note "log: ${log}"
     tail -n "${TAIL_LINES}" "${log}" 2>/dev/null || true
   else
-    note "(no LIVE.log yet)"
-    note "Tip: if bootstrap is stuck on curl/tar, Activity Monitor / \`ps\` above is the signal."
+    note "no LIVE.log yet"
+    note "Tip: if bootstrap is stuck on curl/tar, Activity Monitor / ps above is the signal."
   fi
 
   note ""
@@ -166,7 +156,7 @@ snapshot() {
   if echo "${procs}" | grep -q 'hermes backup'; then
     note "Stuck on hermes backup is common on large ~/.hermes — wait or check disk I/O."
   fi
-  if echo "${procs}" | grep -q 'curl\|tar'; then
+  if echo "${procs}" | grep -qE 'curl|tar '; then
     note "Bootstrap still downloading/extracting the ops tarball."
   fi
   if [[ -z "${procs}" ]] && ls "${DESKTOP}"/hermes-incident-*.report.md >/dev/null 2>&1; then
@@ -190,13 +180,12 @@ do_tail() {
     while [[ -z "${log}" ]]; do
       sleep 2
       log="$(latest_live_log)"
-      # Still print process pulse while waiting
       local procs
       procs="$(find_pids)"
       [[ -n "${procs}" ]] && note "[pulse] ${procs}" || note "[pulse] no collector procs yet"
     done
   fi
-  note "Following ${log} (Ctrl-C to stop)"
+  note "Following ${log} — Ctrl-C to stop"
   tail -n "${TAIL_LINES}" -F "${log}"
 }
 
