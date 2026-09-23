@@ -52,21 +52,37 @@ def probe_tcp(host: str, port: int, *, timeout: float = 1.5) -> bool:
 def discover_router_candidates(
     *,
     http_port: int = 80,
+    https_port: int = 8443,
     include_gateway: bool = True,
     probe: bool = True,
     timeout: float = 1.5,
 ) -> list[DiscoveryCandidate]:
-    """Return ordered connection candidates for the setup wizard."""
+    """Return ordered connection candidates for the setup wizard.
+
+    Reachability probes both HTTP and HTTPS admin ports (80 + 8443 by default)
+    so HTTPS-only routers are not ranked as unreachable.
+    """
     ordered: list[DiscoveryCandidate] = []
     seen: set[str] = set()
+
+    def _reachable(host: str) -> bool | None:
+        if not probe:
+            return None
+        if probe_tcp(host, http_port, timeout=timeout):
+            return True
+        if https_port and https_port != http_port:
+            if probe_tcp(host, https_port, timeout=timeout):
+                return True
+        return False
 
     def _add(host: str, source: str) -> None:
         key = host.strip().lower()
         if not key or key in seen:
             return
         seen.add(key)
-        reachable = probe_tcp(host, http_port, timeout=timeout) if probe else None
-        ordered.append(DiscoveryCandidate(host=host, source=source, reachable=reachable))
+        ordered.append(
+            DiscoveryCandidate(host=host, source=source, reachable=_reachable(host))
+        )
 
     for host in _DEFAULT_CANDIDATES:
         _add(host, "well-known")

@@ -2,6 +2,9 @@
 # Probe ASUS HTTP(S) admin LOGIN using Bitwarden item
 # "router.asus.com (13Maschine)" when ROUTER_PASS is not provided.
 #
+# Host candidates align with Connect: requested HOST, well-known names,
+# default gateway, plus optional lab gateway 192.168.50.1.
+#
 # Usage:
 #   bash scripts/probe_router_login.sh
 #   HOST=192.168.50.1 bash scripts/probe_router_login.sh
@@ -91,7 +94,8 @@ user = os.environ["ROUTER_USER"]
 password = os.environ["ROUTER_PASS"]
 
 async def main() -> int:
-    from asusroutercontrol.connect import probe_http
+    from asusroutercontrol.connect import _http_transport_attempts, probe_http
+    from asusroutercontrol.discovery import default_gateway_ipv4
 
     def cfg(h: str, port: int, ssl: bool):
         return SimpleNamespace(
@@ -102,14 +106,38 @@ async def main() -> int:
             ssh_port=1313,
         )
 
-    attempts = [
-        cfg(host, 8443, True),
-        cfg(host, 80, False),
-        cfg("192.168.50.1", 8443, True),
-        cfg("192.168.50.1", 80, False),
-    ]
-    print(f"Using python={sys.executable}")
+    hosts: list[str] = []
+    for candidate in (
+        host,
+        "router.asus.com",
+        "www.asusrouter.com",
+        default_gateway_ipv4() or "",
+        "192.168.50.1",
+    ):
+        key = (candidate or "").strip()
+        if key and key not in hosts:
+            hosts.append(key)
+
+    attempts = []
+    for h in hosts:
+        for attempt_host, port, ssl in _http_transport_attempts(
+            h, http_port=80, use_ssl=False
+        ):
+            attempts.append(cfg(attempt_host, port, ssl))
+
+    # Dedupe (host, port, ssl)
+    seen: set[tuple[str, int, bool]] = set()
+    ordered = []
     for c in attempts:
+        key = (c.router_host, c.router_port, c.use_ssl)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(c)
+
+    print(f"Using python={sys.executable}")
+    print(f"Hosts={hosts}")
+    for c in ordered:
         ok, err = await probe_http(c, user, password)
         label = f"{'https' if c.use_ssl else 'http'}://{c.router_host}:{c.router_port}"
         if ok:

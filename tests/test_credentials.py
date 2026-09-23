@@ -839,6 +839,76 @@ class TestConnectGuiSessionHelpers:
             creds._BACKENDS["keychain"].get("router_password", env="dev") == "secret-pw"
         )
 
+    def test_keychain_store_requires_security_for_router_password(
+        self, monkeypatch, mem_keyring
+    ):
+        """macOS: keyring-only write must not count as success for router_password."""
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        monkeypatch.setattr(creds, "_security_cli_available", lambda: True)
+        monkeypatch.setattr(
+            creds, "_security_set_generic_password", lambda *a, **k: False
+        )
+        ok = creds._BACKENDS["keychain"].store(
+            "router_password", "secret-pw", env="dev"
+        )
+        assert ok is False
+        # Username does not require security -A.
+        assert creds._BACKENDS["keychain"].store(
+            "router_username", "13Maschine", env="dev"
+        )
+
+    def test_keychain_store_requires_security_for_bw_master(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        monkeypatch.setattr(creds, "_security_cli_available", lambda: True)
+        monkeypatch.setattr(
+            creds, "_security_set_generic_password", lambda *a, **k: False
+        )
+        assert (
+            creds._BACKENDS["keychain"].store(
+                "bw_master_password", "mp-secret", env="prod"
+            )
+            is False
+        )
+
+    def test_mirror_fails_when_security_write_fails(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "_security_cli_available", lambda: True)
+        monkeypatch.setattr(
+            creds, "_security_set_generic_password", lambda *a, **k: False
+        )
+        with pytest.raises(RuntimeError, match="Keychain mirror failed"):
+            creds.mirror_router_login_to_keychain(
+                "13Maschine", "pw-secret", ssh_port=1313, env="dev"
+            )
+
+    def test_assert_connect_password_blocks_blank_when_locked(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(
+            creds, "get_router_credentials", lambda host_hint=None: (None, None)
+        )
+        with pytest.raises(ConnectionError, match="bw_sync_router_env"):
+            creds.assert_connect_password_ready("", host="router.asus.com")
+
+    def test_assert_connect_password_allows_present(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        creds.assert_connect_password_ready("secret", host="router.asus.com")
+
     def test_resolve_blank_connect_password_fills_store_and_env(
         self, monkeypatch, mem_keyring
     ):

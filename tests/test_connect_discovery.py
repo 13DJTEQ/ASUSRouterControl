@@ -331,3 +331,86 @@ def test_format_http_probe_error_mentions_router_settings():
     )
     assert "captcha" in msg.lower()
     assert "8443" in msg or "authentication method" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_setup_blocks_blank_password_when_vault_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Blank password + locked vault must fail before any HTTP LOGIN attempt."""
+    calls: list[tuple] = []
+
+    async def _probe(cfg, username, password, *, try_ssh=True):
+        calls.append((cfg.router_host, cfg.router_port, cfg.use_ssl))
+        return ConnectionProbeResult(http_ok=True, ssh_ok=None)
+
+    monkeypatch.setattr("asusroutercontrol.connect.probe_connection", _probe)
+    monkeypatch.setattr(
+        "asusroutercontrol.credentials.bitwarden_vault_status",
+        lambda: "locked",
+    )
+    monkeypatch.setattr(
+        "asusroutercontrol.credentials.get_router_credentials",
+        lambda host_hint=None: (None, None),
+    )
+    monkeypatch.setattr(
+        "asusroutercontrol.credentials.load_runtime_env_files",
+        lambda: None,
+    )
+
+    with pytest.raises(ConnectionError, match="bw_sync_router_env"):
+        await setup_router_connection(
+            host="router.asus.com",
+            username="13Maschine",
+            password="",
+            ssh_enabled=False,
+            data_dir=tmp_path,
+            discover=False,
+            cfg=Config(data_dir=tmp_path),
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_probe_http_transport_ladder_prefers_https(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from asusroutercontrol.connect import probe_http_transport_ladder
+
+    seen: list[tuple[str, int, bool]] = []
+
+    async def _probe(cfg, username, password):
+        seen.append((cfg.router_host, cfg.router_port, cfg.use_ssl))
+        if cfg.router_port == 8443 and cfg.use_ssl:
+            return True, None
+        return False, "refused"
+
+    monkeypatch.setattr("asusroutercontrol.connect.probe_http", _probe)
+    ok, err, winning = await probe_http_transport_ladder(
+        Config(router_host="192.168.50.1", router_port=80, use_ssl=False),
+        "admin",
+        "pw",
+    )
+    assert ok is True
+    assert err is None
+    assert winning.router_port == 8443
+    assert winning.use_ssl is True
+    assert seen[0] == ("192.168.50.1", 8443, True)
+
+
+def test_discover_probes_https_admin_port(monkeypatch: pytest.MonkeyPatch):
+    from asusroutercontrol import discovery as disc
+
+    probed: list[tuple[str, int]] = []
+
+    def fake_probe(host: str, port: int, *, timeout: float = 1.5) -> bool:
+        probed.append((host, port))
+        return port == 8443 and host == "router.asus.com"
+
+    monkeypatch.setattr(disc, "probe_tcp", fake_probe)
+    monkeypatch.setattr(disc, "default_gateway_ipv4", lambda: None)
+    found = disc.discover_router_candidates(probe=True, include_gateway=False)
+    assert any(c.host == "router.asus.com" and c.reachable for c in found)
+    assert any(port == 8443 for _host, port in probed)
+    assert any(port == 80 for _host, port in probed)

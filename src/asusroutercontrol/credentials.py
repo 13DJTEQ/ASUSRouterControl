@@ -541,7 +541,7 @@ def _security_set_generic_password(service: str, account: str, password: str) ->
 
 
 def _normalize_bw_master_password(secret: str) -> bool:
-    """Write the master password to the canonical Keychain location (keyring + security)."""
+    """Write the master password to the canonical Keychain location (security -A)."""
     backend = _BACKENDS.get("keychain")
     wrote = False
     if backend is not None:
@@ -555,14 +555,19 @@ def _normalize_bw_master_password(secret: str) -> bool:
             svc,
             acct,
         )
+    elif _security_cli_available() and not wrote:
+        log.warning(
+            "Bitwarden master password normalize: security -A write failed"
+        )
+        return False
     return wrote
 
 
 def store_bitwarden_master_password(password: str) -> bool:
     """Persist the Bitwarden master password in macOS Keychain (Keychain backend only).
 
-    Always writes the canonical universal-keychain prod path, and also mirrors
-    into the login keychain via `security` with -A so DEV.app and CLI share it.
+    Always writes the canonical universal-keychain prod path via ``security -A``
+    (required on macOS so DEV.app can unlock). Keyring is optional secondary.
     """
     secret = (password or "").strip()
     if not secret:
@@ -572,24 +577,34 @@ def store_bitwarden_master_password(password: str) -> bool:
     if backend is None:
         log.error("Keychain backend unavailable — cannot store Bitwarden master password")
         return False
-    wrote_keyring = bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    # KeychainBackend.store requires security -A for bw_master_password on macOS.
+    wrote_backend = bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    # Also pin the known canonical pair explicitly (covers legacy path variants).
     wrote_security = _security_set_generic_password(
         _bw_mp_canonical_service(),
         _bw_mp_canonical_account(),
         secret,
     )
-    if wrote_keyring or wrote_security:
+    security_available = _security_cli_available()
+    if security_available and not (wrote_security or wrote_backend):
+        log.warning(
+            "Bitwarden master password security -A write failed; "
+            "refusing keyring-only success"
+        )
+        return False
+    if wrote_backend or wrote_security:
         global _last_bw_mp_matched_path  # noqa: PLW0603
         _last_bw_mp_matched_path = _format_key_path(
-            "keyring" if wrote_keyring else "security",
+            "security" if wrote_security else "keyring",
             _bw_mp_canonical_service(),
             _bw_mp_canonical_account(),
         )
         log.info(
-            "Stored Bitwarden master password at canonical %s/%s (keyring=%s security=%s)",
+            "Stored Bitwarden master password at canonical %s/%s "
+            "(backend=%s security=%s)",
             _bw_mp_canonical_service(),
             _bw_mp_canonical_account(),
-            wrote_keyring,
+            wrote_backend,
             wrote_security,
         )
         return True
@@ -1165,6 +1180,15 @@ class _OnePasswordBackend(_CredentialBackend):
 # ---------------------------------------------------------------------------
 
 
+# Secrets that DEV.app must read via security(1) ACL (-A). Keyring-only writes
+# silently strand the GUI with a blank password / locked vault.
+_KEYS_REQUIRE_SECURITY = frozenset({"router_password", "bw_master_password"})
+
+
+def _security_cli_available() -> bool:
+    return bool(_security_bin() and Path("/usr/bin/security").is_file())
+
+
 class _KeychainBackend(_CredentialBackend):
     @property
     def name(self) -> str:
@@ -1200,17 +1224,18 @@ class _KeychainBackend(_CredentialBackend):
         return None
 
     def store(self, key: str, value: str, *, env: str = DEFAULT_ENV) -> bool:
-        """Write via keyring and ``security -A`` so Terminal + DEV.app share ACL."""
+        """Write via ``security -A`` first (required for passwords), keyring secondary.
+
+        For ``router_password`` / ``bw_master_password`` on macOS, success requires
+        the security(1) write — keyring-only ACL items are invisible to DEV.app.
+        """
         _ensure_login_keychain_env()
         svc = _service_name(key, env)
         acct = _account_name(key, env)
-        wrote_keyring = False
-        if _ensure_secure_keyring_backend():
-            try:
-                keyring.set_password(svc, acct, value)
-                wrote_keyring = True
-            except Exception as exc:
-                log.error("Failed to write keychain entry %s/%s: %s", svc, acct, exc)
+        require_security = key in _KEYS_REQUIRE_SECURITY
+        security_available = _security_cli_available()
+
+        # Prefer security delete → add -A first so Terminal + DEV.app share ACL.
         wrote_security = _security_set_generic_password(svc, acct, value)
         if wrote_security:
             log.info(
@@ -1220,7 +1245,26 @@ class _KeychainBackend(_CredentialBackend):
                 acct,
                 env,
             )
-        if wrote_keyring or wrote_security:
+        elif require_security and security_available:
+            log.warning(
+                "Keychain security -A write failed for %s (env=%s); "
+                "refusing keyring-only success (DEV.app would not read it)",
+                key,
+                env,
+            )
+
+        wrote_keyring = False
+        if _ensure_secure_keyring_backend():
+            try:
+                keyring.set_password(svc, acct, value)
+                wrote_keyring = True
+            except Exception as exc:
+                log.error("Failed to write keychain entry %s/%s: %s", svc, acct, exc)
+
+        if require_security and security_available:
+            return bool(wrote_security)
+
+        if wrote_security or wrote_keyring:
             return True
         log.error("Failed to store Keychain credential %s (env=%s)", key, env)
         return False
@@ -2096,6 +2140,46 @@ def resolve_blank_connect_password(
     return resolved_user, resolved_pass, source
 
 
+def missing_mirrored_password_message(*, bw_status: str | None = None) -> str:
+    """Explicit fail-fast copy when vault is locked and Keychain mirror is empty."""
+    status = (bw_status or bitwarden_vault_status() or "unknown").strip()
+    return (
+        f"Bitwarden vault is {status} and no Keychain-mirrored router password "
+        "was found. Do not retry LOGIN with a blank password (Captcha risk). "
+        "Run: bash scripts/bw_sync_router_env.sh && "
+        "asusrouter credentials bw-master --set"
+    )
+
+
+def assert_connect_password_ready(
+    password: str,
+    *,
+    host: str | None = None,
+) -> None:
+    """Fail fast before HTTP LOGIN when vault is locked and mirror is missing.
+
+    Prevents blank-password Captcha bait against the router admin endpoint.
+    """
+    if (password or "").strip():
+        return
+    load_runtime_env_files()
+    bw_status = bitwarden_vault_status()
+    if bw_status == "unlocked":
+        # Vault unlocked but password still empty — store/item miss, not bait.
+        raise ConnectionError(
+            "Router password is empty after credential resolve. "
+            "Enter the admin password or set ASUSROUTERCONTROL_BW_ROUTER_ITEM."
+        )
+    _, store_pass = get_router_credentials(host_hint=host)
+    if store_pass:
+        # Caller should have filled from store; treat as programming/order bug.
+        raise ConnectionError(
+            "Router password is empty but Keychain/store has a mirrored secret — "
+            "retry Connect (or leave password blank to reuse the mirror)."
+        )
+    raise ConnectionError(missing_mirrored_password_message(bw_status=bw_status))
+
+
 def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
     """Return SSH port from Bitwarden item, env, or canonical store.
 
@@ -2207,8 +2291,13 @@ def mirror_router_login_to_keychain(
 
     Writes the active/runtime env and also ``prod`` so a mismatched
     ``ASUSROUTERCONTROL_RUNTIME_ENV`` cannot strand the mirrored password.
-    Stores via KeychainBackend (keyring + ``security -A``) for Terminal/DEV.app ACL.
+    Stores via KeychainBackend (``security -A`` required for password) so DEV.app
+    can read the mirrored secret. Raises ``RuntimeError`` on any store failure.
     """
+    if not (username or "").strip() or not (password or "").strip():
+        raise RuntimeError(
+            "Cannot mirror empty router username/password to Keychain"
+        )
     resolved_env = (env or _runtime_credential_env() or DEFAULT_ENV).strip().lower()
     targets: list[str] = []
     for candidate in (resolved_env, "prod", "shared"):
@@ -2216,13 +2305,24 @@ def mirror_router_login_to_keychain(
             targets.append(candidate)
     last_backend = "keychain"
     for target_env in targets:
-        last_backend = store_router_credentials(
-            username,
-            password,
-            ssh_port=ssh_port,
-            env=target_env,
-            backend="keychain",
-        )
+        try:
+            last_backend = store_router_credentials(
+                username,
+                password,
+                ssh_port=ssh_port,
+                env=target_env,
+                backend="keychain",
+            )
+        except Exception as exc:
+            log.warning(
+                "Keychain mirror failed for env=%s user=%r: %s",
+                target_env,
+                username,
+                exc.__class__.__name__,
+            )
+            raise RuntimeError(
+                f"Keychain mirror failed for env={target_env}: {exc}"
+            ) from exc
         log.info(
             "Mirrored router login to Keychain env=%s user=%r ssh_port=%s "
             "(password present, length omitted)",

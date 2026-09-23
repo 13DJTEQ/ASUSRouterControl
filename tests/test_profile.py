@@ -93,3 +93,28 @@ def test_load_config_profile_overlay_respects_env(
     cfg2 = load_config()
     assert cfg2.ssh_port == 1313
     assert cfg2.router_host == "router.asus.com"
+
+
+def test_load_config_profile_beats_stale_env_http_transport(
+    tmp_path: Path, env_clean, monkeypatch: pytest.MonkeyPatch
+):
+    """Successful Connect profile (8443/ssl) must not lose to .env :80/false."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ROUTER_PORT", "80")
+    monkeypatch.setenv("USE_SSL", "false")
+    profile = RouterProfile(
+        id="https-profile",
+        display_name="HTTPS",
+        host="192.168.50.1",
+        http_port=8443,
+        use_ssl=True,
+        ssh_port=1313,
+    )
+    store = ProfileStore()
+    store.upsert(profile, make_active=True)
+    save_profiles(store, tmp_path)
+
+    cfg = load_config()
+    assert cfg.router_port == 8443
+    assert cfg.use_ssl is True
+    assert cfg.router_host == "192.168.50.1"

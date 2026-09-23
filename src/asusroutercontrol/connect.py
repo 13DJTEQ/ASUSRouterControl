@@ -297,6 +297,47 @@ async def probe_http(cfg: Config, username: str, password: str) -> tuple[bool, s
             log.debug("HTTP backend disconnect failed during probe", exc_info=True)
 
 
+async def probe_http_transport_ladder(
+    cfg: Config,
+    username: str,
+    password: str,
+) -> tuple[bool, str | None, Config]:
+    """Try Connect's HTTP transport ladder; return winning cfg on success.
+
+    Used by menubar health checks so stale ``ROUTER_PORT=80`` does not block a
+    router that only answers on HTTPS :8443 after Connect.
+    """
+    attempts = _http_transport_attempts(
+        cfg.router_host,
+        http_port=cfg.router_port,
+        use_ssl=cfg.use_ssl,
+    )
+    last_error: str | None = None
+    for host, port, use_ssl in attempts:
+        attempt_cfg = replace(
+            cfg,
+            router_host=host,
+            router_port=port,
+            use_ssl=use_ssl,
+        )
+        ok, err = await probe_http(attempt_cfg, username, password)
+        if ok:
+            return True, None, attempt_cfg
+        last_error = err
+        err_l = (err or "").lower()
+        if (
+            "rejected login" in err_l
+            or "authorization failed" in err_l
+            or "captcha" in err_l
+            or "temporarily locked" in err_l
+            or "password reset" in err_l
+            or "blank password" in err_l
+            or "keychain-mirrored" in err_l
+        ):
+            break
+    return False, last_error, cfg
+
+
 async def probe_ssh(cfg: Config, username: str, password: str) -> tuple[bool, str | None]:
     ssh = RouterSSH(
         hostname=cfg.router_host,
@@ -354,6 +395,11 @@ async def setup_router_connection(
     discover: bool = True,
 ) -> SetupResult:
     """Test HTTP (required) + optional SSH, then persist profile + credentials."""
+    from asusroutercontrol.credentials import assert_connect_password_ready
+
+    # Fail fast before hammering LOGIN with a blank password (Captcha bait).
+    assert_connect_password_ready(password, host=host)
+
     base = cfg or load_config()
     resolved_host = host
     if not resolved_host and discover:

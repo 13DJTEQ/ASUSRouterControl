@@ -126,8 +126,11 @@ def _resolve_env_file(explicit_env_file: str | Path | None) -> Path | None:
 def _apply_active_profile(cfg: Config) -> Config:
     """Overlay active profile connection fields unless env explicitly set them.
 
-    Precedence: defaults < profile < explicit environment variables.
-    Lab setups keep SSH_PORT=1313 via .env; customer profiles default to port 22.
+    Precedence: defaults < profile < explicit environment variables — except
+    admin HTTP transport (``ROUTER_PORT`` / ``USE_SSL``). A successful Connect
+    profile (e.g. HTTPS :8443) must not be overridden by stale ``.env`` defaults
+    of ``ROUTER_PORT=80`` / ``USE_SSL=false``. Lab SSH overrides via ``SSH_PORT``
+    still win for SSH.
     """
     try:
         from asusroutercontrol.profile import apply_profile, load_profiles
@@ -143,10 +146,8 @@ def _apply_active_profile(cfg: Config) -> Config:
     updates: dict = {}
     if "ROUTER_HOST" in os.environ:
         updates["router_host"] = cfg.router_host
-    if "ROUTER_PORT" in os.environ:
-        updates["router_port"] = cfg.router_port
-    if "USE_SSL" in os.environ:
-        updates["use_ssl"] = cfg.use_ssl
+    # Intentionally do NOT let ROUTER_PORT / USE_SSL from .env override a
+    # Connect-persisted profile — health/poll must keep the working transport.
     if "ROUTER_BACKEND" in os.environ:
         updates["router_backend"] = cfg.router_backend
     if "SSH_PORT" in os.environ:

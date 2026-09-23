@@ -136,3 +136,29 @@ def test_bw_sync_failed_unlock_surfaces_error(tmp_path):
     assert "INTERACTIVE_UNLOCK_CALLED" not in combined
     assert "wrong master password" in combined
     assert "bw-master --status" in combined
+
+
+def test_bw_sync_mirror_failure_exits_nonzero():
+    """Keychain mirror failure inside the sync Python block must fail the script."""
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "keychain mirror failed" in script
+    assert "raise SystemExit(1)" in script
+    assert "mirror_router_login_to_keychain" in script
+
+
+def test_scheduler_pause_login_attempts_flag():
+    from asusroutercontrol.config import Config
+    from asusroutercontrol.scheduler import MonitorScheduler
+
+    class _Store:
+        pass
+
+    sched = MonitorScheduler(_Store(), cfg=Config())  # type: ignore[arg-type]
+    assert sched._login_paused is False
+    sched.pause_login_attempts(True)
+    assert sched._login_paused is True
+    sched.pause_login_attempts(False)
+    assert sched._login_paused is False
+    sched.update_config(Config(router_host="192.168.50.1", router_port=8443, use_ssl=True))
+    assert sched._cfg.router_port == 8443
+    assert sched._cfg.use_ssl is True

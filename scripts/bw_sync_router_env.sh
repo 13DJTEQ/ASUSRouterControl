@@ -245,6 +245,7 @@ print("  password: (kept in Bitwarden only — not written to .env)")
 
 # Mirror login into Keychain so DEV.app Connect works even when the GUI
 # cannot unlock Bitwarden (missing BW_SESSION / Keychain ACL for .app).
+import sys as _sys
 try:
     import os as _os
     _os.environ.setdefault("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
@@ -258,7 +259,8 @@ try:
     )
     print(f"  keychain mirror: {backend} (env=dev)")
 except Exception as exc:  # noqa: BLE001
-    print(f"  keychain mirror failed: {exc}")
+    print(f"  keychain mirror failed: {exc}", file=_sys.stderr)
+    raise SystemExit(1) from exc
 PY
 
 echo

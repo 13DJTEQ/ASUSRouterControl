@@ -165,6 +165,23 @@ class MonitorScheduler:
         self._failures: dict[str, int] = {}
         self._runtime_profile: RuntimeProfile | None = None
         self._skipped_specs: list[_TaskSpec] = []
+        # When True, poll LOGIN is skipped (Connect in flight / Captcha cooldown).
+        self._login_paused = False
+
+    def pause_login_attempts(self, paused: bool = True) -> None:
+        """Pause or resume poll-loop LOGIN attempts (thread-safe flag)."""
+        self._login_paused = bool(paused)
+        log.info("Scheduler LOGIN pause=%s", self._login_paused)
+
+    def update_config(self, cfg: Config) -> None:
+        """Swap runtime config (e.g. after Connect persists HTTPS :8443 profile)."""
+        self._cfg = cfg
+        log.info(
+            "Scheduler config updated host=%s port=%s ssl=%s",
+            cfg.router_host,
+            cfg.router_port,
+            cfg.use_ssl,
+        )
 
     async def run(self) -> None:
         """Start all task loops as cancellable Tasks."""
@@ -749,6 +766,9 @@ class MonitorScheduler:
 
         try:
             while self._running:
+                if self._login_paused:
+                    await asyncio.sleep(2.0)
+                    continue
                 try:
                     await backend.connect()
                 except Exception as exc:
@@ -764,7 +784,7 @@ class MonitorScheduler:
                         username, password = get_router_credentials()
                         if username and password:
                             backend = create_backend(
-                                cfg, username=username, password=password
+                                self._cfg, username=username, password=password
                             )
                         continue
                     log.exception("Poll connect error")
@@ -802,7 +822,7 @@ class MonitorScheduler:
                         username, password = get_router_credentials()
                         if username and password:
                             backend = create_backend(
-                                cfg, username=username, password=password
+                                self._cfg, username=username, password=password
                             )
                         continue
                     log.exception("Poll task error")

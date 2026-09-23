@@ -321,6 +321,8 @@ class AppDelegate(NSObject):
         self._health_fail_count = 0
         self._health_retry_seconds = 60.0
         self._health_retries_paused = False
+        self._health_retry_timer = None
+        self._connect_in_flight = False
         self._spinner_timer = None
         self._spinner_frame = 0
         self._spinner_reason = None
@@ -372,6 +374,9 @@ class AppDelegate(NSObject):
 
     def _startup_health_check(self):
         """Check router backend reachability before starting scheduler."""
+        if getattr(self, "_connect_in_flight", False):
+            log.info("Skipping health LOGIN — Connect in flight")
+            return
         host = getattr(self._cfg, "router_host", None) or "router"
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "showConnectingStatus:", host, False
@@ -381,8 +386,16 @@ class AppDelegate(NSObject):
         from asusroutercontrol.ssh import RouterSSH
 
         async def _check_backend():
-            from asusroutercontrol.connect import format_http_probe_error
-            from asusroutercontrol.credentials import load_runtime_env_files
+            from dataclasses import replace as _replace
+
+            from asusroutercontrol.connect import (
+                _http_transport_attempts,
+                format_http_probe_error,
+            )
+            from asusroutercontrol.credentials import (
+                assert_connect_password_ready,
+                load_runtime_env_files,
+            )
 
             load_runtime_env_files()
             username, password = get_router_credentials(host_hint=host)
@@ -392,36 +405,73 @@ class AppDelegate(NSObject):
                     "Administration → System login name "
                     "(e.g. 13Maschine, not admin)."
                 )
+            try:
+                assert_connect_password_ready(password, host=host)
+            except ConnectionError as exc:
+                raise RuntimeError(str(exc)) from exc
             log.info(
-                "Health check LOGIN as user=%r host=%s port=%s ssl=%s",
+                "Health check LOGIN as user=%r host=%s port=%s ssl=%s "
+                "(transport ladder)",
                 username,
                 self._cfg.router_host,
                 self._cfg.router_port,
                 self._cfg.use_ssl,
             )
-            backend = create_backend(
-                self._cfg,
-                username=username,
-                password=password,
+            attempts = _http_transport_attempts(
+                self._cfg.router_host,
+                http_port=self._cfg.router_port,
+                use_ssl=self._cfg.use_ssl,
             )
-            try:
-                await backend.connect()
+            last_error: str | None = None
+            for attempt_host, attempt_port, attempt_ssl in attempts:
+                if getattr(self, "_connect_in_flight", False):
+                    log.info("Health LOGIN aborted — Connect started")
+                    return
+                attempt_cfg = _replace(
+                    self._cfg,
+                    router_host=attempt_host,
+                    router_port=attempt_port,
+                    use_ssl=attempt_ssl,
+                )
+                backend = create_backend(
+                    attempt_cfg, username=username, password=password
+                )
                 try:
-                    info = await backend.get_system_info()
-                    self._remember_router_model(getattr(info, "model", None))
-                except Exception:
-                    log.debug("Health check model read failed", exc_info=True)
-            except Exception as exc:
-                raise RuntimeError(
-                    format_http_probe_error(
-                        exc, host=str(self._cfg.router_host), username=username
+                    await backend.connect()
+                    try:
+                        info = await backend.get_system_info()
+                        self._remember_router_model(getattr(info, "model", None))
+                    except Exception:
+                        log.debug("Health check model read failed", exc_info=True)
+                    self._cfg = attempt_cfg
+                    log.info(
+                        "Health check OK via %s:%s ssl=%s",
+                        attempt_host,
+                        attempt_port,
+                        attempt_ssl,
                     )
-                ) from exc
-            finally:
-                try:
-                    await backend.disconnect()
-                except Exception:
-                    log.debug("Backend disconnect error in health check", exc_info=True)
+                    return
+                except Exception as exc:
+                    last_error = format_http_probe_error(
+                        exc, host=str(attempt_host), username=username
+                    )
+                    err_l = last_error.lower()
+                    if (
+                        "rejected login" in err_l
+                        or "authorization failed" in err_l
+                        or "captcha" in err_l
+                        or "temporarily locked" in err_l
+                    ):
+                        break
+                finally:
+                    try:
+                        await backend.disconnect()
+                    except Exception:
+                        log.debug(
+                            "Backend disconnect error in health check",
+                            exc_info=True,
+                        )
+            raise RuntimeError(last_error or "HTTP admin unreachable")
 
         async def _check_ssh():
             ssh = RouterSSH(connect_timeout=10.0)
@@ -532,14 +582,64 @@ class AppDelegate(NSObject):
             delay = min(300.0, max(60.0, self._health_retry_seconds * 1.5))
         self._health_retry_seconds = delay
         log.info("Scheduling health retry in %.0fs (auth_fail=%s)", delay, auth_fail)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            delay, self, "retryHealthCheck:", None, False
+        self._cancel_health_retry_timer()
+        self._health_retry_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                delay, self, "retryHealthCheck:", None, False
+            )
         )
+
+    def _cancel_health_retry_timer(self) -> None:
+        """Invalidate pending health-retry NSTimer (no-op if none)."""
+        timer = getattr(self, "_health_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.invalidate()
+            except Exception:
+                log.debug("health retry timer invalidate failed", exc_info=True)
+            self._health_retry_timer = None
+
+    def _set_connect_in_flight(self, active: bool) -> None:
+        """Pause/resume health + poll LOGIN while Connect is running."""
+        self._connect_in_flight = bool(active)
+        if active:
+            self._cancel_health_retry_timer()
+            self._health_retries_paused = True
+        sched = getattr(self, "_sched", None)
+        if sched is not None and hasattr(sched, "pause_login_attempts"):
+            try:
+                sched.pause_login_attempts(active)
+            except Exception:
+                log.debug("scheduler LOGIN pause failed", exc_info=True)
+        log.info("Connect in-flight=%s (health/poll LOGIN paused=%s)", active, active)
+
+    def _restart_runtime_with_profile(self, profile=None) -> None:
+        """Stop degraded scheduler and restart with profile-applied cfg."""
+        from asusroutercontrol.profile import apply_profile
+
+        self._stop_scheduler()
+        self._runtime_started = False
+        self._sched = None
+        self._sched_store = None
+        self._sched_thread = None
+        self._sched_loop = None
+        cfg = load_config(runtime_env=_runtime_environment())
+        if profile is not None:
+            cfg = apply_profile(cfg, profile)
+        self._cfg = cfg
+        log.info(
+            "Runtime restarted with cfg host=%s port=%s ssl=%s",
+            cfg.router_host,
+            cfg.router_port,
+            cfg.use_ssl,
+        )
+        self._ensure_runtime_started()
 
     @objc.typedSelector(b"v@:@")
     def retryHealthCheck_(self, _):
         """Retry the health check unless LOGIN retries were paused."""
-        if self._health_retries_paused:
+        self._health_retry_timer = None
+        if self._health_retries_paused or getattr(self, "_connect_in_flight", False):
             log.info("Health LOGIN retries paused — waiting for Connect Router")
             return
         threading.Thread(
@@ -1334,6 +1434,7 @@ class AppDelegate(NSObject):
 
     def _begin_connect_activity(self, host: str) -> None:
         """Show connecting copy + spin the menubar icon until Connect finishes."""
+        self._set_connect_in_flight(True)
         self._set_connection_state(connecting_state(host), notify=True)
         try:
             self._mi_connect.setTitle_("🔌 Connecting…")
@@ -1709,8 +1810,14 @@ class AppDelegate(NSObject):
             self._health_retry_seconds = 60.0
             self._health_retries_paused = False
             self._degraded = False
-            # Reload config so subsequent actions see the new profile.
-            self._cfg = load_config(runtime_env=_runtime_environment())
+            # Apply the winning Connect profile (HTTPS :8443) immediately —
+            # do not keep degraded-mode scheduler cfg from stale .env :80.
+            from asusroutercontrol.profile import apply_profile
+
+            self._cfg = apply_profile(
+                load_config(runtime_env=_runtime_environment()),
+                result.profile,
+            )
             # Fresh model after hardware swap — never keep a prior AC68U/etc. label.
             self._invalidate_router_model()
             try:
@@ -1726,9 +1833,12 @@ class AppDelegate(NSObject):
             except Exception:
                 log.debug("Post-connect model probe failed", exc_info=True)
             log.info(
-                "Connect success host=%s profile_host=%s ssh_ok=%s backend=%s",
+                "Connect success host=%s profile_host=%s port=%s ssl=%s "
+                "ssh_ok=%s backend=%s",
                 host,
                 result.profile.host,
+                result.profile.http_port,
+                result.profile.use_ssl,
                 result.probe.ssh_ok,
                 result.credentials_backend,
             )
@@ -1802,15 +1912,26 @@ class AppDelegate(NSObject):
     def finishConnectSuccess_(self, host):
         host_s = str(host) if host else getattr(self._cfg, "router_host", None) or "router"
         try:
-            from asusroutercontrol.profile import load_profiles
+            from asusroutercontrol.profile import apply_profile, load_profiles
             profile = load_profiles(self._cfg.data_dir, runtime_env=self._cfg.runtime_env).active
         except Exception:
             profile = None
+            apply_profile = None  # type: ignore[assignment]
+        self._cancel_health_retry_timer()
         self._degraded = False
         self._health_fail_count = 0
         self._health_retry_seconds = 60.0
         self._health_retries_paused = False
         self._connection_last_error = None
+        self._connect_in_flight = False
+        # Reload cfg from profile (HTTPS :8443 etc.) — do not keep stale .env :80.
+        try:
+            cfg = load_config(runtime_env=_runtime_environment())
+            if profile is not None and apply_profile is not None:
+                cfg = apply_profile(cfg, profile)
+            self._cfg = cfg
+        except Exception:
+            log.debug("Post-connect cfg reload failed", exc_info=True)
         self._set_connection_state(
             connected_state(
                 host_s,
@@ -1835,8 +1956,13 @@ class AppDelegate(NSObject):
         except Exception:
             log.debug("Post-connect model menu update failed", exc_info=True)
         self._refresh_capability_status()
-        # Leave degraded mode and ensure the scheduler is running after Connect.
-        self.startAfterHealthCheck_(None)
+        # Restart scheduler/runtime with profile-applied cfg (not degraded old cfg).
+        self._restart_runtime_with_profile(profile)
+        self._set_status_icon("Running")
+        try:
+            self._mi_sched_status.setTitle_("Scheduler: ● Running")
+        except Exception:
+            pass
         # Force a data refresh so health + model update immediately.
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "refreshData:", None, False
@@ -1846,6 +1972,15 @@ class AppDelegate(NSObject):
     def finishConnectFailure_(self, detail):
         host = getattr(self._cfg, "router_host", None) or "router"
         detail_s = str(detail) if detail else "connect failed"
+        self._cancel_health_retry_timer()
+        self._connect_in_flight = False
+        # Keep health retries paused after auth failures; resume poll LOGIN.
+        sched = getattr(self, "_sched", None)
+        if sched is not None and hasattr(sched, "pause_login_attempts"):
+            try:
+                sched.pause_login_attempts(False)
+            except Exception:
+                log.debug("scheduler LOGIN unpause failed", exc_info=True)
         self._set_connection_state(
             unable_state(host, detail_s),
             notify=True,

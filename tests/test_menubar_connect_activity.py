@@ -49,3 +49,24 @@ def test_menubar_coerces_bitwarden_store_when_vault_locked() -> None:
     src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
     assert 'bw_state != "unlocked" and credential_backend == "bitwarden"' in src
     assert 'credential_backend = "keychain"' in src
+
+
+def test_menubar_cancels_health_timer_on_connect() -> None:
+    src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
+    assert "def _cancel_health_retry_timer" in src
+    assert "def _set_connect_in_flight" in src
+    assert "self._set_connect_in_flight(True)" in src
+    assert "_restart_runtime_with_profile" in src
+    assert "_http_transport_attempts" in src
+    assert "pause_login_attempts" in src
+    begin = src.index("def _begin_connect_activity")
+    begin_chunk = src[begin : begin + 500]
+    assert "_set_connect_in_flight(True)" in begin_chunk
+    success = src.index("def finishConnectSuccess_")
+    success_chunk = src[success : success + 1800]
+    assert "_restart_runtime_with_profile" in success_chunk
+    assert "_cancel_health_retry_timer" in success_chunk
+    failure = src.index("def finishConnectFailure_")
+    failure_chunk = src[failure : failure + 900]
+    assert "_cancel_health_retry_timer" in failure_chunk
+    assert "_connect_in_flight = False" in failure_chunk
