@@ -210,6 +210,56 @@ def _bw_binaries() -> list[str]:
     return ordered
 
 
+def _bw_session_file_candidates() -> list[Path]:
+    return [
+        Path.home() / ".asusroutercontrol.dev" / "bw_session",
+        Path.home() / ".asusroutercontrol" / "bw_session",
+        Path.home() / ".config" / "asusroutercontrol" / "bw_session",
+        Path.cwd() / ".bw_session",
+    ]
+
+
+def _bw_session_env_file_candidates() -> list[Path]:
+    """`.env` paths that may hold BW_SESSION for GUI / LaunchServices launches."""
+    runtime = (
+        os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod").strip().lower() or "prod"
+    )
+    paths: list[Path] = []
+    env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
+    if env_override:
+        paths.append(Path(env_override).expanduser())
+    if runtime != "prod":
+        paths.append(Path.home() / f".asusroutercontrol.{runtime}" / ".env")
+    paths.extend(
+        [
+            Path.home() / ".asusroutercontrol.dev" / ".env",
+            Path.home() / ".asusroutercontrol" / ".env",
+            Path.home() / ".config" / "asusroutercontrol" / ".env",
+        ]
+    )
+    return paths
+
+
+def _read_bw_session_from_env_file(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, raw = stripped.partition("=")
+            key = key.strip()
+            if key not in {_BW_SESSION_ENV, "BITWARDEN_SESSION"}:
+                continue
+            value = raw.strip().strip("'").strip('"')
+            if value:
+                return value
+    except OSError:
+        return None
+    return None
+
+
 def _ensure_bw_session_env() -> None:
     """Load BW_SESSION for GUI launches that don't inherit a Terminal unlock."""
     if os.environ.get(_BW_SESSION_ENV, "").strip():
@@ -220,12 +270,7 @@ def _ensure_bw_session_env() -> None:
         if value:
             os.environ[_BW_SESSION_ENV] = value
             return
-    session_files = [
-        Path.home() / ".config" / "asusroutercontrol" / "bw_session",
-        Path.home() / ".asusroutercontrol" / "bw_session",
-        Path.cwd() / ".bw_session",
-    ]
-    for path in session_files:
+    for path in _bw_session_file_candidates():
         try:
             if path.is_file():
                 value = path.read_text(encoding="utf-8").strip()
@@ -235,6 +280,13 @@ def _ensure_bw_session_env() -> None:
                     return
         except OSError:
             continue
+    # Last resort: read synced runtime .env (Finder/.app often has empty env).
+    for env_path in _bw_session_env_file_candidates():
+        value = _read_bw_session_from_env_file(env_path.expanduser())
+        if value:
+            os.environ[_BW_SESSION_ENV] = value
+            log.debug("Loaded BW_SESSION from %s", env_path)
+            return
 
 
 # Keychain-only secret used to unlock Bitwarden without an interactive prompt.
@@ -403,11 +455,30 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
 
 
 def _persist_bw_session(session: str) -> None:
-    """Write BW_SESSION into process env and the DEV runtime .env when possible."""
+    """Write BW_SESSION into process env, session files, and runtime .env files."""
     token = (session or "").strip()
     if not token:
         return
     os.environ[_BW_SESSION_ENV] = token
+    # Persist under home dirs only — never pollute the process cwd.
+    for session_path in _bw_session_file_candidates():
+        try:
+            if session_path.resolve() == (Path.cwd() / ".bw_session").resolve():
+                continue
+        except OSError:
+            if session_path.name == ".bw_session" and session_path.parent == Path.cwd():
+                continue
+        try:
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(token + "\n", encoding="utf-8")
+            try:
+                session_path.chmod(0o600)
+            except OSError:
+                pass
+        except OSError:
+            log.debug(
+                "Could not persist BW_SESSION file %s", session_path, exc_info=True
+            )
     targets = [
         Path.home() / ".asusroutercontrol.dev" / ".env",
         Path.home() / ".asusroutercontrol" / ".env",
@@ -467,7 +538,16 @@ def ensure_bitwarden_unlocked() -> str:
 
     Never prompts on stdin. Returns the post-attempt vault status string from
     login_check(). Records a human-readable failure via get_last_bitwarden_unlock_error().
+
+    Always reloads synced runtime ``.env`` / session files first so DEV.app Connect
+    picks up a Terminal ``bw_sync`` session even when LaunchServices has no env.
     """
+    # load_runtime_env_files is defined later; resolve at call time.
+    try:
+        load_runtime_env_files()
+    except Exception:  # noqa: BLE001 — unlock must stay non-fatal
+        _ensure_bw_session_env()
+
     backend = _BACKENDS.get("bitwarden")
     if backend is None or not isinstance(backend, _BitwardenBackend):
         _set_bw_unlock_error("Bitwarden backend unavailable")
@@ -488,8 +568,10 @@ def ensure_bitwarden_unlocked() -> str:
     master = get_bitwarden_master_password()
     if not master:
         msg = (
-            "Bitwarden vault locked and no master password in Keychain. "
-            "Run: asusrouter credentials bw-master --set"
+            "Bitwarden vault locked and no master password in Keychain "
+            "(or Keychain denied this app). "
+            "In Terminal: asusrouter credentials bw-master --set && "
+            "bash scripts/bw_sync_router_env.sh"
         )
         _set_bw_unlock_error(msg)
         log.info(msg)
@@ -1575,6 +1657,46 @@ def bitwarden_vault_status() -> str:
     return backend.login_check()
 
 
+def format_connect_failure_detail(exc: BaseException) -> str:
+    """Augment Connect exceptions with Bitwarden vault / unlock context for the UI."""
+    detail = str(exc).strip() or exc.__class__.__name__
+    extras: list[str] = []
+    try:
+        vault = bitwarden_vault_status()
+    except Exception:  # noqa: BLE001
+        vault = "unknown"
+    if vault != "unlocked":
+        extras.append(f"Bitwarden vault: {vault}")
+    unlock_err = get_last_bitwarden_unlock_error()
+    if unlock_err:
+        extras.append(f"Unlock: {unlock_err}")
+    if extras:
+        detail = f"{detail}\n" + " | ".join(extras)
+    return detail
+
+
+def mirror_router_login_to_keychain(
+    username: str,
+    password: str,
+    *,
+    ssh_port: int | None = None,
+    env: str | None = None,
+) -> str:
+    """Copy BW-sourced login into Keychain for GUI Connect when vault unlock fails.
+
+    Used by ``bw_sync_router_env.sh`` so DEV.app can reuse the synced password
+    without needing an interactive Bitwarden unlock inside the GUI process.
+    """
+    resolved_env = env or _runtime_credential_env()
+    return store_router_credentials(
+        username,
+        password,
+        ssh_port=ssh_port,
+        env=resolved_env,
+        backend="keychain",
+    )
+
+
 def resolve_connect_login_defaults(
     *,
     suggested_host: str,
@@ -1643,8 +1765,9 @@ def resolve_connect_login_defaults(
     elif bw_status == "locked":
         unlock_err = get_last_bitwarden_unlock_error()
         detail = (
-            "Bitwarden vault is locked — store the master password for auto-unlock: "
-            "asusrouter credentials bw-master --set. "
+            "Bitwarden vault is locked — Connect needs an unlocked vault or a "
+            "Keychain password synced via: bash scripts/bw_sync_router_env.sh. "
+            "One-time: asusrouter credentials bw-master --set. "
             "Router Login Name may not be 'admin'."
         )
         if unlock_err:

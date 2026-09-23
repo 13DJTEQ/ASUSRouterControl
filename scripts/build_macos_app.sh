@@ -72,6 +72,7 @@ build_dev_app() {
   local launcher="${macos_dir}/asusroutercontrol-launcher"
   local plist_path="${contents_dir}/Info.plist"
   local dest_app="${TEST_BUILDS_DIR}/${app_name}"
+  local home_dir="${HOME}"
 
   rm -rf "${app_dir}"
   mkdir -p "${macos_dir}" "${resources_dir}"
@@ -114,6 +115,9 @@ VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 DEV_RUNTIME_EXE="${dev_runtime_exe}"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
+export ASUSROUTERCONTROL_ENV_FILE="${HOME}/.asusroutercontrol.dev/.env"
+export DATA_DIR="${HOME}/.asusroutercontrol.dev"
+export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin:${PATH:-}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then
@@ -168,6 +172,17 @@ EOF
   <string>Icon</string>
   <key>LSUIElement</key>
   <true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>ASUSROUTERCONTROL_RUNTIME_ENV</key>
+    <string>dev</string>
+    <key>ASUSROUTERCONTROL_ENV_FILE</key>
+    <string>${home_dir}/.asusroutercontrol.dev/.env</string>
+    <key>DATA_DIR</key>
+    <string>${home_dir}/.asusroutercontrol.dev</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:${home_dir}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 </dict>
 </plist>
 EOF

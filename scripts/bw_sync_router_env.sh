@@ -242,6 +242,23 @@ print(f"  item: {item_name}")
 print(f"  username: {user}")
 print(f"  ssh_port: {port}")
 print("  password: (kept in Bitwarden only — not written to .env)")
+
+# Mirror login into Keychain so DEV.app Connect works even when the GUI
+# cannot unlock Bitwarden (missing BW_SESSION / Keychain ACL for .app).
+try:
+    import os as _os
+    _os.environ.setdefault("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+    from asusroutercontrol.credentials import mirror_router_login_to_keychain
+
+    backend = mirror_router_login_to_keychain(
+        user,
+        password,
+        ssh_port=int(port),
+        env="dev",
+    )
+    print(f"  keychain mirror: {backend} (env=dev)")
+except Exception as exc:  # noqa: BLE001
+    print(f"  keychain mirror failed: {exc}")
 PY
 
 echo

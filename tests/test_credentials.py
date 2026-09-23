@@ -637,6 +637,67 @@ class TestBitwardenRouterItemLookup:
         assert "locked" in str(defaults.get("store_detail") or "").lower()
 
 
+
+class TestConnectGuiSessionHelpers:
+    def test_ensure_bw_session_reads_dev_env_file(self, monkeypatch, tmp_path: Path):
+        from asusroutercontrol import credentials as creds
+
+        home = tmp_path / "home"
+        env_dir = home / ".asusroutercontrol.dev"
+        env_dir.mkdir(parents=True)
+        (env_dir / ".env").write_text("BW_SESSION=from-dev-env\n", encoding="utf-8")
+        monkeypatch.setattr(creds.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.delenv("BW_SESSION", raising=False)
+        monkeypatch.delenv("BITWARDEN_SESSION", raising=False)
+        creds._ensure_bw_session_env()
+        assert os.environ.get("BW_SESSION") == "from-dev-env"
+
+    def test_persist_bw_session_writes_session_file(self, monkeypatch, tmp_path: Path):
+        from asusroutercontrol import credentials as creds
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(creds.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.delenv("BW_SESSION", raising=False)
+        creds._persist_bw_session("tok-persist-session")
+        session_path = home / ".asusroutercontrol.dev" / "bw_session"
+        assert session_path.read_text(encoding="utf-8").strip() == "tok-persist-session"
+        assert os.environ.get("BW_SESSION") == "tok-persist-session"
+
+    def test_format_connect_failure_includes_vault_status(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
+        monkeypatch.setattr(
+            creds, "get_last_bitwarden_unlock_error", lambda: "no master password"
+        )
+        msg = creds.format_connect_failure_detail(
+            ConnectionError("HTTP admin login failed")
+        )
+        assert "HTTP admin login failed" in msg
+        assert "Bitwarden vault: locked" in msg
+        assert "no master password" in msg
+
+    def test_mirror_router_login_to_keychain(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: None
+        )
+        backend = creds.mirror_router_login_to_keychain(
+            "13Maschine", "pw-secret", ssh_port=1313, env="dev"
+        )
+        assert backend == "keychain"
+        user, pw = creds.get_router_credentials(host_hint="router.asus.com")
+        assert user == "13Maschine"
+        assert pw == "pw-secret"
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+
+
 class TestBitwardenMasterPasswordUnlock:
     def test_store_and_get_bw_master_password(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds

@@ -1469,13 +1469,31 @@ class AppDelegate(NSObject):
             except Exception:
                 log.debug("Connect SSH port re-resolve failed", exc_info=True)
         if not host or not username or not password:
-            _notify(
-                "Connect Failed",
-                "",
+            reason = (
                 "Host, username, and password are required. "
                 "Username is the Router Login Name "
-                "(Administration → System) — often not 'admin'.",
+                "(Administration → System) — often not 'admin'."
             )
+            detail = str(defaults.get("store_detail") or "").strip()
+            bw_status = str(defaults.get("bw_status") or "")
+            if bw_status and bw_status != "unlocked":
+                reason = f"{reason} Bitwarden vault: {bw_status}."
+            if detail:
+                reason = f"{reason} {detail}"
+            if not password:
+                reason += (
+                    " Leave password blank only when Bitwarden/Keychain already "
+                    "has the admin password — run: bash scripts/bw_sync_router_env.sh"
+                )
+            _notify("Connect Failed", "", reason[:300])
+            try:
+                alert = NSAlert.new()
+                alert.setMessageText_("Connect Failed")
+                alert.setInformativeText_(reason[:800])
+                alert.addButtonWithTitle_("OK")
+                alert.runModal()
+            except Exception:
+                log.debug("Failed to show connect missing-creds alert", exc_info=True)
             return
 
         self._begin_connect_activity(host)
@@ -1503,6 +1521,23 @@ class AppDelegate(NSObject):
     ):
         try:
             from asusroutercontrol.connect import setup_router_connection
+            from asusroutercontrol.credentials import (
+                ensure_bitwarden_unlocked,
+                format_connect_failure_detail,
+                load_runtime_env_files,
+            )
+
+            # GUI launches often lack BW_SESSION; refresh .env + unlock before login.
+            load_runtime_env_files()
+            bw_state = ensure_bitwarden_unlocked()
+            log.info(
+                "Connect start host=%s user=%r ssh_port=%s bw=%s backend=%s",
+                host,
+                username,
+                ssh_port,
+                bw_state,
+                credential_backend,
+            )
 
             result = asyncio.run(
                 setup_router_connection(
@@ -1532,9 +1567,14 @@ class AppDelegate(NSObject):
             )
         except Exception as exc:
             log.exception("Connect router failed")
-            detail = str(exc).strip() or exc.__class__.__name__
-            if len(detail) > 400:
-                detail = detail[:397] + "..."
+            try:
+                from asusroutercontrol.credentials import format_connect_failure_detail
+
+                detail = format_connect_failure_detail(exc)
+            except Exception:
+                detail = str(exc).strip() or exc.__class__.__name__
+            if len(detail) > 600:
+                detail = detail[:597] + "..."
             self._connection_last_error = detail
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "finishConnectFailure:", detail, False
@@ -1768,9 +1808,13 @@ def main() -> None:
         sys.exit(78)  # EX_CONFIG
     runtime_env = _runtime_environment()
     try:
-        from asusroutercontrol.credentials import load_runtime_env_files
+        from asusroutercontrol.credentials import (
+            ensure_bitwarden_unlocked,
+            load_runtime_env_files,
+        )
 
         load_runtime_env_files()
+        ensure_bitwarden_unlocked()
     except Exception:
         pass
     cfg = load_config(runtime_env=runtime_env)
