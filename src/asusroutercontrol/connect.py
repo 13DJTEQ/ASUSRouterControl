@@ -393,11 +393,12 @@ async def setup_router_connection(
         )
         effective = apply_profile(base, profile)
         log.info(
-            "HTTP login attempt %s:%s ssl=%s user=%r",
+            "HTTP login attempt %s:%s ssl=%s user=%r password=%s",
             attempt_host,
             attempt_port,
             attempt_ssl,
             username,
+            "present" if password else "missing",
         )
         probe = await probe_connection(
             effective,

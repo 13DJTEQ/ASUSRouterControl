@@ -13,7 +13,7 @@ for log in "${candidates[@]}"; do
   if [[ -f "$log" ]]; then
     found=1
     echo "======== $log (last 80 matching lines) ========"
-    grep -E "Connect defaults|HTTP login attempt|HTTP probe failed|HTTP admin preflight|Stopping transport|Connect router failed|Bitwarden|rejected login|captcha|Cannot access|Unable to Connect" "$log" \
+    grep -E "Connect defaults|Connect start|Connect success|Connect failure detail|Connect blocked|Router credentials resolved|HTTP login attempt|HTTP probe failed|HTTP admin preflight|Stopping transport|Connect router failed|Bitwarden|Keychain credential|rejected login|captcha|Cannot access|Unable to Connect|Mirrored router login" "$log" \
       | tail -n 80 || true
     echo
     echo "-------- raw tail (40 lines) --------"

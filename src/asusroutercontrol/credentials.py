@@ -345,6 +345,8 @@ _last_bw_unlock_error: str | None = None
 _last_bw_mp_matched_path: str | None = None
 # Last lookup attempt labels (no secrets) for diagnostics.
 _last_bw_mp_lookups_tried: list[str] = []
+# Dedupe repeated "vault locked / no MP" INFO lines during one Connect dialog.
+_bw_unlock_miss_logged: bool = False
 
 
 def _set_bw_unlock_error(message: str | None) -> None:
@@ -884,9 +886,12 @@ def ensure_bitwarden_unlocked() -> str:
     if backend is None or not isinstance(backend, _BitwardenBackend):
         _set_bw_unlock_error("Bitwarden backend unavailable")
         return "unknown"
+    global _bw_unlock_miss_logged  # noqa: PLW0603
+
     state = backend.login_check()
     if state == "unlocked":
         _set_bw_unlock_error(None)
+        _bw_unlock_miss_logged = False
         return state
     if state != "locked":
         if state == "cli_not_found":
@@ -906,7 +911,12 @@ def ensure_bitwarden_unlocked() -> str:
             "bash scripts/bw_sync_router_env.sh"
         )
         _set_bw_unlock_error(msg)
-        log.info(msg)
+        # Connect / get_credential can call this many times; log once at INFO.
+        if not _bw_unlock_miss_logged:
+            log.info(msg)
+            _bw_unlock_miss_logged = True
+        else:
+            log.debug(msg)
         return state
 
     result = _bw_run(
@@ -931,6 +941,7 @@ def ensure_bitwarden_unlocked() -> str:
     state = backend.login_check()
     if state == "unlocked":
         _set_bw_unlock_error(None)
+        _bw_unlock_miss_logged = False
         log.info("Bitwarden vault unlocked via Keychain master password")
     else:
         _set_bw_unlock_error(
@@ -1160,39 +1171,100 @@ class _KeychainBackend(_CredentialBackend):
         return "keychain"
 
     def get(self, key: str, *, env: str = DEFAULT_ENV) -> str | None:
-        if not _ensure_secure_keyring_backend():
-            return None
+        """Read via keyring, then ``security find-generic-password``.
+
+        DEV.app often cannot read Python-keyring ACL items that Terminal wrote;
+        the security(1) path reaches the same login keychain Terminal uses.
+        """
+        _ensure_login_keychain_env()
         svc = _service_name(key, env)
         acct = _account_name(key, env)
-        try:
-            return keyring.get_password(svc, acct)
-        except Exception as exc:
-            log.error("Failed to read keychain entry %s/%s: %s", svc, acct, exc)
-            return None
+        if _ensure_secure_keyring_backend():
+            try:
+                found = keyring.get_password(svc, acct)
+            except Exception as exc:
+                log.error("Failed to read keychain entry %s/%s: %s", svc, acct, exc)
+                found = None
+            if isinstance(found, str) and found.strip():
+                return found.strip()
+        secret = _security_get_generic_password(svc, acct)
+        if secret:
+            log.info(
+                "Keychain credential %s resolved via security CLI at %s/%s (env=%s)",
+                key,
+                svc,
+                acct,
+                env,
+            )
+            return secret
+        return None
 
     def store(self, key: str, value: str, *, env: str = DEFAULT_ENV) -> bool:
-        if not _ensure_secure_keyring_backend():
-            return False
+        """Write via keyring and ``security -A`` so Terminal + DEV.app share ACL."""
+        _ensure_login_keychain_env()
         svc = _service_name(key, env)
         acct = _account_name(key, env)
-        try:
-            keyring.set_password(svc, acct, value)
+        wrote_keyring = False
+        if _ensure_secure_keyring_backend():
+            try:
+                keyring.set_password(svc, acct, value)
+                wrote_keyring = True
+            except Exception as exc:
+                log.error("Failed to write keychain entry %s/%s: %s", svc, acct, exc)
+        wrote_security = _security_set_generic_password(svc, acct, value)
+        if wrote_security:
+            log.info(
+                "Persisted Keychain credential %s via security -A at %s/%s (env=%s)",
+                key,
+                svc,
+                acct,
+                env,
+            )
+        if wrote_keyring or wrote_security:
             return True
-        except Exception as exc:
-            log.error("Failed to write keychain entry %s/%s: %s", svc, acct, exc)
-            return False
+        log.error("Failed to store Keychain credential %s (env=%s)", key, env)
+        return False
 
     def delete(self, key: str, *, env: str = DEFAULT_ENV) -> bool:
-        if not _ensure_secure_keyring_backend():
-            return False
+        _ensure_login_keychain_env()
         svc = _service_name(key, env)
         acct = _account_name(key, env)
-        try:
-            keyring.delete_password(svc, acct)
-            return True
-        except Exception as exc:
-            log.error("Failed to delete keychain entry %s/%s: %s", svc, acct, exc)
-            return False
+        removed = False
+        if _ensure_secure_keyring_backend():
+            try:
+                keyring.delete_password(svc, acct)
+                removed = True
+            except Exception as exc:
+                log.error("Failed to delete keychain entry %s/%s: %s", svc, acct, exc)
+        security = _security_bin()
+        if security and Path("/usr/bin/security").is_file():
+            for keychain in [p for p in _login_keychain_paths() if Path(p).is_file()] + [
+                None
+            ]:
+                cmd = [
+                    security,
+                    "delete-generic-password",
+                    "-s",
+                    svc,
+                    "-a",
+                    acct,
+                ]
+                if keychain:
+                    cmd.append(keychain)
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                    continue
+                if result.returncode == 0:
+                    removed = True
+        return removed
 
 
 # ---------------------------------------------------------------------------
@@ -1446,16 +1518,24 @@ def get_credential(key: str, *, env: str = DEFAULT_ENV) -> str | None:
                 )
                 return val
 
-    # Legacy keychain fallback (read-only)
+    # Legacy keychain fallback (read-only) — keyring then security CLI.
     legacy_key = key.replace("_", ".")
+    legacy_svc = f"{_LEGACY_SERVICE}.{legacy_key}"
     if _ensure_secure_keyring_backend():
         try:
-            val = keyring.get_password(f"{_LEGACY_SERVICE}.{legacy_key}", "default")
+            val = keyring.get_password(legacy_svc, "default")
             if val:
                 log.debug("Credential '%s' resolved from legacy keychain entry", key)
                 return val
         except Exception:
             pass
+    legacy_via_security = _security_get_generic_password(legacy_svc, "default")
+    if legacy_via_security:
+        log.info(
+            "Credential '%s' resolved from legacy Keychain via security CLI",
+            key,
+        )
+        return legacy_via_security
 
     # Environment variable fallback (non-secret)
     return os.environ.get(key.upper())
@@ -1924,25 +2004,32 @@ def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None,
     env = _runtime_credential_env()
     username: str | None = None
     password: str | None = None
+    source = "none"
     if host_hint:
         item = lookup_bitwarden_router_item(host_hint=host_hint)
         if item is not None:
             bw_user, bw_pass = _credentials_from_bitwarden_item(item)
             if bw_user and bw_pass:
                 username, password = bw_user, bw_pass
+                source = f"bitwarden-item:{item.get('name') or 'unknown'}"
             else:
                 # Partial BW item — fill gaps from canonical store.
                 username = bw_user or get_credential("router_username", env=env)
                 password = bw_pass or get_credential("router_password", env=env)
+                source = "bitwarden-item+store"
     if username is None and password is None:
         username = get_credential("router_username", env=env)
         password = get_credential("router_password", env=env)
+        if username or password:
+            source = f"credential-store(env={env})"
         if not (username and password):
             item = lookup_bitwarden_router_item(host_hint=host_hint)
             if item is not None:
                 bw_user, bw_pass = _credentials_from_bitwarden_item(item)
                 username = username or bw_user
                 password = password or bw_pass
+                if bw_user or bw_pass:
+                    source = f"bitwarden-item-fallback:{item.get('name') or 'unknown'}"
 
     env_user = _env_router_username()
     if env_user:
@@ -1953,7 +2040,60 @@ def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None,
                 env_user,
             )
         username = env_user
+        if source == "none":
+            source = "env-username"
+        else:
+            source = f"{source}+env-username"
+
+    log.info(
+        "Router credentials resolved: source=%s user=%r password=%s",
+        source,
+        username or None,
+        "present" if password else "missing",
+    )
     return username, password
+
+
+def resolve_blank_connect_password(
+    *,
+    host: str,
+    username: str,
+    password: str,
+) -> tuple[str, str, str]:
+    """Fill blank Connect password/username from BW/Keychain after unlock.
+
+    Returns (username, password, source_label). Never logs secret values.
+    Also replaces a stale ``admin`` username when env/store has the lab login name.
+    """
+    load_runtime_env_files()
+    resolved_user = (username or "").strip()
+    resolved_pass = (password or "").strip()
+    source = "dialog"
+
+    store_user, store_pass = get_router_credentials(host_hint=host or None)
+    env_user = _env_router_username()
+
+    if not resolved_pass and store_pass:
+        resolved_pass = store_pass
+        source = "store"
+        log.info("Connect password filled from credential store (host=%s)", host)
+
+    if env_user and (
+        not resolved_user or resolved_user.lower() in {"admin", "asus", "root"}
+    ):
+        if resolved_user and resolved_user != env_user:
+            log.info(
+                "Connect replacing stale username %r with env %r",
+                resolved_user,
+                env_user,
+            )
+        resolved_user = env_user
+        source = f"{source}+env-username"
+    elif not resolved_user and store_user:
+        resolved_user = store_user
+        source = f"{source}+store-username"
+
+    return resolved_user, resolved_pass, source
 
 
 def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
@@ -2007,10 +2147,25 @@ def bitwarden_vault_status() -> str:
     return backend.login_check()
 
 
-def format_connect_failure_detail(exc: BaseException) -> str:
-    """Augment Connect exceptions with Bitwarden vault / unlock context for the UI."""
+def format_connect_failure_detail(
+    exc: BaseException,
+    *,
+    host: str | None = None,
+    username: str | None = None,
+    ssh_port: int | None = None,
+    password_present: bool | None = None,
+) -> str:
+    """Augment Connect exceptions with Bitwarden / Keychain context for the UI."""
     detail = str(exc).strip() or exc.__class__.__name__
     extras: list[str] = []
+    if host:
+        extras.append(f"host={host}")
+    if username:
+        extras.append(f"user={username!r}")
+    if ssh_port is not None:
+        extras.append(f"ssh_port={ssh_port}")
+    if password_present is not None:
+        extras.append(f"password={'set' if password_present else 'missing'}")
     try:
         vault = bitwarden_vault_status()
     except Exception:  # noqa: BLE001
@@ -2020,9 +2175,22 @@ def format_connect_failure_detail(exc: BaseException) -> str:
     unlock_err = get_last_bitwarden_unlock_error()
     if unlock_err:
         extras.append(f"Unlock: {unlock_err}")
+    mp_match = get_last_bitwarden_master_password_match()
+    if vault == "locked" and not unlock_err:
+        extras.append(
+            "Keychain master password missing — run: "
+            "asusrouter credentials bw-master --set"
+        )
+    elif mp_match and vault == "locked":
+        extras.append(f"MP Keychain path={mp_match}")
     if extras:
         detail = f"{detail}\n" + " | ".join(extras)
     return detail
+
+
+def log_connect_event(message: str, *args: object) -> None:
+    """INFO log for Connect diagnostics (never pass secrets as args)."""
+    log.info(message, *args)
 
 
 def mirror_router_login_to_keychain(
@@ -2036,15 +2204,33 @@ def mirror_router_login_to_keychain(
 
     Used by ``bw_sync_router_env.sh`` so DEV.app can reuse the synced password
     without needing an interactive Bitwarden unlock inside the GUI process.
+
+    Writes the active/runtime env and also ``prod`` so a mismatched
+    ``ASUSROUTERCONTROL_RUNTIME_ENV`` cannot strand the mirrored password.
+    Stores via KeychainBackend (keyring + ``security -A``) for Terminal/DEV.app ACL.
     """
-    resolved_env = env or _runtime_credential_env()
-    return store_router_credentials(
-        username,
-        password,
-        ssh_port=ssh_port,
-        env=resolved_env,
-        backend="keychain",
-    )
+    resolved_env = (env or _runtime_credential_env() or DEFAULT_ENV).strip().lower()
+    targets: list[str] = []
+    for candidate in (resolved_env, "prod", "shared"):
+        if candidate and candidate not in targets:
+            targets.append(candidate)
+    last_backend = "keychain"
+    for target_env in targets:
+        last_backend = store_router_credentials(
+            username,
+            password,
+            ssh_port=ssh_port,
+            env=target_env,
+            backend="keychain",
+        )
+        log.info(
+            "Mirrored router login to Keychain env=%s user=%r ssh_port=%s "
+            "(password present, length omitted)",
+            target_env,
+            username,
+            ssh_port,
+        )
+    return last_backend
 
 
 def resolve_connect_login_defaults(
@@ -2074,9 +2260,9 @@ def resolve_connect_login_defaults(
         backend = preferred_backend
     elif bw_status == "unlocked":
         backend = "bitwarden"
-    elif active in _GUI_CREDENTIAL_BACKENDS:
-        backend = active
     else:
+        # Vault locked / CLI missing / unauthenticated: never default Store-in
+        # to bitwarden — typed + Keychain-mirrored logins must land in Keychain.
         backend = "keychain"
     ssh_port = stored_port if stored_port is not None else int(config_ssh_port or 22)
 
@@ -2112,6 +2298,15 @@ def resolve_connect_login_defaults(
             "Set ASUSROUTERCONTROL_BW_ROUTER_ITEM to the exact item title "
             "(e.g. router.asus.com (13Maschine))."
         )
+    elif bw_status == "locked" and password and resolved_username:
+        unlock_err = get_last_bitwarden_unlock_error()
+        detail = (
+            f"Bitwarden vault locked — using Keychain-mirrored login "
+            f"user={resolved_username!r} ssh_port={ssh_port}. "
+            "Leave password blank to reuse the mirrored admin password."
+        )
+        if unlock_err:
+            detail = f"{detail} ({unlock_err})"
     elif bw_status == "locked":
         unlock_err = get_last_bitwarden_unlock_error()
         detail = (
@@ -2127,6 +2322,11 @@ def resolve_connect_login_defaults(
             "Bitwarden CLI ('bw') not found for this app launch PATH — "
             "SSH port cannot be read from the vault."
         )
+        if password and resolved_username:
+            detail = (
+                f"{detail} Using Keychain-mirrored login "
+                f"user={resolved_username!r} ssh_port={ssh_port}."
+            )
     elif bw_status == "unauthenticated":
         detail = "Bitwarden not logged in. Run: bw login"
     else:
@@ -2140,11 +2340,13 @@ def resolve_connect_login_defaults(
         detail = f"{detail} {extra}" if detail else extra
 
     log.info(
-        "Connect defaults: bw_status=%s item=%r ssh_port=%s user=%r backend=%s",
+        "Connect defaults: bw_status=%s item=%r ssh_port=%s user=%r "
+        "password=%s backend=%s",
         bw_status,
         item_name,
         ssh_port,
         resolved_username or None,
+        "present" if password else "missing",
         backend,
     )
 

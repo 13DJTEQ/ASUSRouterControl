@@ -698,11 +698,19 @@ class TestConnectGuiSessionHelpers:
             creds, "get_last_bitwarden_unlock_error", lambda: "no master password"
         )
         msg = creds.format_connect_failure_detail(
-            ConnectionError("HTTP admin login failed")
+            ConnectionError("HTTP admin login failed"),
+            host="router.asus.com",
+            username="13Maschine",
+            ssh_port=1313,
+            password_present=True,
         )
         assert "HTTP admin login failed" in msg
         assert "Bitwarden vault: locked" in msg
         assert "no master password" in msg
+        assert "host=router.asus.com" in msg
+        assert "user='13Maschine'" in msg
+        assert "ssh_port=1313" in msg
+        assert "password=set" in msg
 
     def test_mirror_router_login_to_keychain(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds
@@ -721,6 +729,105 @@ class TestConnectGuiSessionHelpers:
         assert user == "13Maschine"
         assert pw == "pw-secret"
         assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+        # Also mirrored into prod so a mismatched runtime env still finds it.
+        assert creds.get_credential("router_password", env="prod") == "pw-secret"
+        assert creds.get_credential("router_username", env="prod") == "13Maschine"
+
+    def test_keychain_get_falls_back_to_security_cli(self, monkeypatch, mem_keyring):
+        """DEV.app ACL misses must still resolve via security find-generic-password."""
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        svc = creds._service_name("router_password", "dev")
+        acct = creds._account_name("router_password", "dev")
+
+        def fake_security(service: str, account: str | None) -> str | None:
+            if service == svc and account == acct:
+                return "mirrored-pw"
+            return None
+
+        monkeypatch.setattr(creds, "_security_get_generic_password", fake_security)
+        # keyring has nothing — simulates ACL deny / wrong identity.
+        assert creds._BACKENDS["keychain"].get("router_password", env="dev") == "mirrored-pw"
+
+    def test_keychain_store_also_calls_security_allow_all(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        calls: list[tuple[str, str]] = []
+
+        def fake_security_set(service: str, account: str, password: str) -> bool:
+            calls.append((service, account))
+            assert password == "secret-pw"
+            return True
+
+        monkeypatch.setattr(creds, "_security_set_generic_password", fake_security_set)
+        assert creds._BACKENDS["keychain"].store(
+            "router_password", "secret-pw", env="dev"
+        )
+        assert calls == [
+            (
+                creds._service_name("router_password", "dev"),
+                creds._account_name("router_password", "dev"),
+            )
+        ]
+        assert (
+            creds._BACKENDS["keychain"].get("router_password", env="dev") == "secret-pw"
+        )
+
+    def test_resolve_blank_connect_password_fills_store_and_env(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: None
+        )
+        creds.store_router_credentials(
+            "admin", "from-keychain", ssh_port=1313, backend="keychain", env="dev"
+        )
+        user, pw, source = creds.resolve_blank_connect_password(
+            host="router.asus.com",
+            username="admin",
+            password="",
+        )
+        assert user == "13Maschine"
+        assert pw == "from-keychain"
+        assert "store" in source
+        assert "env-username" in source
+
+    def test_locked_vault_uses_keychain_password_for_defaults(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_SSH_PORT", "1313")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: None
+        )
+        # Store via keychain backend explicitly (active is bitwarden).
+        assert creds.store_credential(
+            "router_password", "kc-pw", env="dev", backend="keychain"
+        )
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            config_ssh_port=22,
+        )
+        assert defaults["username"] == "13Maschine"
+        assert defaults["password"] == "kc-pw"
+        assert defaults["ssh_port"] == 1313
+        assert defaults["credential_backend"] == "keychain"
+        assert defaults["password_from_store"] is True
+        assert "Keychain-mirrored" in str(defaults.get("store_detail") or "")
 
 
 class TestBitwardenMasterPasswordUnlock:

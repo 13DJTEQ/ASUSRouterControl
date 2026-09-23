@@ -1529,6 +1529,9 @@ class AppDelegate(NSObject):
         credential_backend = backend_popup.titleOfSelectedItem() or "keychain"
         if credential_backend not in ("keychain", "bitwarden"):
             credential_backend = "keychain"
+        # Vault locked → never attempt Bitwarden store from the GUI.
+        if str(defaults.get("bw_status") or "") != "unlocked":
+            credential_backend = "keychain"
         try:
             ssh_port = int(ssh_field.stringValue().strip() or "22")
         except ValueError:
@@ -1549,11 +1552,30 @@ class AppDelegate(NSObject):
                     ssh_port = bw_port
             except Exception:
                 log.debug("Connect SSH port re-resolve failed", exc_info=True)
+        # Fill blank password / stale admin from Keychain/BW before validating.
+        try:
+            from asusroutercontrol.credentials import resolve_blank_connect_password
+
+            username, password, fill_source = resolve_blank_connect_password(
+                host=host or suggested,
+                username=username,
+                password=password,
+            )
+            if fill_source != "dialog":
+                log.info(
+                    "Connect dialog creds filled from %s user=%r password=%s",
+                    fill_source,
+                    username or None,
+                    "present" if password else "missing",
+                )
+        except Exception:
+            log.debug("Connect blank-password resolve failed", exc_info=True)
         if not host or not username or not password:
             reason = (
                 "Host, username, and password are required. "
                 "Username is the Router Login Name "
-                "(Administration → System) — often not 'admin'."
+                "(Administration → System) — often not 'admin' "
+                "(lab: 13Maschine)."
             )
             detail = str(defaults.get("store_detail") or "").strip()
             bw_status = str(defaults.get("bw_status") or "")
@@ -1566,6 +1588,15 @@ class AppDelegate(NSObject):
                     " Leave password blank only when Bitwarden/Keychain already "
                     "has the admin password — run: bash scripts/bw_sync_router_env.sh"
                 )
+            log.warning(
+                "Connect blocked missing fields: host=%s user=%r password=%s "
+                "ssh_port=%s bw=%s",
+                bool(host),
+                username or None,
+                "present" if password else "missing",
+                ssh_port,
+                bw_status or "unknown",
+            )
             _notify("Connect Failed", "", reason[:300])
             try:
                 alert = NSAlert.new()
@@ -1609,21 +1640,53 @@ class AppDelegate(NSObject):
             from asusroutercontrol.connect import setup_router_connection
             from asusroutercontrol.credentials import (
                 ensure_bitwarden_unlocked,
-                format_connect_failure_detail,
+                get_router_ssh_port,
                 load_runtime_env_files,
+                resolve_blank_connect_password,
             )
 
             # GUI launches often lack BW_SESSION; refresh .env + unlock before login.
             load_runtime_env_files()
             bw_state = ensure_bitwarden_unlocked()
+            username, password, fill_source = resolve_blank_connect_password(
+                host=host,
+                username=username,
+                password=password,
+            )
+            if bw_state != "unlocked" and credential_backend == "bitwarden":
+                log.info(
+                    "Connect: vault %s — coercing credential store from bitwarden to keychain",
+                    bw_state,
+                )
+                credential_backend = "keychain"
+            if ssh_port == 22:
+                try:
+                    resolved_port = get_router_ssh_port(host_hint=host)
+                    if resolved_port is not None and resolved_port != 22:
+                        log.info(
+                            "Connect: post-unlock SSH port 22 → %s",
+                            resolved_port,
+                        )
+                        ssh_port = resolved_port
+                except Exception:
+                    log.debug("Connect post-unlock SSH port resolve failed", exc_info=True)
             log.info(
-                "Connect start host=%s user=%r ssh_port=%s bw=%s backend=%s",
+                "Connect start host=%s user=%r ssh_port=%s bw=%s backend=%s "
+                "password=%s fill=%s",
                 host,
                 username,
                 ssh_port,
                 bw_state,
                 credential_backend,
+                "present" if password else "missing",
+                fill_source,
             )
+            if not username or not password:
+                raise ConnectionError(
+                    "Missing router username/password after credential resolve. "
+                    "Run: bash scripts/bw_sync_router_env.sh && "
+                    "asusrouter credentials bw-master --set"
+                )
 
             result = asyncio.run(
                 setup_router_connection(
@@ -1662,6 +1725,13 @@ class AppDelegate(NSObject):
                 self._remember_router_model(live)
             except Exception:
                 log.debug("Post-connect model probe failed", exc_info=True)
+            log.info(
+                "Connect success host=%s profile_host=%s ssh_ok=%s backend=%s",
+                host,
+                result.profile.host,
+                result.probe.ssh_ok,
+                result.credentials_backend,
+            )
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "finishConnectSuccess:", result.profile.host, False
             )
@@ -1670,11 +1740,18 @@ class AppDelegate(NSObject):
             try:
                 from asusroutercontrol.credentials import format_connect_failure_detail
 
-                detail = format_connect_failure_detail(exc)
+                detail = format_connect_failure_detail(
+                    exc,
+                    host=host,
+                    username=username,
+                    ssh_port=ssh_port,
+                    password_present=bool(password),
+                )
             except Exception:
                 detail = str(exc).strip() or exc.__class__.__name__
-            if len(detail) > 600:
-                detail = detail[:597] + "..."
+            log.error("Connect failure detail: %s", detail.replace("\n", " | "))
+            if len(detail) > 900:
+                detail = detail[:897] + "..."
             self._connection_last_error = detail
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "finishConnectFailure:", detail, False
@@ -1783,7 +1860,8 @@ class AppDelegate(NSObject):
         try:
             alert = NSAlert.new()
             alert.setMessageText_("Unable to Connect")
-            alert.setInformativeText_(detail_s)
+            # Keep actionable detail (captcha / vault / wrong user) visible.
+            alert.setInformativeText_(detail_s[:1200])
             alert.addButtonWithTitle_("OK")
             alert.runModal()
         except Exception:

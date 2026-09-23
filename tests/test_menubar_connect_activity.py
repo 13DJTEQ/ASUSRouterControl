@@ -36,3 +36,10 @@ def test_apply_data_preserves_connecting_icon() -> None:
     src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
     assert "not busy and not connecting" in src
     assert 'phase == "connecting"' in src
+
+
+def test_menubar_connect_resolves_blank_password() -> None:
+    src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
+    assert "resolve_blank_connect_password" in src
+    assert "Connect failure detail:" in src
+    assert "fill_source" in src
