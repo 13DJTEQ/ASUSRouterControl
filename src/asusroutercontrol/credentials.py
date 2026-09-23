@@ -14,6 +14,7 @@ by default, never used in Connect resolution, and is ignored if requested via en
 from __future__ import annotations
 
 import abc
+import hashlib
 import logging
 import os
 import re
@@ -356,14 +357,23 @@ _last_bw_mp_lookups_tried: list[str] = []
 # Dedupe repeated "vault locked / no MP" INFO lines during one Connect dialog.
 _bw_unlock_miss_logged: bool = False
 
-# Wrong / corrupt Keychain master password: cooldown to stop unlock spam.
+# Wrong / corrupt Keychain master password: quarantine bad keys, try others,
+# then cooldown so Connect/status do not spam bw unlock with exhausted candidates.
 _BW_WRONG_MP_COOLDOWN_SECONDS = 15 * 60
 _BW_WRONG_MP_OPERATOR_HINT = (
     "Keychain master password rejected by Bitwarden (wrong or corrupt). "
+    "Tried available Keychain candidates automatically; vault remains locked. "
     "Run: asusrouter credentials bw-master --force --set"
 )
+_BW_NO_MP_OPERATOR_HINT = (
+    "Bitwarden vault locked and no master password in Keychain "
+    "(or Keychain denied this app). "
+    "One-time setup: asusrouter credentials bw-master --set && "
+    "bash scripts/bw_sync_router_env.sh"
+)
 _bw_wrong_mp_cooldown_until: float = 0.0
-_bw_wrong_mp_quarantined_path: str | None = None
+_bw_wrong_mp_quarantined_paths: set[str] = set()
+_bw_wrong_mp_quarantined_digests: set[str] = set()
 _bw_wrong_mp_fail_logged: bool = False
 
 
@@ -383,29 +393,45 @@ def get_last_bitwarden_master_password_match() -> str | None:
 
 
 def get_bitwarden_master_password_quarantine() -> str | None:
-    """Return the Keychain path marked bad after a wrong-MP unlock failure, if any.
+    """Return the most recently quarantined Keychain path, if any.
 
-    Quarantine is advisory only — the item is not deleted until the operator
-    runs ``bw-master --delete`` or replaces it with ``--force --set``.
+    Quarantine is advisory only — the item is not deleted. Auto-unlock skips
+    quarantined paths/secrets and tries other Keychain candidates. Operator
+    repair via ``bw-master --force --set`` is only needed when no usable
+    Keychain candidate remains.
     """
-    return _bw_wrong_mp_quarantined_path
+    if not _bw_wrong_mp_quarantined_paths:
+        return None
+    # Prefer the last-matched path when it is quarantined; else arbitrary stable.
+    if _last_bw_mp_matched_path in _bw_wrong_mp_quarantined_paths:
+        return _last_bw_mp_matched_path
+    return sorted(_bw_wrong_mp_quarantined_paths)[-1]
+
+
+def get_bitwarden_master_password_quarantines() -> list[str]:
+    """Return all Keychain paths quarantined after wrong-MP unlock failures."""
+    return sorted(_bw_wrong_mp_quarantined_paths)
 
 
 def wrong_mp_cooldown_active() -> bool:
-    """True while unlock retries with the same Keychain MP are suppressed."""
+    """True while unlock retries are suppressed after all candidates failed."""
     return time.monotonic() < _bw_wrong_mp_cooldown_until
 
 
+def _mp_digest(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
 def _clear_wrong_mp_cooldown() -> None:
-    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_quarantined_path  # noqa: PLW0603
-    global _bw_wrong_mp_fail_logged  # noqa: PLW0603
+    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
     _bw_wrong_mp_cooldown_until = 0.0
-    _bw_wrong_mp_quarantined_path = None
+    _bw_wrong_mp_quarantined_paths.clear()
+    _bw_wrong_mp_quarantined_digests.clear()
     _bw_wrong_mp_fail_logged = False
 
 
 def _is_wrong_or_corrupt_mp_failure(blob: str) -> bool:
-    """Detect BW crypto / wrong-password failures that should enter cooldown."""
+    """Detect BW crypto / wrong-password failures that should quarantine a key."""
     text = (blob or "").lower()
     if not text:
         return False
@@ -422,30 +448,37 @@ def _is_wrong_or_corrupt_mp_failure(blob: str) -> bool:
     return False
 
 
-def _enter_wrong_mp_cooldown(*, matched_path: str | None) -> str:
-    """Quarantine the matched Keychain path and suppress unlock retries."""
-    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_quarantined_path  # noqa: PLW0603
-    global _bw_wrong_mp_fail_logged  # noqa: PLW0603
-    path = (matched_path or _last_bw_mp_matched_path or "").strip() or None
-    _bw_wrong_mp_quarantined_path = path
+def _quarantine_wrong_mp(*, matched_path: str | None, secret: str | None) -> None:
+    """Mark one Keychain candidate bad so later unlocks try other keys."""
+    path = (matched_path or "").strip() or None
+    if path:
+        _bw_wrong_mp_quarantined_paths.add(path)
+    if secret:
+        _bw_wrong_mp_quarantined_digests.add(_mp_digest(secret))
+
+
+def _enter_wrong_mp_cooldown(*, matched_path: str | None = None) -> str:
+    """After all Keychain candidates fail crypto unlock, suppress spam retries."""
+    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
+    path = (matched_path or get_bitwarden_master_password_quarantine() or "").strip() or None
     _bw_wrong_mp_cooldown_until = time.monotonic() + _BW_WRONG_MP_COOLDOWN_SECONDS
     message = _BW_WRONG_MP_OPERATOR_HINT
     if path:
-        message = f"{message} (matched_path={path}; not deleted — use --delete or --force --set)"
+        message = f"{message} (quarantined={path}; item kept — auto-tried other Keychain keys)"
     _set_bw_unlock_error(message)
     if not _bw_wrong_mp_fail_logged:
         log.warning(
             "Bitwarden unlock via Keychain master password failed: %s "
-            "(suppressing retries for %d min)",
+            "(suppressing retries for %d min while no new Keychain candidates appear)",
             message,
             _BW_WRONG_MP_COOLDOWN_SECONDS // 60,
         )
         _bw_wrong_mp_fail_logged = True
     else:
         log.debug(
-            "Bitwarden wrong-MP cooldown active until monotonic=%.0f path=%s",
+            "Bitwarden wrong-MP cooldown active until monotonic=%.0f quarantined=%s",
             _bw_wrong_mp_cooldown_until,
-            path,
+            sorted(_bw_wrong_mp_quarantined_paths),
         )
     return message
 
@@ -655,11 +688,70 @@ def _normalize_bw_master_password(secret: str) -> bool:
     return wrote
 
 
+def _purge_noncanonical_bw_master_password_entries() -> int:
+    """Delete historical/alt Keychain MP locations; keep the canonical pair only.
+
+    After a successful ``--force --set`` (or ``--set``), discovery must not fall
+    back to a stale wrong password that previously failed crypto unlock.
+    """
+    canonical = (_bw_mp_canonical_service(), _bw_mp_canonical_account())
+    keyring_ok = _ensure_secure_keyring_backend()
+    security = _security_bin()
+    security_ok = bool(security and Path("/usr/bin/security").is_file())
+    removed = 0
+    for service, account in _bw_master_password_candidate_pairs():
+        if (service, account) == canonical:
+            continue
+        if keyring_ok:
+            try:
+                keyring.delete_password(service, account)
+                removed += 1
+            except Exception:
+                pass
+        if security_ok:
+            for keychain in [p for p in _login_keychain_paths() if Path(p).is_file()] + [
+                None
+            ]:
+                cmd = [
+                    security,
+                    "delete-generic-password",
+                    "-s",
+                    service,
+                    "-a",
+                    account,
+                ]
+                if keychain:
+                    cmd.append(keychain)
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                    continue
+                if result.returncode == 0:
+                    removed += 1
+    if removed:
+        log.info(
+            "Purged %d non-canonical Bitwarden master password Keychain entr%s "
+            "(canonical retained)",
+            removed,
+            "y" if removed == 1 else "ies",
+        )
+    return removed
+
+
 def store_bitwarden_master_password(password: str) -> bool:
     """Persist the Bitwarden master password in macOS Keychain (Keychain backend only).
 
     Always writes the canonical universal-keychain prod path via ``security -A``
     (required on macOS so DEV.app can unlock). Keyring is optional secondary.
+    Clears wrong-MP quarantine and removes non-canonical alt Keychain entries so
+    discovery cannot fall back to a stale wrong password.
     """
     secret = (password or "").strip()
     if not secret:
@@ -692,6 +784,10 @@ def store_bitwarden_master_password(password: str) -> bool:
             _bw_mp_canonical_account(),
         )
         _clear_wrong_mp_cooldown()
+        try:
+            _purge_noncanonical_bw_master_password_entries()
+        except Exception as exc:  # noqa: BLE001 — store already succeeded
+            log.debug("Non-canonical BW MP purge skipped: %s", exc)
         log.info(
             "Stored Bitwarden master password at canonical %s/%s "
             "(backend=%s security=%s)",
@@ -704,24 +800,45 @@ def store_bitwarden_master_password(password: str) -> bool:
     return False
 
 
-def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
-    """Search Keychain for the BW master password across historical locations.
+def _path_is_quarantined(path: str) -> bool:
+    """True if path (or same svc/acct under another source prefix) is quarantined."""
+    if not path or not _bw_wrong_mp_quarantined_paths:
+        return False
+    if path in _bw_wrong_mp_quarantined_paths:
+        return True
+    p_rest = path.split(":", 1)[-1]
+    for q in _bw_wrong_mp_quarantined_paths:
+        if p_rest and p_rest == q.split(":", 1)[-1]:
+            return True
+    return False
 
-    Returns (secret, matched_path). matched_path is like ``keyring:svc/acct`` or
-    ``security:svc/acct`` (account may be ``*`` when omitted for security).
+
+def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
+    """Scan Keychain for all MP hits (secret, matched_path), first-seen order.
+
+    Does not normalize or mutate Keychain. Dedupes identical secrets.
     """
-    global _last_bw_mp_matched_path, _last_bw_mp_lookups_tried  # noqa: PLW0603
+    global _last_bw_mp_lookups_tried  # noqa: PLW0603
 
     _ensure_login_keychain_env()
     keyring_ok = _ensure_secure_keyring_backend()
 
     tried: list[str] = []
+    hits: list[tuple[str, str]] = []
+    seen_digests: set[str] = set()
     pairs = _bw_master_password_candidate_pairs()
     log.info(
         "Bitwarden master password Keychain lookup starting (%d candidate pairs, keyring=%s)",
         len(pairs),
         "ok" if keyring_ok else "unavailable",
     )
+
+    def _accept(secret: str, path: str) -> None:
+        digest = _mp_digest(secret)
+        if digest in seen_digests:
+            return
+        seen_digests.add(digest)
+        hits.append((secret, path))
 
     for service, account in pairs:
         acct_label = account if account != "" else '""'
@@ -731,31 +848,26 @@ def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
             secret = _keyring_get_password(service, account)
             if secret:
                 path = _format_key_path("keyring", service, account)
-                _last_bw_mp_matched_path = path
-                _last_bw_mp_lookups_tried = tried
                 log.info(
                     "Bitwarden master password Keychain hit via keyring at %s/%s after %d tries",
                     service,
                     acct_label,
                     len(tried),
                 )
-                return secret, path
+                _accept(secret, path)
 
         tried.append(f"security:{label}")
         secret = _security_get_generic_password(service, account)
         if secret:
             path = _format_key_path("security", service, account)
-            _last_bw_mp_matched_path = path
-            _last_bw_mp_lookups_tried = tried
             log.info(
                 "Bitwarden master password Keychain hit via security at %s/%s after %d tries",
                 service,
                 acct_label,
                 len(tried),
             )
-            return secret, path
+            _accept(secret, path)
 
-    # Service-only security probes (any account) for unique services already tried.
     seen_services: set[str] = set()
     for service, _account in pairs:
         if service in seen_services:
@@ -765,61 +877,116 @@ def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
         secret = _security_get_generic_password(service, None)
         if secret:
             path = _format_key_path("security", service, None)
-            _last_bw_mp_matched_path = path
-            _last_bw_mp_lookups_tried = tried
             log.info(
                 "Bitwarden master password Keychain hit via security at %s/* after %d tries",
                 service,
                 len(tried),
             )
-            return secret, path
+            _accept(secret, path)
 
-    _last_bw_mp_matched_path = None
     _last_bw_mp_lookups_tried = tried
-    preview = "; ".join(tried[:24])
-    more = f" (+{len(tried) - 24} more)" if len(tried) > 24 else ""
-    log.info(
-        "Bitwarden master password Keychain lookup miss after %d tries: %s%s",
-        len(tried),
-        preview,
-        more,
+    if not hits:
+        preview = "; ".join(tried[:24])
+        more = f" (+{len(tried) - 24} more)" if len(tried) > 24 else ""
+        log.info(
+            "Bitwarden master password Keychain lookup miss after %d tries: %s%s",
+            len(tried),
+            preview,
+            more,
+        )
+    return hits
+
+
+def _iter_bitwarden_master_password_candidates(
+    *,
+    skip_quarantined: bool = True,
+) -> list[tuple[str, str]]:
+    """Return usable (secret, path) Keychain MP candidates for unlock attempts."""
+    hits = _collect_bitwarden_master_password_hits()
+    if not skip_quarantined:
+        return hits
+    usable: list[tuple[str, str]] = []
+    for secret, path in hits:
+        if _path_is_quarantined(path):
+            log.info("Skipping quarantined Bitwarden master password path %s", path)
+            continue
+        if _mp_digest(secret) in _bw_wrong_mp_quarantined_digests:
+            log.info(
+                "Skipping quarantined Bitwarden master password digest at %s",
+                path,
+            )
+            continue
+        usable.append((secret, path))
+    return usable
+
+
+def _discover_bitwarden_master_password(
+    *,
+    skip_quarantined: bool = True,
+) -> tuple[str | None, str | None]:
+    """Search Keychain for the BW master password across historical locations.
+
+    Returns (secret, matched_path). Skips quarantined paths/secrets by default.
+    """
+    global _last_bw_mp_matched_path  # noqa: PLW0603
+    candidates = _iter_bitwarden_master_password_candidates(
+        skip_quarantined=skip_quarantined
     )
-    return None, None
+    if not candidates:
+        _last_bw_mp_matched_path = None
+        return None, None
+    secret, path = candidates[0]
+    _last_bw_mp_matched_path = path
+    return secret, path
+
+
+def bitwarden_master_password_keychain_present() -> bool:
+    """True if any Keychain candidate has an MP entry, including quarantined paths.
+
+    Used by ``bw-master --set`` so a quarantined wrong value still counts as
+    "already stored" (no interactive prompt without ``--force``).
+    """
+    return bool(_collect_bitwarden_master_password_hits())
 
 
 def get_bitwarden_master_password() -> str | None:
-    """Read the Bitwarden master password from macOS Keychain, if present.
+    """Read a usable Bitwarden master password from macOS Keychain, if present.
 
-    Searches the canonical universal-keychain location first, then alternate
-    key/env names, legacy Keychain pairs, and ``security find-generic-password``
-    on the login keychain. When found under a non-canonical location, normalizes
-    by writing the canonical entry for future reads (CLI and DEV.app).
+    Searches canonical then alternate / legacy locations. Skips quarantined
+    (wrong-MP) candidates. Does **not** normalize to canonical here — that
+    happens only after a successful unlock so a bad fallback cannot overwrite
+    a good canonical entry.
     """
-    secret, matched = _discover_bitwarden_master_password()
+    secret, matched = _discover_bitwarden_master_password(skip_quarantined=True)
     if not secret:
         return None
+    global _last_bw_mp_matched_path  # noqa: PLW0603
+    _last_bw_mp_matched_path = matched
+    return secret
 
+
+def _normalize_after_successful_unlock(secret: str, matched: str | None) -> None:
+    """Write the proven-good MP to the canonical Keychain location."""
+    if not secret:
+        return
     canonical = _format_key_path(
         "keyring",
         _bw_mp_canonical_service(),
         _bw_mp_canonical_account(),
     )
-    # Normalize when the hit was not already the canonical keyring path, or when
-    # security found it (so keyring + allow-all ACL are updated for DEV.app).
     needs_normalize = matched != canonical or (matched or "").startswith("security:")
-    if needs_normalize:
-        if _normalize_bw_master_password(secret):
-            log.info(
-                "Normalized Bitwarden master password Keychain entry "
-                "from %s → canonical %s/%s",
-                matched,
-                _bw_mp_canonical_service(),
-                _bw_mp_canonical_account(),
-            )
-            global _last_bw_mp_matched_path  # noqa: PLW0603
-            # Prefer reporting the original hit so status explains the discovery.
-            _last_bw_mp_matched_path = matched
-    return secret
+    if not needs_normalize:
+        return
+    if _normalize_bw_master_password(secret):
+        log.info(
+            "Normalized Bitwarden master password Keychain entry "
+            "from %s → canonical %s/%s",
+            matched,
+            _bw_mp_canonical_service(),
+            _bw_mp_canonical_account(),
+        )
+        global _last_bw_mp_matched_path  # noqa: PLW0603
+        _last_bw_mp_matched_path = matched or _last_bw_mp_matched_path
 
 
 def delete_bitwarden_master_password() -> bool:
@@ -882,17 +1049,25 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
         else:
             vault = backend.login_check()
 
-    secret = get_bitwarden_master_password()
-    matched = get_last_bitwarden_master_password_match() if secret else None
+    all_hits = _collect_bitwarden_master_password_hits()
+    usable = _iter_bitwarden_master_password_candidates(skip_quarantined=True)
+    secret = usable[0][0] if usable else None
+    matched = usable[0][1] if usable else (all_hits[0][1] if all_hits else None)
+    if matched:
+        global _last_bw_mp_matched_path  # noqa: PLW0603
+        _last_bw_mp_matched_path = matched
     quarantined = get_bitwarden_master_password_quarantine()
     cooldown = wrong_mp_cooldown_active()
     remaining = 0
     if cooldown:
         remaining = max(0, int(_bw_wrong_mp_cooldown_until - time.monotonic()))
     return {
-        "master_password_stored": secret is not None,
+        "master_password_stored": bool(all_hits),
         "master_password_matched_path": matched,
         "master_password_quarantined_path": quarantined,
+        "master_password_quarantined_count": len(_bw_wrong_mp_quarantined_paths),
+        "master_password_candidate_count": len(all_hits),
+        "master_password_usable_count": len(usable),
         "wrong_mp_cooldown_active": cooldown,
         "wrong_mp_cooldown_remaining_seconds": remaining if cooldown else 0,
         "master_password_canonical": (
@@ -904,6 +1079,7 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
         "bw_session_present": bool(os.environ.get(_BW_SESSION_ENV, "").strip()),
         # KEYCHAIN_PATH is intentionally unused (keyring#623); security -A only.
         "keychain_path": None,
+        "master_password_usable": secret is not None,
     }
 
 
@@ -996,9 +1172,9 @@ def ensure_bitwarden_unlocked() -> str:
     Always reloads synced runtime ``.env`` / session files first so DEV.app Connect
     picks up a Terminal ``bw_sync`` session even when LaunchServices has no env.
 
-    After a wrong/corrupt Keychain master password (crypto decryption failure),
-    skips further unlock attempts for ``_BW_WRONG_MP_COOLDOWN_SECONDS`` and
-    deduplicates the warning log. Connect can still proceed via Keychain-mirrored
+    On crypto / wrong-password failure for one Keychain key, quarantines that key
+    and automatically tries other Keychain candidates. Only after all candidates
+    fail does it enter a cooldown. Connect can still proceed via Keychain-mirrored
     router credentials while the vault stays locked.
     """
     # load_runtime_env_files is defined later; resolve at call time.
@@ -1011,7 +1187,7 @@ def ensure_bitwarden_unlocked() -> str:
     if backend is None or not isinstance(backend, _BitwardenBackend):
         _set_bw_unlock_error("Bitwarden backend unavailable")
         return "unknown"
-    global _bw_unlock_miss_logged  # noqa: PLW0603
+    global _bw_unlock_miss_logged, _last_bw_mp_matched_path  # noqa: PLW0603
 
     state = backend.login_check()
     if state == "unlocked":
@@ -1028,25 +1204,22 @@ def ensure_bitwarden_unlocked() -> str:
             _set_bw_unlock_error(f"Bitwarden vault status: {state}")
         return state
 
-    if wrong_mp_cooldown_active():
-        msg = get_last_bitwarden_unlock_error() or _BW_WRONG_MP_OPERATOR_HINT
+    candidates = _iter_bitwarden_master_password_candidates(skip_quarantined=True)
+    if not candidates:
+        if bitwarden_master_password_keychain_present() or _bw_wrong_mp_quarantined_paths:
+            # All Keychain hits are quarantined / exhausted.
+            if wrong_mp_cooldown_active():
+                msg = get_last_bitwarden_unlock_error() or _BW_WRONG_MP_OPERATOR_HINT
+            else:
+                msg = _enter_wrong_mp_cooldown()
+            _set_bw_unlock_error(msg)
+            log.debug(
+                "Skipping Bitwarden unlock (no usable Keychain MP candidates). %s",
+                msg,
+            )
+            return "locked"
+        msg = _BW_NO_MP_OPERATOR_HINT
         _set_bw_unlock_error(msg)
-        log.debug(
-            "Skipping Bitwarden unlock (wrong-MP cooldown; vault locked). %s",
-            msg,
-        )
-        return "locked"
-
-    master = get_bitwarden_master_password()
-    if not master:
-        msg = (
-            "Bitwarden vault locked and no master password in Keychain "
-            "(or Keychain denied this app). "
-            "In Terminal: asusrouter credentials bw-master --set && "
-            "bash scripts/bw_sync_router_env.sh"
-        )
-        _set_bw_unlock_error(msg)
-        # Connect / get_credential can call this many times; log once at INFO.
         if not _bw_unlock_miss_logged:
             log.info(msg)
             _bw_unlock_miss_logged = True
@@ -1054,44 +1227,67 @@ def ensure_bitwarden_unlocked() -> str:
             log.debug(msg)
         return state
 
-    result = _bw_run(
-        ["unlock", "--passwordenv", _BW_PASSWORD_ENV, "--raw"],
-        extra_env={_BW_PASSWORD_ENV: master},
-    )
-    if result is None:
-        _set_bw_unlock_error("Bitwarden CLI ('bw') not found on PATH")
-        return "cli_not_found"
-    if result.returncode != 0:
-        raw_blob = f"{result.stdout or ''}\n{result.stderr or ''}"
-        reason = _classify_bw_unlock_failure(result.stderr or "", result.stdout or "")
-        if _is_wrong_or_corrupt_mp_failure(raw_blob) or _is_wrong_or_corrupt_mp_failure(
-            reason
-        ):
-            _enter_wrong_mp_cooldown(matched_path=_last_bw_mp_matched_path)
-        else:
+    # New usable candidates appear → clear cooldown spam gate and try them.
+    if wrong_mp_cooldown_active():
+        log.debug(
+            "Wrong-MP cooldown active but %d new Keychain candidate(s) available — retrying",
+            len(candidates),
+        )
+
+    last_path: str | None = None
+    for master, path in candidates:
+        last_path = path
+        _last_bw_mp_matched_path = path
+        result = _bw_run(
+            ["unlock", "--passwordenv", _BW_PASSWORD_ENV, "--raw"],
+            extra_env={_BW_PASSWORD_ENV: master},
+        )
+        if result is None:
+            _set_bw_unlock_error("Bitwarden CLI ('bw') not found on PATH")
+            return "cli_not_found"
+        if result.returncode != 0:
+            raw_blob = f"{result.stdout or ''}\n{result.stderr or ''}"
+            reason = _classify_bw_unlock_failure(result.stderr or "", result.stdout or "")
+            if _is_wrong_or_corrupt_mp_failure(raw_blob) or _is_wrong_or_corrupt_mp_failure(
+                reason
+            ):
+                _quarantine_wrong_mp(matched_path=path, secret=master)
+                log.info(
+                    "Keychain MP at %s rejected by Bitwarden; trying other candidates",
+                    path,
+                )
+                continue
             _set_bw_unlock_error(reason)
             log.warning(
                 "Bitwarden unlock via Keychain master password failed: %s", reason
             )
-        return "locked"
-    token = _parse_bw_session_token(result.stdout or "", result.stderr or "")
-    if not token:
-        reason = "bw unlock succeeded but no session token was parsed"
-        _set_bw_unlock_error(reason)
-        log.warning(reason)
-        return "locked"
-    _persist_bw_session(token)
-    state = backend.login_check()
-    if state == "unlocked":
-        _set_bw_unlock_error(None)
-        _bw_unlock_miss_logged = False
-        _clear_wrong_mp_cooldown()
-        log.info("Bitwarden vault unlocked via Keychain master password")
-    else:
+            return "locked"
+        token = _parse_bw_session_token(result.stdout or "", result.stderr or "")
+        if not token:
+            reason = "bw unlock succeeded but no session token was parsed"
+            _set_bw_unlock_error(reason)
+            log.warning(reason)
+            return "locked"
+        _persist_bw_session(token)
+        state = backend.login_check()
+        if state == "unlocked":
+            _set_bw_unlock_error(None)
+            _bw_unlock_miss_logged = False
+            _clear_wrong_mp_cooldown()
+            _normalize_after_successful_unlock(master, path)
+            log.info(
+                "Bitwarden vault unlocked via Keychain master password (%s)",
+                path,
+            )
+            return state
         _set_bw_unlock_error(
             f"bw unlock produced a session but vault still reports: {state}"
         )
-    return state
+        return state
+
+    # Every candidate failed crypto unlock.
+    _enter_wrong_mp_cooldown(matched_path=last_path)
+    return "locked"
 
 
 def _bw_run(

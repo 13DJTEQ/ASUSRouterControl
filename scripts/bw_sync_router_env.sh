@@ -2,17 +2,14 @@
 # Unlock Bitwarden (if needed) and sync the lab router login item into DEV .env
 # so the menubar app can read username / SSH port / BW_SESSION.
 #
-# Prefers Keychain master-password auto-unlock via
-# `asusrouter credentials bw-master --set` / ensure_bitwarden_unlocked().
-#
-# Non-interactive by default. Interactive `bw unlock` only when:
-#   BW_SYNC_ALLOW_PROMPT=1
+# Keychain master-password unlock only via ensure_bitwarden_unlocked().
+# Never prompts for the Bitwarden master password. If Keychain unlock + mirror
+# are impossible, exits with a clear error.
 #
 # Item: router.asus.com (13Maschine)
 #
 # Usage:
 #   bash scripts/bw_sync_router_env.sh
-#   BW_SYNC_ALLOW_PROMPT=1 bash scripts/bw_sync_router_env.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,7 +17,6 @@ cd "$ROOT"
 
 ITEM_NAME="${ASUSROUTERCONTROL_BW_ROUTER_ITEM:-router.asus.com (13Maschine)}"
 ENV_FILE="${ASUSROUTERCONTROL_ENV_FILE:-${HOME}/.asusroutercontrol.dev/.env}"
-ALLOW_PROMPT="${BW_SYNC_ALLOW_PROMPT:-0}"
 
 if ! command -v bw >/dev/null 2>&1; then
   for candidate in /opt/homebrew/bin/bw /usr/local/bin/bw; do
@@ -74,12 +70,13 @@ if str(src) not in sys.path:
     sys.path.insert(0, str(src))
 
 from asusroutercontrol.credentials import (  # noqa: E402
+    bitwarden_master_password_keychain_present,
     ensure_bitwarden_unlocked,
     get_bitwarden_master_password,
     get_last_bitwarden_unlock_error,
 )
 
-if not get_bitwarden_master_password():
+if not get_bitwarden_master_password() and not bitwarden_master_password_keychain_present():
     print(
         "No Bitwarden master password in Keychain.\n"
         "One-time setup: asusrouter credentials bw-master --set",
@@ -97,70 +94,32 @@ print(session)
 PY
 }
 
-_interactive_unlock() {
-  echo "Unlocking Bitwarden vault (enter master password when prompted)..."
-  unlock_out="$(bw unlock --raw 2>/dev/null || true)"
-  session="$(printf '%s\n' "$unlock_out" | tail -n1 | tr -d '\r')"
-  if [[ "$session" == *BW_SESSION=* || "$session" == *" "* || -z "$session" ]]; then
-    session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION="\([^"]*\)".*/\1/p' | tail -n1)"
-    if [[ -z "$session" ]]; then
-      session="$(printf '%s\n' "$unlock_out" | sed -n 's/.*BW_SESSION=\([^ ]*\).*/\1/p' | tail -n1)"
-    fi
-  fi
-  if [[ -z "$session" ]]; then
-    echo "Could not parse BW_SESSION from bw unlock output." >&2
-    echo "Store MP once: asusrouter credentials bw-master --set" >&2
-    return 1
-  fi
-  export BW_SESSION="$session"
-  return 0
-}
-
 if echo "$status" | grep -qi 'locked' || [[ -z "${BW_SESSION:-}" ]]; then
   err_file="$(mktemp "${TMPDIR:-/tmp}/bw_keychain_unlock.XXXXXX")"
-  unlocked=0
   set +e
   session="$(_try_keychain_unlock 2>"$err_file")"
   kc_rc=$?
   set -e
   if [[ "$kc_rc" -eq 0 && -n "$session" ]]; then
     export BW_SESSION="$session"
-    unlocked=1
     echo "Unlocked Bitwarden via Keychain master password."
   else
     if [[ -s "$err_file" ]]; then
       cat "$err_file" >&2 || true
     fi
+    rm -f "$err_file"
     if [[ "$kc_rc" -eq 2 ]]; then
       echo "Non-interactive sync requires a Keychain master password." >&2
       echo "One-time setup: asusrouter credentials bw-master --set" >&2
       echo "Then re-run: bash scripts/bw_sync_router_env.sh" >&2
-      if [[ "$ALLOW_PROMPT" != "1" ]]; then
-        echo "Or set BW_SYNC_ALLOW_PROMPT=1 to allow interactive bw unlock." >&2
-        rm -f "$err_file"
-        exit 2
-      fi
-    else
-      echo "Keychain auto-unlock did not unlock the vault." >&2
-      echo "Check: asusrouter credentials bw-master --status" >&2
-      if [[ "$ALLOW_PROMPT" != "1" ]]; then
-        echo "Fix the Keychain MP, or set BW_SYNC_ALLOW_PROMPT=1 for interactive unlock." >&2
-        rm -f "$err_file"
-        exit 1
-      fi
+      exit 2
     fi
+    echo "Keychain auto-unlock did not unlock the vault." >&2
+    echo "Check: asusrouter credentials bw-master --status" >&2
+    echo "Interactive bw unlock is disabled — MP must come from Keychain." >&2
+    exit 1
   fi
   rm -f "$err_file"
-
-  if [[ "$unlocked" -eq 0 ]]; then
-    if [[ "$ALLOW_PROMPT" != "1" ]]; then
-      echo "Refusing interactive bw unlock (set BW_SYNC_ALLOW_PROMPT=1 to allow)." >&2
-      exit 1
-    fi
-    if ! _interactive_unlock; then
-      exit 1
-    fi
-  fi
 fi
 
 echo "Fetching item: ${ITEM_NAME}"

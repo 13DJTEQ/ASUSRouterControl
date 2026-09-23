@@ -91,6 +91,7 @@ def test_bw_sync_missing_mp_no_interactive(tmp_path, monkeypatch):
     assert "INTERACTIVE_UNLOCK_CALLED" not in combined
     assert "bw-master --set" in combined
     assert "enter master password" not in combined.lower()
+    assert "BW_SYNC_ALLOW_PROMPT" not in combined
 
 
 def test_bw_sync_failed_unlock_surfaces_error(tmp_path):
@@ -121,7 +122,8 @@ def test_bw_sync_failed_unlock_surfaces_error(tmp_path):
     env["HOME"] = str(tmp_path / "home")
     env["ASUSROUTERCONTROL_ENV_FILE"] = str(tmp_path / "home" / ".asusroutercontrol.dev" / ".env")
     env.pop("BW_SESSION", None)
-    env.pop("BW_SYNC_ALLOW_PROMPT", None)
+    # Even if legacy env is set, script must not interactive-unlock.
+    env["BW_SYNC_ALLOW_PROMPT"] = "1"
 
     proc = subprocess.run(
         ["bash", str(scripts / "bw_sync_router_env.sh")],
@@ -136,6 +138,16 @@ def test_bw_sync_failed_unlock_surfaces_error(tmp_path):
     assert "INTERACTIVE_UNLOCK_CALLED" not in combined
     assert "wrong master password" in combined
     assert "bw-master --status" in combined
+    assert "Interactive bw unlock is disabled" in combined
+
+
+def test_bw_sync_script_has_no_interactive_unlock_path():
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "_interactive_unlock" not in script
+    assert "BW_SYNC_ALLOW_PROMPT" not in script
+    assert "bw unlock --raw" not in script
+    assert "enter master password" not in script.lower()
+    assert "Keychain" in script
 
 
 def test_bw_sync_mirror_failure_exits_nonzero():

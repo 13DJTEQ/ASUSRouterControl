@@ -1180,10 +1180,130 @@ class TestBitwardenMasterPasswordUnlock:
         assert info["master_password_matched_path"]
         assert "rejected by Bitwarden" in str(info["last_unlock_error"])
 
-        # --force --set path clears cooldown
+        # Successful store clears cooldown (rare --force --set repair path)
         assert creds.store_bitwarden_master_password("fresh-mp") is True
         assert creds.wrong_mp_cooldown_active() is False
         assert creds.get_bitwarden_master_password_quarantine() is None
+
+    def test_store_purges_noncanonical_alt_mp_entries(self, monkeypatch, mem_keyring):
+        """After store, discovery must not fall back to stale wrong alt keys."""
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        alt_svc = creds._service_name("bitwarden_master_password", "shared")
+        alt_acct = creds._account_name("bitwarden_master_password", "shared")
+        mem_keyring.set_password(alt_svc, alt_acct, "stale-wrong-mp")
+        assert mem_keyring.get_password(alt_svc, alt_acct) == "stale-wrong-mp"
+
+        assert creds.store_bitwarden_master_password("canonical-good-mp") is True
+        assert mem_keyring.get_password(alt_svc, alt_acct) is None
+        assert creds.get_bitwarden_master_password() == "canonical-good-mp"
+        matched = creds.get_last_bitwarden_master_password_match() or ""
+        assert "bw_master_password" in matched
+        assert "shared" not in matched or "prod" in matched
+
+    def test_discovery_skips_quarantined_path_prefers_other(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("bad-canonical") is True
+        canon_path = creds.get_last_bitwarden_master_password_match()
+        assert canon_path
+
+        alt_svc = creds._service_name("bw_master_password", "dev")
+        alt_acct = creds._account_name("bw_master_password", "dev")
+        mem_keyring.set_password(alt_svc, alt_acct, "alt-good-mp")
+
+        creds._quarantine_wrong_mp(matched_path=canon_path, secret="bad-canonical")
+        # Quarantine skips canonical; discovery should land on the alt entry.
+        assert creds.get_bitwarden_master_password() == "alt-good-mp"
+        assert "dev" in (creds.get_last_bitwarden_master_password_match() or "")
+
+        # Presence still true even if we only had the quarantined entry.
+        assert creds.bitwarden_master_password_keychain_present() is True
+
+    def test_ensure_reports_status_when_only_quarantined_mp(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("only-bad") is True
+        path = creds.get_last_bitwarden_master_password_match()
+        creds._quarantine_wrong_mp(matched_path=path, secret="only-bad")
+        creds._enter_wrong_mp_cooldown(matched_path=path)
+
+        def fake_login_check(self):
+            return "locked"
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(
+            creds,
+            "_bw_run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not unlock")),
+        )
+
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+        err = creds.get_last_bitwarden_unlock_error() or ""
+        assert "bw-master --force --set" in err
+        assert "no master password" not in err.lower()
+
+        info = creds.bitwarden_unlock_status(attempt_unlock=False)
+        assert info["master_password_stored"] is True
+        assert info["master_password_quarantined_path"]
+        assert info["master_password_matched_path"]
+
+    def test_ensure_tries_next_keychain_candidate_after_wrong_mp(
+        self, monkeypatch, mem_keyring
+    ):
+        """Quarantine bad MP and unlock with another Keychain candidate — no prompt."""
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds._BACKENDS["keychain"].store(
+            "bw_master_password", "wrong-mp", env="prod"
+        )
+        assert creds._BACKENDS["keychain"].store(
+            "bw_master_password", "good-mp", env="shared"
+        )
+        creds._clear_wrong_mp_cooldown()
+        unlock_passwords: list[str] = []
+
+        def fake_login_check(self):
+            if os.environ.get("BW_SESSION") == "GOODSESSION":
+                return "unlocked"
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            pw = (extra_env or {}).get(creds._BW_PASSWORD_ENV, "")
+            unlock_passwords.append(pw)
+            if pw == "good-mp":
+                return SimpleNamespace(returncode=0, stdout="GOODSESSION\n", stderr="")
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Invalid master password.",
+            )
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+
+        def _persist(token: str) -> None:
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds, "_persist_bw_session", _persist)
+        monkeypatch.delenv("BW_SESSION", raising=False)
+
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert unlock_passwords[0] == "wrong-mp"
+        assert "good-mp" in unlock_passwords
+        assert unlock_passwords.index("good-mp") > 0
+        assert creds.wrong_mp_cooldown_active() is False
+        assert os.environ.get("BW_SESSION") == "GOODSESSION"
 
     def test_connect_proceeds_with_mirror_when_wrong_mp_unlock_fails(
         self, monkeypatch, mem_keyring
@@ -1314,7 +1434,8 @@ class TestBitwardenMasterPasswordUnlock:
 
 
 class TestBitwardenMasterPasswordFallbacks:
-    def test_get_reads_dev_env_and_normalizes(self, monkeypatch, mem_keyring):
+    def test_get_reads_dev_env_without_eager_normalize(self, monkeypatch, mem_keyring):
+        """Fallback reads must not overwrite canonical until unlock proves the MP."""
         from asusroutercontrol import credentials as creds
 
         monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
@@ -1322,12 +1443,11 @@ class TestBitwardenMasterPasswordFallbacks:
         assert creds._BACKENDS["keychain"].store(
             "bw_master_password", "legacy-dev-mp", env="dev"
         )
-        # Canonical prod must be empty before normalize.
         assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") is None
 
         assert creds.get_bitwarden_master_password() == "legacy-dev-mp"
-        # Normalized to canonical prod location.
-        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") == "legacy-dev-mp"
+        # Still not written to canonical — normalize happens after successful unlock.
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") is None
 
     def test_get_reads_alternate_key_name(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds
@@ -1337,7 +1457,8 @@ class TestBitwardenMasterPasswordFallbacks:
             "bitwarden_master_password", "alt-key-mp", env="prod"
         )
         assert creds.get_bitwarden_master_password() == "alt-key-mp"
-        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") == "alt-key-mp"
+        # No eager normalize on get.
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") is None
 
     def test_get_reads_legacy_service_account(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds
@@ -1354,7 +1475,7 @@ class TestBitwardenMasterPasswordFallbacks:
                 creds._service_name("bw_master_password", "prod"),
                 creds._account_name("bw_master_password", "prod"),
             )
-            == "legacy-svc-mp"
+            is None
         )
 
     def test_ensure_unlocks_using_fallback_entry(self, monkeypatch, mem_keyring):
@@ -1384,6 +1505,11 @@ class TestBitwardenMasterPasswordFallbacks:
         monkeypatch.setattr(creds, "_persist_bw_session", _persist)
         assert creds.ensure_bitwarden_unlocked() == "unlocked"
         assert os.environ.get("BW_SESSION") == "SESSIONFROMFALLBACK"
+        # Proven-good fallback is normalized to canonical after unlock.
+        assert (
+            creds._BACKENDS["keychain"].get("bw_master_password", env="prod")
+            == "fallback-mp"
+        )
 
     def test_status_reports_matched_path(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds
@@ -1428,11 +1554,8 @@ class TestBitwardenMasterPasswordFallbacks:
         assert match is not None
         assert match.startswith("security:")
         assert svc in match
-        # Normalized into canonical keyring location.
-        assert (
-            creds._BACKENDS["keychain"].get("bw_master_password", env="prod")
-            == "security-only-mp"
-        )
+        # No eager normalize on get — canonical stays empty until unlock proves MP.
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") is None
 
     def test_get_logs_lookup_miss(self, monkeypatch, mem_keyring, caplog):
         import logging

@@ -19,15 +19,18 @@ from rich.table import Table
 from asusroutercontrol.config import ensure_runtime_data_dir_isolation, load_config
 from asusroutercontrol.credentials import (
     _active_backend_name,
+    bitwarden_master_password_keychain_present,
     bitwarden_unlock_status,
     delete_bitwarden_master_password,
     delete_legacy_credentials,
     ensure_bitwarden_unlocked,
     get_bitwarden_master_password,
+    get_bitwarden_master_password_quarantine,
     get_last_bitwarden_unlock_error,
     migrate_legacy_credentials,
     store_bitwarden_master_password,
     store_credential,
+    wrong_mp_cooldown_active,
 )
 from asusroutercontrol.datastore import DataStore
 
@@ -894,6 +897,13 @@ def credentials_bw_master(
             console.print("matched_path: (none)")
         if quarantined:
             console.print(f"quarantined_path: {quarantined}")
+        q_count = info.get("master_password_quarantined_count")
+        if isinstance(q_count, int) and q_count > 1:
+            console.print(f"quarantined_count: {q_count}")
+        cand = info.get("master_password_candidate_count")
+        usable_n = info.get("master_password_usable_count")
+        if cand is not None:
+            console.print(f"keychain_candidates: {cand} (usable={usable_n})")
         if cooldown:
             console.print(
                 f"wrong_mp_cooldown: active ({cooldown_secs}s remaining; "
@@ -915,12 +925,23 @@ def credentials_bw_master(
             "wrong or corrupt" in str(err).lower()
             or "rejected by bitwarden" in str(err).lower()
         ):
+            usable = info.get("master_password_usable_count")
+            candidates = info.get("master_password_candidate_count")
             console.print(
-                "[yellow]Repair:[/yellow] "
-                "[cyan]asusrouter credentials bw-master --force --set[/cyan] "
-                "(or --delete then --set). Decryption failed means the Keychain "
-                "value is not the real Bitwarden master password — not a BW outage."
+                "[yellow]Note:[/yellow] Decryption failed means a Keychain "
+                "value is not the real Bitwarden master password — not a BW outage. "
+                "Other Keychain candidates were tried automatically."
             )
+            if not stored or (isinstance(candidates, int) and candidates == 0):
+                console.print(
+                    "[yellow]One-time setup:[/yellow] "
+                    "[cyan]asusrouter credentials bw-master --set[/cyan]"
+                )
+            elif isinstance(usable, int) and usable == 0:
+                console.print(
+                    "[dim]All Keychain MP candidates failed. Rare repair only: "
+                    "asusrouter credentials bw-master --force --set[/dim]"
+                )
         elif not stored and state == "locked":
             console.print(
                 "[yellow]One-time setup:[/yellow] "
@@ -942,20 +963,55 @@ def credentials_bw_master(
             console.print("[yellow]Nothing removed (missing or Keychain error).[/yellow]")
         return
     # --set: never prompt when an entry already exists (unless --force/--replace).
-    if get_bitwarden_master_password() is not None and not (do_force or do_replace):
+    # Quarantined wrong values still count as "stored" so we do not re-prompt
+    # without an explicit --force/--replace.
+    already_stored = (
+        get_bitwarden_master_password() is not None
+        or bitwarden_master_password_keychain_present()
+    )
+    if already_stored and not (do_force or do_replace):
         console.print("Bitwarden master password already stored in Keychain.")
-        console.print("Use --force or --replace to overwrite.")
+        if get_bitwarden_master_password_quarantine() or wrong_mp_cooldown_active():
+            console.print(
+                "[yellow]Stored value was rejected by Bitwarden (wrong or corrupt).[/yellow]"
+            )
+            console.print(
+                "Auto-unlock already tried other Keychain candidates. "
+                "Check: [cyan]asusrouter credentials bw-master --status[/cyan]"
+            )
+            console.print(
+                "[dim]Rare repair (replace Keychain MP): "
+                "asusrouter credentials bw-master --force --set[/dim]"
+            )
+        else:
+            console.print("Use --force or --replace to overwrite.")
         state = ensure_bitwarden_unlocked()
         console.print(f"Vault status: [bold]{state}[/bold]")
         err = get_last_bitwarden_unlock_error()
         if err and state != "unlocked":
             console.print(f"[yellow]Unlock error:[/yellow] {err}")
         return
-    password = click.prompt("Bitwarden master password", hide_input=True, confirmation_prompt=True)
+    # Intentional one-time interactive store — the only BW master-password prompt.
+    console.print(
+        "[cyan]Enter Bitwarden master password to store in Keychain (one-time).[/cyan]"
+    )
+    console.print(
+        "[dim]Confirm once below. After success, status / bw_sync / probe / DEV.app "
+        "will not ask for the master password.[/dim]"
+    )
+    password = click.prompt(
+        "Bitwarden master password",
+        hide_input=True,
+        confirmation_prompt="Confirm Bitwarden master password",
+    )
     if not store_bitwarden_master_password(password):
         raise click.ClickException("Failed to store master password in Keychain")
     state = ensure_bitwarden_unlocked()
     console.print("[green]Stored Bitwarden master password in macOS Keychain.[/green]")
+    console.print(
+        "[dim]One-time store complete — later unlocks use Keychain only "
+        "(no further master-password prompts).[/dim]"
+    )
     console.print(f"Vault status after unlock attempt: [bold]{state}[/bold]")
     err = get_last_bitwarden_unlock_error()
     if err and state != "unlocked":

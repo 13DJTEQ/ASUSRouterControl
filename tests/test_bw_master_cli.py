@@ -92,8 +92,59 @@ def test_bw_master_set_force_prompts(monkeypatch, mem_keyring):
     result = runner.invoke(cli, ["credentials", "bw-master", "--set", "--force"])
     assert result.exit_code == 0, result.output
     assert prompts, "expected prompt when --force is set"
+    out = " ".join(result.output.lower().split())
+    assert "one-time" in out
+    assert "enter bitwarden master password to store in keychain" in out
+    assert "will not ask for the master password" in out or (
+        "no further master-password prompts" in out
+    )
     assert creds_mod.get_bitwarden_master_password() == "new-mp"
     assert "Stored Bitwarden master password" in result.output
+
+
+def test_bw_master_set_without_force_skips_prompt_when_quarantined(
+    monkeypatch, mem_keyring
+):
+    """Quarantined wrong MP still counts as stored — require --force to re-prompt."""
+    assert creds_mod.store_bitwarden_master_password("bad-mp") is True
+    path = creds_mod.get_last_bitwarden_master_password_match()
+    creds_mod._quarantine_wrong_mp(matched_path=path, secret="bad-mp")
+    creds_mod._enter_wrong_mp_cooldown(matched_path=path)
+
+    def boom(*_a, **_k):
+        raise AssertionError("click.prompt must not run for --set when MP is quarantined")
+
+    monkeypatch.setattr("asusroutercontrol.cli.click.prompt", boom)
+    monkeypatch.setattr("asusroutercontrol.cli.ensure_bitwarden_unlocked", lambda: "locked")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["credentials", "bw-master", "--set"])
+    assert result.exit_code == 0, result.output
+    assert "already stored" in result.output.lower()
+    assert "force --set" in result.output
+    assert "rejected by Bitwarden" in result.output
+
+
+def test_bw_master_set_initial_shows_one_time_banner(monkeypatch, mem_keyring):
+    creds_mod.delete_bitwarden_master_password()
+    prompts: list[str] = []
+
+    def fake_prompt(text, **kwargs):
+        prompts.append(str(text))
+        # confirmation_prompt may call prompt twice with different text
+        return "fresh-mp"
+
+    monkeypatch.setattr("asusroutercontrol.cli.click.prompt", fake_prompt)
+    monkeypatch.setattr("asusroutercontrol.cli.ensure_bitwarden_unlocked", lambda: "unlocked")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["credentials", "bw-master", "--set"])
+    assert result.exit_code == 0, result.output
+    assert prompts
+    out = " ".join(result.output.split())
+    assert "Enter Bitwarden master password to store in Keychain (one-time)" in out
+    assert "One-time store complete" in out
+    assert creds_mod.get_bitwarden_master_password() == "fresh-mp"
 
 
 def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
@@ -132,7 +183,7 @@ def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
     assert "status-mp" not in result.output
 
 
-def test_bw_master_status_wrong_mp_shows_repair(monkeypatch, mem_keyring):
+def test_bw_master_status_wrong_mp_shows_status_not_force_set(monkeypatch, mem_keyring):
     assert creds_mod.store_bitwarden_master_password("bad-mp") is True
 
     monkeypatch.setattr(
@@ -147,6 +198,9 @@ def test_bw_master_status_wrong_mp_shows_repair(monkeypatch, mem_keyring):
                 "keyring:universal-keychain-asusroutercontrol-prod-bw_master_password/"
                 "asusroutercontrol.prod.bw_master_password"
             ),
+            "master_password_quarantined_count": 1,
+            "master_password_candidate_count": 1,
+            "master_password_usable_count": 0,
             "wrong_mp_cooldown_active": True,
             "wrong_mp_cooldown_remaining_seconds": 800,
             "master_password_canonical": (
@@ -157,10 +211,12 @@ def test_bw_master_status_wrong_mp_shows_repair(monkeypatch, mem_keyring):
             "vault_status": "locked",
             "last_unlock_error": (
                 "Keychain master password rejected by Bitwarden (wrong or corrupt). "
-                "Run: asusrouter credentials bw-master --force --set"
+                "Tried available Keychain candidates automatically; vault remains locked. "
+                "Check: asusrouter credentials bw-master --status"
             ),
             "bw_session_present": False,
             "keychain_path": None,
+            "master_password_usable": False,
         },
     )
 
@@ -171,8 +227,14 @@ def test_bw_master_status_wrong_mp_shows_repair(monkeypatch, mem_keyring):
     assert "rejected by Bitwarden" in result.output
     assert "quarantined_path:" in result.output
     assert "wrong_mp_cooldown: active" in result.output
-    assert "bw-master --force --set" in result.output
+    assert "tried other Keychain candidates" in result.output.lower() or (
+        "Other Keychain candidates were tried" in result.output
+    )
+    # --force --set is dim/rare repair only, not the primary Repair: line.
+    assert "[yellow]Repair:[/yellow]" not in result.output
     assert "not a BW outage" in result.output or "Decryption failed" in result.output
+    assert "Rare repair" in result.output
+    assert "bw-master --force --set" in result.output
 
 
 def test_bw_master_status_missing(monkeypatch, mem_keyring):
