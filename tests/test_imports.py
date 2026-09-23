@@ -32,6 +32,7 @@ _MODULES = [
     "asusroutercontrol.executor",
     "asusroutercontrol.rollout",
     "asusroutercontrol.reporting",
+    "asusroutercontrol.router_model",
     "asusroutercontrol.scheduler",
     "asusroutercontrol.notifications",
     "asusroutercontrol.incident",

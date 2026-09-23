@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,6 +63,11 @@ from asusroutercontrol.connection_monitor import (
 )
 from asusroutercontrol.datastore import DataStore
 from asusroutercontrol.notifications import notify as _notify
+from asusroutercontrol.router_model import (
+    fetch_live_router_model,
+    format_router_model_menu_title,
+    normalize_router_model,
+)
 from asusroutercontrol.scheduler import MonitorScheduler
 
 log = logging.getLogger(__name__)
@@ -78,6 +84,29 @@ _ICON_PREFIX = "📡"
 _TEST_ICON_PREFIX = "🧪"
 _SPINNER_N_DOTS = 12
 _SPINNER_DOT_RADIUS = 1.6
+
+
+def _read_dev_build_stamp() -> str | None:
+    """Read Contents/Resources/BUILD_STAMP from the running .app when present."""
+    candidates: list[Path] = []
+    env_bundle = os.environ.get("ASUSROUTERCONTROL_APP_BUNDLE")
+    if env_bundle:
+        candidates.append(Path(env_bundle) / "Contents" / "Resources" / "BUILD_STAMP")
+    try:
+        # PyInstaller / bundled runtime: .../MacOS/<exe> → Resources/BUILD_STAMP
+        exe = Path(sys.executable).resolve()
+        candidates.append(exe.parent.parent / "Resources" / "BUILD_STAMP")
+    except Exception:
+        pass
+    for path in candidates:
+        try:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    return text.splitlines()[0].strip()
+        except OSError:
+            continue
+    return None
 _SPINNER_RING_RADIUS = 5.2
 _SPINNER_IMG_SIZE = 16.0
 _SPINNER_INTERVAL = 1.0 / 12
@@ -295,6 +324,8 @@ class AppDelegate(NSObject):
         self._spinner_timer = None
         self._spinner_frame = 0
         self._spinner_reason = None
+        # Live router SKU from HTTP/SSH — never hardcode AC68U/BE92U.
+        self._router_model: str | None = None
 
         self.statusbar = NSStatusBar.systemStatusBar()
         self.statusitem = self.statusbar.statusItemWithLength_(NSVariableStatusItemLength)
@@ -318,6 +349,26 @@ class AppDelegate(NSObject):
         btn.setTitle_(self._icon_prefix)
         env_label = "DEV" if self._runtime_env != "prod" else "PROD"
         btn.setToolTip_(f"ASUSRouterControl {env_label} — {state}")
+
+    def _about_menu_title(self) -> str:
+        """Build identity line so a stale DEV.app is obvious vs a fresh rebuild."""
+        from asusroutercontrol import __version__
+
+        env_label = "DEV" if getattr(self, "_runtime_env", "prod") != "prod" else "PROD"
+        build = _read_dev_build_stamp()
+        if build:
+            return f"About: {env_label} v{__version__} ({build})"
+        return f"About: {env_label} v{__version__}"
+
+    def _invalidate_router_model(self) -> None:
+        """Drop cached SKU so Connect / hardware swaps cannot keep an old label."""
+        self._router_model = None
+
+    def _remember_router_model(self, model: str | None) -> str | None:
+        normalized = normalize_router_model(model)
+        if normalized:
+            self._router_model = normalized
+        return self._router_model
 
     def _startup_health_check(self):
         """Check router backend reachability before starting scheduler."""
@@ -355,6 +406,11 @@ class AppDelegate(NSObject):
             )
             try:
                 await backend.connect()
+                try:
+                    info = await backend.get_system_info()
+                    self._remember_router_model(getattr(info, "model", None))
+                except Exception:
+                    log.debug("Health check model read failed", exc_info=True)
             except Exception as exc:
                 raise RuntimeError(
                     format_http_probe_error(
@@ -370,7 +426,12 @@ class AppDelegate(NSObject):
         async def _check_ssh():
             ssh = RouterSSH(connect_timeout=10.0)
             await ssh.connect()
-            await ssh.disconnect()
+            try:
+                from asusroutercontrol.router_model import fetch_model_via_ssh
+
+                self._remember_router_model(await fetch_model_via_ssh(ssh))
+            finally:
+                await ssh.disconnect()
 
         try:
             asyncio.run(_check_backend())
@@ -391,16 +452,18 @@ class AppDelegate(NSObject):
             )
             return
 
-        if (self._cfg.router_backend or "").strip().lower() == "merlin":
-            try:
-                asyncio.run(_check_ssh())
-            except Exception as exc:
-                log.warning(
-                    "SSH unavailable at startup: %s — starting scheduler with limited data",
-                    exc,
-                )
+        try:
+            asyncio.run(_check_ssh())
+        except Exception as exc:
+            log.warning(
+                "SSH unavailable at startup: %s — starting scheduler with limited data",
+                exc,
+            )
 
-        log.info("Router reachable — starting scheduler")
+        log.info(
+            "Router reachable — starting scheduler (model=%s)",
+            self._router_model or "unknown",
+        )
         self._degraded = False
         self._health_fail_count = 0
         self._health_retry_seconds = 60.0
@@ -492,9 +555,10 @@ class AppDelegate(NSObject):
         menu.setAutoenablesItems_(False)
 
         _add_section_header(menu, "Router")
-        self._mi_model = _add_info(menu, "Router: connecting...")
+        self._mi_model = _add_info(menu, format_router_model_menu_title(None))
         self._mi_uptime = _add_info(menu, "Uptime: —")
         self._mi_hw = _add_info(menu, "CPU: —  RAM: —  Temp: —")
+        self._mi_about = _add_info(menu, self._about_menu_title())
         menu.addItem_(NSMenuItem.separatorItem())
 
         _add_section_header(menu, "SpeedHealth")
@@ -801,6 +865,15 @@ class AppDelegate(NSObject):
 
             result["health"] = self._calc_health(sys_rows, speed_rows, lat_rows)
 
+            # Live router model (SSH preferred — avoids HTTP LOGIN on every refresh).
+            try:
+                live_model = await fetch_live_router_model(self._cfg, prefer_ssh=True)
+                if live_model:
+                    self._remember_router_model(live_model)
+            except Exception:
+                log.debug("Live router model refresh failed", exc_info=True)
+            result["router_model"] = self._router_model
+
             # Client loads
             try:
                 from asusroutercontrol.analysis.clients import get_client_load_summary
@@ -908,7 +981,15 @@ class AppDelegate(NSObject):
         )
         if not busy and not connecting:
             self._set_status_icon(status_label)
-        self._mi_model.setTitle_(f"Router: RT-AC68U  ·  Health: {health:.0f}/100")
+        model = normalize_router_model(data.get("router_model")) or self._router_model
+        self._remember_router_model(model)
+        self._mi_model.setTitle_(
+            format_router_model_menu_title(self._router_model, health)
+        )
+        try:
+            self._mi_about.setTitle_(self._about_menu_title())
+        except Exception:
+            log.debug("About menu title update failed", exc_info=True)
 
         sys_snap = data.get("system")
         if sys_snap:
@@ -1497,6 +1578,11 @@ class AppDelegate(NSObject):
             return
 
         self._begin_connect_activity(host)
+        self._invalidate_router_model()
+        try:
+            self._mi_model.setTitle_(format_router_model_menu_title(None))
+        except Exception:
+            pass
         threading.Thread(
             target=self._do_connect,
             kwargs={
@@ -1562,6 +1648,20 @@ class AppDelegate(NSObject):
             self._degraded = False
             # Reload config so subsequent actions see the new profile.
             self._cfg = load_config(runtime_env=_runtime_environment())
+            # Fresh model after hardware swap — never keep a prior AC68U/etc. label.
+            self._invalidate_router_model()
+            try:
+                live = asyncio.run(
+                    fetch_live_router_model(
+                        self._cfg,
+                        username=username,
+                        password=password,
+                        prefer_ssh=False,
+                    )
+                )
+                self._remember_router_model(live)
+            except Exception:
+                log.debug("Post-connect model probe failed", exc_info=True)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "finishConnectSuccess:", result.profile.host, False
             )
@@ -1650,9 +1750,20 @@ class AppDelegate(NSObject):
             self._mi_connect.setEnabled_(True)
         except Exception:
             pass
+        try:
+            self._mi_model.setTitle_(
+                format_router_model_menu_title(self._router_model, None)
+            )
+            self._mi_about.setTitle_(self._about_menu_title())
+        except Exception:
+            log.debug("Post-connect model menu update failed", exc_info=True)
         self._refresh_capability_status()
         # Leave degraded mode and ensure the scheduler is running after Connect.
         self.startAfterHealthCheck_(None)
+        # Force a data refresh so health + model update immediately.
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "refreshData:", None, False
+        )
 
     @objc.typedSelector(b"v@:@")
     def finishConnectFailure_(self, detail):

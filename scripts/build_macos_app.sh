@@ -147,6 +147,18 @@ EOF
   "${VENV_PY}" "${SCRIPT_DIR}/generate_dev_icon.py" --output "${icon_icns}"
   cp "${icon_icns}" "${resources_dir}/Icon.icns"
 
+  local pkg_version
+  pkg_version="$("${VENV_PY}" -c "from asusroutercontrol import __version__; print(__version__)" 2>/dev/null || true)"
+  if [[ -z "${pkg_version}" ]]; then
+    pkg_version="0.2.0"
+  fi
+  local git_sha
+  git_sha="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+  local build_stamp
+  build_stamp="$(date -u +%Y%m%d%H%M%S)-${git_sha}"
+  # CFBundleVersion must be unique per rebuild so Finder/About don't look "reverted".
+  local bundle_version="${build_stamp}"
+
   cat > "${plist_path}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -167,9 +179,9 @@ EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>${pkg_version}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${bundle_version}</string>
   <key>CFBundleIconFile</key>
   <string>Icon</string>
   <key>LSUIElement</key>
@@ -195,9 +207,14 @@ EOF
   rm -rf "${dest_app}"
   cp -R "${app_dir}" "${dest_app}"
   touch "${dest_app}/Contents/Resources/DEV_BUILD"
+  printf '%s\n' "${build_stamp}" > "${dest_app}/Contents/Resources/BUILD_STAMP"
+  printf 'ASUSRouterControl DEV %s (git %s)\n' "${pkg_version}" "${git_sha}" \
+    > "${dest_app}/Contents/Resources/ABOUT.txt"
 
   echo "Built ${app_name}"
   echo "Output: ${dest_app}"
+  echo "CFBundleShortVersionString=${pkg_version}"
+  echo "CFBundleVersion=${bundle_version}"
 }
 
 build_prod_dmg() {

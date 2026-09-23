@@ -177,7 +177,9 @@ class MerlinBackend(FirmwareBackend):
             fw_data = await router.async_get_data(AsusData.FIRMWARE)
             if fw_data and isinstance(fw_data, dict):
                 info.firmware_version = fw_data.get("current")
-                info.model = fw_data.get("model")
+                from asusroutercontrol.router_model import model_from_firmware_payload
+
+                info.model = model_from_firmware_payload(fw_data)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             log.debug("Firmware data unavailable", exc_info=True)
 
