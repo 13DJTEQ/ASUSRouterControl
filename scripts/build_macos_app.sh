@@ -211,10 +211,37 @@ EOF
   printf 'ASUSRouterControl DEV %s (git %s)\n' "${pkg_version}" "${git_sha}" \
     > "${dest_app}/Contents/Resources/ABOUT.txt"
 
+  local bundle_exec_path="${dest_app}/Contents/MacOS/asusroutercontrol-launcher"
+  if [[ ! -x "${bundle_exec_path}" ]]; then
+    echo "CFBundleExecutable missing or not executable: ${bundle_exec_path}" >&2
+    exit 1
+  fi
+  chmod +x "${bundle_exec_path}"
+
+  if command -v plutil >/dev/null 2>&1; then
+    if ! plutil -lint "${dest_app}/Contents/Info.plist" >/dev/null; then
+      echo "Info.plist failed plutil -lint:" >&2
+      plutil -lint "${dest_app}/Contents/Info.plist" >&2 || true
+      exit 1
+    fi
+  fi
+
+  # Quarantine / build xattrs commonly trigger LS error -54 on `open`.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "${dest_app}" 2>/dev/null || true
+  fi
+
+  local lsregister_bin="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "${lsregister_bin}" ]]; then
+    "${lsregister_bin}" -u "${dest_app}" >/dev/null 2>&1 || true
+    "${lsregister_bin}" -f "${dest_app}" >/dev/null 2>&1 || true
+  fi
+
   echo "Built ${app_name}"
   echo "Output: ${dest_app}"
   echo "CFBundleShortVersionString=${pkg_version}"
   echo "CFBundleVersion=${bundle_version}"
+  echo "CFBundleExecutable=asusroutercontrol-launcher"
 }
 
 build_prod_dmg() {
