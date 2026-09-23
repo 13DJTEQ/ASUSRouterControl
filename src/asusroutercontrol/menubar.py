@@ -365,8 +365,16 @@ class AppDelegate(NSObject):
         # Emoji-only NSVariableStatusItemLength titles often collapse to
         # zero width under Sequoia when the process is Python-hosted.
         self.statusitem = self.statusbar.statusItemWithLength_(22.0)
+        # Keep a strong ref; autosave name helps Control Center restore the item.
+        self.statusitem.setAutosaveName_("ASUSRouterControl.menubar")
         if hasattr(self.statusitem, "setVisible_"):
             self.statusitem.setVisible_(True)
+        # Clear removal behaviors when available so Sequoia does not drop the item.
+        if hasattr(self.statusitem, "setBehavior_"):
+            try:
+                self.statusitem.setBehavior_(0)
+            except Exception:
+                pass
         self._glyph_image = _make_menubar_glyph_image(runtime_env)
         self._set_status_icon("Starting")
         btn = self.statusitem.button()

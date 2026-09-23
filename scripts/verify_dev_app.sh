@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEV_APP="${PROJECT_ROOT}/testbuilds/ASUSRouterControl DEV.app"
-DEV_LAUNCHER="${DEV_APP}/Contents/MacOS/asusroutercontrol-launcher"
+DEV_MACHO="${DEV_APP}/Contents/MacOS/ASUSRouterControlDevRuntime"
+DEV_LAUNCHER="${DEV_MACHO}"
+if [[ ! -x "${DEV_LAUNCHER}" ]]; then
+  DEV_LAUNCHER="${DEV_APP}/Contents/MacOS/asusroutercontrol-launcher"
+fi
 DEV_LAUNCH_LOG="${PROJECT_ROOT}/testbuilds/verify-dev-app.launch.log"
 DEV_DB_PATH="${VERIFY_DEV_APP_DB_PATH:-${HOME}/.asusroutercontrol.dev/router.db}"
 DEV_LOG_PATH="${VERIFY_DEV_APP_LOG_PATH:-${HOME}/.asusroutercontrol.dev/scheduler.log}"
@@ -65,6 +69,7 @@ def _classify_pids() -> tuple[list[int], list[int]]:
         is_dev = (
             "ASUSROUTERCONTROL_RUNTIME_ENV=dev" in cmd
             or "ASUSRouterControl DEV.app" in cmd
+            or "ASUSRouterControlDevRuntime" in cmd
         )
         if is_dev:
             dev.append(pid)
@@ -150,8 +155,9 @@ def _dev_process_running() -> bool:
         cmd = parts[1]
         cmd_l = cmd.lower()
         if (
-            "asusroutercontrol_runtime_env=dev" in cmd_l
-            and "asusroutercontrol" in cmd_l
+            ("asusroutercontrol_runtime_env=dev" in cmd_l and "asusroutercontrol" in cmd_l)
+            or "asusroutercontroldevruntime" in cmd_l
+            or "asusroutercontrol dev.app" in cmd_l
         ):
             return True
     return False
@@ -175,7 +181,7 @@ print("No DEV runtime detected after open launch attempt.")
 raise SystemExit(1)
 PY
 then
-  echo "Falling back to direct launcher execution: ${DEV_LAUNCHER}"
+  echo "Falling back to direct Mach-O/launcher execution: ${DEV_LAUNCHER}"
   if [[ ! -x "${DEV_LAUNCHER}" ]]; then
     echo "Missing or non-executable launcher: ${DEV_LAUNCHER}" >&2
     exit 1
@@ -229,8 +235,9 @@ def _dev_process_running() -> bool:
         cmd = parts[1]
         cmd_l = cmd.lower()
         if (
-            "asusroutercontrol_runtime_env=dev" in cmd_l
-            and "asusroutercontrol" in cmd_l
+            ("asusroutercontrol_runtime_env=dev" in cmd_l and "asusroutercontrol" in cmd_l)
+            or "asusroutercontroldevruntime" in cmd_l
+            or "asusroutercontrol dev.app" in cmd_l
         ):
             return True
     return False
@@ -308,7 +315,8 @@ while time.time() < deadline:
             print(f"Latest device_perf_history timestamp: {ts}")
         if wired_rows > 0 and wired_with_rates == 0:
             print("Note: wired clients present, but backend did not expose per-client wired tx/rx rates.")
-        print("Look for the 🧪 test-tube icon in the menu bar (DEV). If missing, quit PROD and relaunch.")
+        print("Look for the DEV template glyph in the menu bar (test-tube shape).")
+        print("If missing: check the » menu-bar overflow, then System Settings → Control Center.")
         raise SystemExit(0)
     time.sleep(2.0)
 

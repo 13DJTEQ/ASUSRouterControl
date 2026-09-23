@@ -135,7 +135,8 @@ def test_menubar_builds_template_glyph_helper(menubar_mod) -> None:
     ).read_text(encoding="utf-8")
 
 
-def test_dev_launcher_execs_venv_python() -> None:
+def test_dev_build_embeds_pyinstaller_macho() -> None:
     src = Path("scripts/build_macos_app.sh").read_text(encoding="utf-8")
-    assert 'exec "\\${VENV_PY}" -m asusroutercontrol.menubar' in src
-    assert "checking venv imports" in src
+    assert "PyInstaller is required for DEV.app" in src
+    assert 'bundle_executable="${dev_runtime_name}"' in src
+    assert "LSEnvironment" in src

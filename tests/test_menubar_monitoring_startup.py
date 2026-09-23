@@ -20,14 +20,24 @@ def test_dev_launcher_exports_project_env_file() -> None:
     assert "ASUSROUTERCONTROL_ENV_FILE" in src
     assert "ASUSROUTERCONTROL_PROJECT_ROOT" in src
     assert "asusroutercontrol.dev" in src
-    assert "export DATA_DIR=" in src
-    assert "launcher.log" in src
+    assert "LSEnvironment" in src
+    assert "ASUSRouterControlDevRuntime" in src
+    assert "PyInstaller is required for DEV.app" in src
 
 
 def test_menubar_does_not_load_config_at_import_time() -> None:
     src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
     assert "PLAN_SPEED_DOWN = plan_download_bps()" not in src
     assert "PLAN_SPEED_DOWN = 300_000_000.0" in src
+
+
+def test_dev_app_uses_macho_bundle_executable() -> None:
+    src = Path("scripts/build_macos_app.sh").read_text(encoding="utf-8")
+    assert 'bundle_executable="${dev_runtime_name}"' in src
+    assert "CFBundleExecutable" in src
+    # Bash launcher remains as debug escape hatch, not the Finder entrypoint.
+    assert "ASUSROUTERCONTROL_DEV_USE_VENV" in src
+    assert "Mach-O GUI" in src
 
 
 def test_scheduler_has_credentials_recovery_loop() -> None:
