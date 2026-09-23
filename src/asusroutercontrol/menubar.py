@@ -1492,8 +1492,9 @@ class AppDelegate(NSObject):
             self._health_fail_count = 0
             self._health_retry_seconds = 60.0
             self._health_retries_paused = False
+            self._degraded = False
             # Reload config so subsequent actions see the new profile.
-            self._cfg = load_config()
+            self._cfg = load_config(runtime_env=_runtime_environment())
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "finishConnectSuccess:", result.profile.host, False
             )
@@ -1557,6 +1558,11 @@ class AppDelegate(NSObject):
             profile = load_profiles(self._cfg.data_dir, runtime_env=self._cfg.runtime_env).active
         except Exception:
             profile = None
+        self._degraded = False
+        self._health_fail_count = 0
+        self._health_retry_seconds = 60.0
+        self._health_retries_paused = False
+        self._connection_last_error = None
         self._set_connection_state(
             connected_state(
                 host_s,
@@ -1572,6 +1578,8 @@ class AppDelegate(NSObject):
         except Exception:
             pass
         self._refresh_capability_status()
+        # Leave degraded mode and ensure the scheduler is running after Connect.
+        self.startAfterHealthCheck_(None)
 
     @objc.typedSelector(b"v@:@")
     def finishConnectFailure_(self, detail):

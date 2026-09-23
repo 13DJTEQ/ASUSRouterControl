@@ -102,6 +102,7 @@ managed = {
     "ASUSROUTERCONTROL_BW_ROUTER_ITEM",
     "ASUSROUTERCONTROL_ROUTER_USERNAME",
     "ASUSROUTERCONTROL_ROUTER_SSH_PORT",
+    "SSH_PORT",
 }
 lines = []
 if env_path.is_file():
@@ -118,6 +119,8 @@ lines.extend(
         f"ASUSROUTERCONTROL_BW_ROUTER_ITEM={item_name}",
         f"ASUSROUTERCONTROL_ROUTER_USERNAME={user}",
         f"ASUSROUTERCONTROL_ROUTER_SSH_PORT={port}",
+        # Config.load_config reads SSH_PORT for profile overlays / RouterSSH.
+        f"SSH_PORT={port}",
     ]
 )
 env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

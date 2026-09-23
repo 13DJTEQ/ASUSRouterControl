@@ -1059,43 +1059,113 @@ def _env_router_username() -> str | None:
     )
 
 
-def load_runtime_env_files() -> None:
-    """Load .env for GUI launches (non-repo cwd) and refresh BW_SESSION."""
-    try:
-        from dotenv import dotenv_values, load_dotenv
+def _env_router_ssh_port() -> int | None:
+    """SSH port from env (bw_sync / .env), if set and valid."""
+    for key in ("ASUSROUTERCONTROL_ROUTER_SSH_PORT", "SSH_PORT"):
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            log.warning("Ignoring non-integer %s=%r", key, raw)
+            continue
+        if 1 <= port <= 65535:
+            return port
+        log.warning("Ignoring out-of-range %s=%s", key, port)
+    return None
 
-        candidates = [
+
+def _runtime_env_file_candidates() -> list[Path]:
+    """Ordered .env paths for GUI/CLI — runtime-scoped data dir beats prod."""
+    runtime = (
+        os.environ.get("ASUSROUTERCONTROL_RUNTIME_ENV", "prod").strip().lower() or "prod"
+    )
+    candidates: list[Path] = []
+    env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
+    if env_override:
+        candidates.append(Path(env_override).expanduser())
+    # Prefer the active runtime's data-dir .env so prod cannot overwrite DEV.
+    if runtime == "prod":
+        candidates.append(Path.home() / ".asusroutercontrol" / ".env")
+    else:
+        candidates.append(Path.home() / f".asusroutercontrol.{runtime}" / ".env")
+        if runtime != "dev":
+            candidates.append(Path.home() / ".asusroutercontrol.dev" / ".env")
+    candidates.extend(
+        [
             Path.cwd() / ".env",
             Path.home() / "ASUSRouterControl" / ".env",
             Path.home() / ".asusroutercontrol.dev" / ".env",
             Path.home() / ".asusroutercontrol" / ".env",
             Path.home() / ".config" / "asusroutercontrol" / ".env",
         ]
-        env_override = os.environ.get("ASUSROUTERCONTROL_ENV_FILE", "").strip()
-        if env_override:
-            candidates.insert(0, Path(env_override).expanduser())
+    )
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for path in candidates:
+        try:
+            key = path.expanduser().resolve()
+        except OSError:
+            key = path.expanduser()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path.expanduser())
+    return ordered
+
+
+def load_runtime_env_files() -> None:
+    """Load .env for GUI launches (non-repo cwd) and refresh BW_SESSION.
+
+    Higher-priority files win for forced keys (session, router username, SSH
+    port, BW item). Later prod ``~/.asusroutercontrol/.env`` must not clobber
+    values already taken from ``~/.asusroutercontrol.dev/.env``.
+    """
+    try:
+        from dotenv import dotenv_values, load_dotenv
+
+        forced_keys = (
+            "BW_SESSION",
+            "BITWARDEN_SESSION",
+            "ASUSROUTERCONTROL_ROUTER_USERNAME",
+            "ROUTER_USERNAME",
+            "ASUSROUTERCONTROL_ROUTER_SSH_PORT",
+            "SSH_PORT",
+            "ASUSROUTERCONTROL_BW_ROUTER_ITEM",
+        )
+        applied: set[str] = set()
         loaded = False
-        for candidate in candidates:
+        for candidate in _runtime_env_file_candidates():
             try:
-                if candidate.is_file():
-                    load_dotenv(dotenv_path=str(candidate), override=False)
-                    values = dotenv_values(candidate)
-                    session = (
-                        values.get("BW_SESSION")
-                        or values.get("BITWARDEN_SESSION")
-                        or ""
-                    ).strip()
-                    if session:
-                        os.environ[_BW_SESSION_ENV] = session
-                    # Username override must win over stale Keychain "admin".
-                    for key in (
-                        "ASUSROUTERCONTROL_ROUTER_USERNAME",
-                        "ROUTER_USERNAME",
-                    ):
-                        value = (values.get(key) or "").strip()
-                        if value:
-                            os.environ[key] = value
-                    loaded = True
+                if not candidate.is_file():
+                    continue
+                load_dotenv(dotenv_path=str(candidate), override=False)
+                values = dotenv_values(candidate)
+                for key in forced_keys:
+                    if key in applied:
+                        continue
+                    value = (values.get(key) or "").strip()
+                    if not value:
+                        continue
+                    if key in ("BW_SESSION", "BITWARDEN_SESSION"):
+                        os.environ[_BW_SESSION_ENV] = value
+                        applied.add("BW_SESSION")
+                        applied.add("BITWARDEN_SESSION")
+                    else:
+                        os.environ[key] = value
+                        applied.add(key)
+                # Mirror lab sync key into SSH_PORT for Config overlay.
+                if (
+                    "ASUSROUTERCONTROL_ROUTER_SSH_PORT" in applied
+                    and "SSH_PORT" not in applied
+                    and not os.environ.get("SSH_PORT", "").strip()
+                ):
+                    os.environ["SSH_PORT"] = os.environ[
+                        "ASUSROUTERCONTROL_ROUTER_SSH_PORT"
+                    ]
+                    applied.add("SSH_PORT")
+                loaded = True
             except OSError:
                 continue
         if not loaded:
@@ -1150,18 +1220,27 @@ def get_router_credentials(*, host_hint: str | None = None) -> tuple[str | None,
 
 
 def get_router_ssh_port(*, host_hint: str | None = None) -> int | None:
-    """Return SSH port from the host-matched Bitwarden item, else canonical store.
+    """Return SSH port from Bitwarden item, env, or canonical store.
+
+    Precedence: host-matched BW ``SSH Port`` field →
+    ``ASUSROUTERCONTROL_ROUTER_SSH_PORT`` / ``SSH_PORT`` env →
+    Keychain/BW canonical ``router_ssh_port`` → BW item without host hint.
 
     Human BW items such as ``router.asus.com (13Maschine)`` are preferred when
     *host_hint* is set, so a stale Keychain ``router_ssh_port=22`` cannot mask
     the item's ``SSH Port`` custom field.
     """
+    load_runtime_env_files()
     if host_hint:
         item = lookup_bitwarden_router_item(host_hint=host_hint)
         if item is not None:
             from_item = _ssh_port_from_bitwarden_item(item)
             if from_item is not None:
                 return from_item
+
+    env_port = _env_router_ssh_port()
+    if env_port is not None:
+        return env_port
 
     raw = get_credential("router_ssh_port", env=_runtime_credential_env())
     if raw is not None and str(raw).strip():

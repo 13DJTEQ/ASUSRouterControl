@@ -7,6 +7,9 @@ involved.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 import asusroutercontrol.credentials as creds_mod
@@ -550,6 +553,64 @@ class TestBitwardenRouterItemLookup:
         assert user == "13Maschine"
         assert pw == "secret"
 
+    def test_env_ssh_port_used_when_bw_item_missing(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_SSH_PORT", "1313")
+        monkeypatch.delenv("SSH_PORT", raising=False)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        assert creds.get_router_ssh_port(host_hint="router.asus.com") == 1313
+
+    def test_dev_env_file_username_not_overwritten_by_prod(
+        self, monkeypatch, tmp_path: Path
+    ):
+        from asusroutercontrol import credentials as creds
+
+        home = tmp_path / "home"
+        dev_dir = home / ".asusroutercontrol.dev"
+        prod_dir = home / ".asusroutercontrol"
+        dev_dir.mkdir(parents=True)
+        prod_dir.mkdir(parents=True)
+        (dev_dir / ".env").write_text(
+            "ASUSROUTERCONTROL_ROUTER_USERNAME=13Maschine\n"
+            "ASUSROUTERCONTROL_ROUTER_SSH_PORT=1313\n"
+            "BW_SESSION=dev-session\n",
+            encoding="utf-8",
+        )
+        (prod_dir / ".env").write_text(
+            "ASUSROUTERCONTROL_ROUTER_USERNAME=admin\n"
+            "ASUSROUTERCONTROL_ROUTER_SSH_PORT=22\n"
+            "BW_SESSION=prod-session\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setattr(creds.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(creds, "_ensure_bw_session_env", lambda: None)
+        for key in (
+            "ASUSROUTERCONTROL_ROUTER_USERNAME",
+            "ROUTER_USERNAME",
+            "ASUSROUTERCONTROL_ROUTER_SSH_PORT",
+            "SSH_PORT",
+            "BW_SESSION",
+            "BITWARDEN_SESSION",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        creds.load_runtime_env_files()
+        assert os.environ.get("ASUSROUTERCONTROL_ROUTER_USERNAME") == "13Maschine"
+        assert os.environ.get("BW_SESSION") == "dev-session"
+        assert os.environ.get("SSH_PORT") == "1313"
+        # Re-bind through monkeypatch so values do not leak to later tests.
+        for key in (
+            "ASUSROUTERCONTROL_ROUTER_USERNAME",
+            "ASUSROUTERCONTROL_ROUTER_SSH_PORT",
+            "SSH_PORT",
+            "BW_SESSION",
+        ):
+            monkeypatch.setenv(key, os.environ[key])
+
     def test_item_match_prefers_title_with_host(self):
         from asusroutercontrol.credentials import _bw_item_matches_host
 
@@ -562,9 +623,12 @@ class TestBitwardenRouterItemLookup:
     def test_resolve_reports_locked_vault(self, monkeypatch):
         from asusroutercontrol import credentials as creds
 
+        monkeypatch.delenv("ASUSROUTERCONTROL_ROUTER_SSH_PORT", raising=False)
+        monkeypatch.delenv("SSH_PORT", raising=False)
         monkeypatch.setattr(creds, "bitwarden_vault_status", lambda: "locked")
         monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
         monkeypatch.setattr(creds, "get_credential", lambda key, env="prod": None)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
         defaults = creds.resolve_connect_login_defaults(
             suggested_host="router.asus.com",
             preferred_backend="bitwarden",
