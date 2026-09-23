@@ -881,21 +881,28 @@ def credentials_bw_master(
         err = info.get("last_unlock_error")
         session = bool(info.get("bw_session_present"))
         matched = info.get("master_password_matched_path")
+        quarantined = info.get("master_password_quarantined_path")
+        cooldown = bool(info.get("wrong_mp_cooldown_active"))
+        cooldown_secs = int(info.get("wrong_mp_cooldown_remaining_seconds") or 0)
         canonical = info.get("master_password_canonical")
         lookups = info.get("lookups_tried")
-        keychain_path = info.get("keychain_path")
         console.print(f"master_password_stored: {'true' if stored else 'false'}")
         console.print(f"Keychain master password: {'present' if stored else 'missing'}")
         if matched:
             console.print(f"matched_path: {matched}")
         else:
             console.print("matched_path: (none)")
+        if quarantined:
+            console.print(f"quarantined_path: {quarantined}")
+        if cooldown:
+            console.print(
+                f"wrong_mp_cooldown: active ({cooldown_secs}s remaining; "
+                "unlock retries suppressed)"
+            )
         if canonical:
             console.print(f"canonical_path: {canonical}")
         if lookups is not None:
             console.print(f"lookups_tried: {lookups}")
-        if keychain_path:
-            console.print(f"KEYCHAIN_PATH: {keychain_path}")
         console.print(f"Bitwarden vault: {state}")
         console.print(f"BW_SESSION in env: {'yes' if session else 'no'}")
         if err:
@@ -904,7 +911,17 @@ def credentials_bw_master(
             console.print("Last unlock error: (none)")
         else:
             console.print("Last unlock error: (none recorded)")
-        if not stored and state == "locked":
+        if err and (
+            "wrong or corrupt" in str(err).lower()
+            or "rejected by bitwarden" in str(err).lower()
+        ):
+            console.print(
+                "[yellow]Repair:[/yellow] "
+                "[cyan]asusrouter credentials bw-master --force --set[/cyan] "
+                "(or --delete then --set). Decryption failed means the Keychain "
+                "value is not the real Bitwarden master password — not a BW outage."
+            )
+        elif not stored and state == "locked":
             console.print(
                 "[yellow]One-time setup:[/yellow] "
                 "[cyan]asusrouter credentials bw-master --set[/cyan]"
@@ -920,6 +937,7 @@ def credentials_bw_master(
     if do_delete:
         if delete_bitwarden_master_password():
             console.print("[green]Removed Bitwarden master password from Keychain.[/green]")
+            console.print("[dim]Wrong-MP cooldown cleared.[/dim]")
         else:
             console.print("[yellow]Nothing removed (missing or Keychain error).[/yellow]")
         return
@@ -929,6 +947,9 @@ def credentials_bw_master(
         console.print("Use --force or --replace to overwrite.")
         state = ensure_bitwarden_unlocked()
         console.print(f"Vault status: [bold]{state}[/bold]")
+        err = get_last_bitwarden_unlock_error()
+        if err and state != "unlocked":
+            console.print(f"[yellow]Unlock error:[/yellow] {err}")
         return
     password = click.prompt("Bitwarden master password", hide_input=True, confirmation_prompt=True)
     if not store_bitwarden_master_password(password):

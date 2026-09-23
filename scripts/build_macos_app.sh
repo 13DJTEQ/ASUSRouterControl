@@ -117,8 +117,8 @@ SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/A
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
 export ASUSROUTERCONTROL_ENV_FILE="${HOME}/.asusroutercontrol.dev/.env"
 export DATA_DIR="${HOME}/.asusroutercontrol.dev"
-# Share Terminal/CLI Keychain entries with the DEV.app process.
-export KEYCHAIN_PATH="${HOME}/Library/Keychains/login.keychain-db"
+# Do not set KEYCHAIN_PATH — keyring ignores it (jaraco/keyring#623) and warns.
+# Login-keychain access uses ``security -A`` with explicit paths in credentials.py.
 export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin:${PATH:-}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
@@ -194,8 +194,6 @@ EOF
     <string>${home_dir}/.asusroutercontrol.dev/.env</string>
     <key>DATA_DIR</key>
     <string>${home_dir}/.asusroutercontrol.dev</string>
-    <key>KEYCHAIN_PATH</key>
-    <string>${home_dir}/Library/Keychains/login.keychain-db</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:${home_dir}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

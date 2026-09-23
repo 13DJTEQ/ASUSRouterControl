@@ -56,6 +56,9 @@ def mem_keyring(monkeypatch):
     creds_mod._BACKENDS["1password"] = creds_mod._OnePasswordBackend()
     creds_mod._BACKENDS["keychain"] = creds_mod._KeychainBackend()
     creds_mod._BACKENDS["bitwarden"] = creds_mod._BitwardenBackend()
+    creds_mod._set_bw_unlock_error(None)
+    creds_mod._clear_wrong_mp_cooldown()
+    creds_mod._bw_unlock_miss_logged = False
     return backend
 
 
@@ -104,6 +107,9 @@ def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
                 "keyring:universal-keychain-asusroutercontrol-prod-bw_master_password/"
                 "asusroutercontrol.prod.bw_master_password"
             ),
+            "master_password_quarantined_path": None,
+            "wrong_mp_cooldown_active": False,
+            "wrong_mp_cooldown_remaining_seconds": 0,
             "master_password_canonical": (
                 "universal-keychain-asusroutercontrol-prod-bw_master_password/"
                 "asusroutercontrol.prod.bw_master_password"
@@ -126,6 +132,49 @@ def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
     assert "status-mp" not in result.output
 
 
+def test_bw_master_status_wrong_mp_shows_repair(monkeypatch, mem_keyring):
+    assert creds_mod.store_bitwarden_master_password("bad-mp") is True
+
+    monkeypatch.setattr(
+        "asusroutercontrol.cli.bitwarden_unlock_status",
+        lambda *, attempt_unlock=False: {
+            "master_password_stored": True,
+            "master_password_matched_path": (
+                "keyring:universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "master_password_quarantined_path": (
+                "keyring:universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "wrong_mp_cooldown_active": True,
+            "wrong_mp_cooldown_remaining_seconds": 800,
+            "master_password_canonical": (
+                "universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "lookups_tried": 1,
+            "vault_status": "locked",
+            "last_unlock_error": (
+                "Keychain master password rejected by Bitwarden (wrong or corrupt). "
+                "Run: asusrouter credentials bw-master --force --set"
+            ),
+            "bw_session_present": False,
+            "keychain_path": None,
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["credentials", "bw-master", "--status"])
+    assert result.exit_code == 0, result.output
+    assert "Last unlock error:" in result.output
+    assert "rejected by Bitwarden" in result.output
+    assert "quarantined_path:" in result.output
+    assert "wrong_mp_cooldown: active" in result.output
+    assert "bw-master --force --set" in result.output
+    assert "not a BW outage" in result.output or "Decryption failed" in result.output
+
+
 def test_bw_master_status_missing(monkeypatch, mem_keyring):
     creds_mod.delete_bitwarden_master_password()
 
@@ -134,6 +183,9 @@ def test_bw_master_status_missing(monkeypatch, mem_keyring):
         lambda *, attempt_unlock=False: {
             "master_password_stored": False,
             "master_password_matched_path": None,
+            "master_password_quarantined_path": None,
+            "wrong_mp_cooldown_active": False,
+            "wrong_mp_cooldown_remaining_seconds": 0,
             "master_password_canonical": (
                 "universal-keychain-asusroutercontrol-prod-bw_master_password/"
                 "asusroutercontrol.prod.bw_master_password"

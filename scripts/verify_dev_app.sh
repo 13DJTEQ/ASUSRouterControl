@@ -244,7 +244,8 @@ if ! wait_for_dev_runtime "open launch"; then
   export ASUSROUTERCONTROL_RUNTIME_ENV=dev
   export ASUSROUTERCONTROL_ENV_FILE="${HOME}/.asusroutercontrol.dev/.env"
   export DATA_DIR="${HOME}/.asusroutercontrol.dev"
-  export KEYCHAIN_PATH="${HOME}/Library/Keychains/login.keychain-db"
+  # KEYCHAIN_PATH intentionally unset — keyring ignores it (#623); use security -A.
+  unset KEYCHAIN_PATH || true
   nohup "${DEV_LAUNCHER}" >"${DEV_LAUNCH_LOG}" 2>&1 &
   LAUNCHED_VIA="direct"
   if ! wait_for_dev_runtime "direct launcher"; then

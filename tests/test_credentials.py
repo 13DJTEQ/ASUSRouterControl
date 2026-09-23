@@ -115,6 +115,13 @@ def credential_stores(monkeypatch):
     monkeypatch.setattr(bw_backend, "store", _bw_store_secret)
     monkeypatch.setattr(bw_backend, "delete", _bw_delete_secret)
 
+    # Reset module-level unlock / wrong-MP cooldown between tests.
+    creds_mod._set_bw_unlock_error(None)
+    creds_mod._clear_wrong_mp_cooldown()
+    creds_mod._bw_unlock_miss_logged = False
+    creds_mod._last_bw_mp_matched_path = None
+    creds_mod._last_bw_mp_lookups_tried = []
+
     return {"keyring": backend, "op": op_store, "bw": bw_store}
 
 
@@ -1099,6 +1106,7 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
         assert creds.store_bitwarden_master_password("wrong-mp") is True
         creds._set_bw_unlock_error(None)
+        creds._clear_wrong_mp_cooldown()
 
         def fake_login_check(self):
             return "locked"
@@ -1110,7 +1118,136 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
         assert creds.ensure_bitwarden_unlocked() == "locked"
         err = creds.get_last_bitwarden_unlock_error() or ""
-        assert "wrong master password" in err.lower()
+        assert "wrong or corrupt" in err.lower() or "rejected by bitwarden" in err.lower()
+        assert "bw-master --force --set" in err
+        assert creds.wrong_mp_cooldown_active() is True
+
+    def test_decryption_failure_enters_cooldown_and_dedupes_log(
+        self, monkeypatch, mem_keyring, caplog
+    ):
+        import logging
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("stale-mp") is True
+        creds._clear_wrong_mp_cooldown()
+        creds._set_bw_unlock_error(None)
+        unlock_calls = {"n": 0}
+
+        def fake_login_check(self):
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            unlock_calls["n"] += 1
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "ERROR bitwarden_crypto::keys::master_key: "
+                    "error=The decryption operation failed"
+                ),
+            )
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+
+        with caplog.at_level(logging.WARNING):
+            assert creds.ensure_bitwarden_unlocked() == "locked"
+            assert creds.ensure_bitwarden_unlocked() == "locked"
+            assert creds.ensure_bitwarden_unlocked() == "locked"
+
+        assert unlock_calls["n"] == 1  # cooldown skips further bw unlock
+        err = creds.get_last_bitwarden_unlock_error() or ""
+        assert "Keychain master password rejected by Bitwarden" in err
+        assert "bw-master --force --set" in err
+        assert creds.get_bitwarden_master_password_quarantine()
+        warn_lines = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and (
+                "master password rejected" in r.getMessage().lower()
+                or "unlock via Keychain master password failed" in r.getMessage()
+            )
+        ]
+        assert len(warn_lines) == 1
+
+        info = creds.bitwarden_unlock_status(attempt_unlock=False)
+        assert info["wrong_mp_cooldown_active"] is True
+        assert info["master_password_quarantined_path"]
+        assert info["master_password_matched_path"]
+        assert "rejected by Bitwarden" in str(info["last_unlock_error"])
+
+        # --force --set path clears cooldown
+        assert creds.store_bitwarden_master_password("fresh-mp") is True
+        assert creds.wrong_mp_cooldown_active() is False
+        assert creds.get_bitwarden_master_password_quarantine() is None
+
+    def test_connect_proceeds_with_mirror_when_wrong_mp_unlock_fails(
+        self, monkeypatch, mem_keyring
+    ):
+        """Vault stays locked after wrong MP, but Keychain mirror still fills Connect."""
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setenv("ASUSROUTERCONTROL_ROUTER_USERNAME", "13Maschine")
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(
+            creds, "lookup_bitwarden_router_item", lambda host_hint=None: None
+        )
+        assert creds.store_bitwarden_master_password("wrong-mp") is True
+        assert creds.store_credential(
+            "router_password", "mirrored-secret", env="dev", backend="keychain"
+        )
+        creds._clear_wrong_mp_cooldown()
+
+        def fake_login_check(self):
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "ERROR bitwarden_crypto::keys::master_key: "
+                    "error=The decryption operation failed"
+                ),
+            )
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+        user, pw, source = creds.resolve_blank_connect_password(
+            host="router.asus.com",
+            username="admin",
+            password="",
+        )
+        assert user == "13Maschine"
+        assert pw == "mirrored-secret"
+        assert "store" in source
+        # Fail-fast only when mirror is also missing — present password is fine.
+        creds.assert_connect_password_ready(pw, host="router.asus.com")
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+            config_ssh_port=22,
+        )
+        assert defaults["credential_backend"] == "keychain"
+        assert defaults["password"] == "mirrored-secret"
+        assert defaults["bw_status"] == "locked"
+
+    def test_ensure_login_keychain_env_unsets_keychain_path(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("KEYCHAIN_PATH", "/tmp/fake.keychain-db")
+        creds._ensure_login_keychain_env()
+        assert "KEYCHAIN_PATH" not in os.environ
 
     def test_unlock_status_reports_fields(self, monkeypatch, mem_keyring):
         from asusroutercontrol import credentials as creds
@@ -1129,6 +1266,7 @@ class TestBitwardenMasterPasswordUnlock:
         assert info["vault_status"] == "locked"
         assert info["last_unlock_error"] == "probe error"
         assert info["bw_session_present"] is False
+        assert info["keychain_path"] is None
 
     def test_bw_run_passes_stdin_devnull(self, monkeypatch):
         from types import SimpleNamespace
@@ -1160,9 +1298,12 @@ class TestBitwardenMasterPasswordUnlock:
     def test_classify_bw_unlock_failure(self):
         from asusroutercontrol.credentials import _classify_bw_unlock_failure
 
-        assert "wrong master password" in _classify_bw_unlock_failure(
+        assert "rejected by bitwarden" in _classify_bw_unlock_failure(
             "Invalid master password."
         ).lower()
+        assert "bw-master --force --set" in _classify_bw_unlock_failure(
+            "ERROR bitwarden_crypto::keys::master_key: error=The decryption operation failed"
+        )
         assert "not logged in" in _classify_bw_unlock_failure("You are not logged in").lower()
 
     def test_is_login_blocked_error_detects_captcha(self):
