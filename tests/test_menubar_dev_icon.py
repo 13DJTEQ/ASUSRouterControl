@@ -34,9 +34,11 @@ def _install_pyobjc_stubs() -> None:
         "NSFont",
         "NSFontAttributeName",
         "NSImage",
+        "NSImageOnly",
         "NSImageRight",
         "NSMenu",
         "NSMenuItem",
+        "NSObject",
         "NSStatusBar",
         "NSTimer",
         "NSUnderlineStyleAttributeName",
@@ -44,6 +46,7 @@ def _install_pyobjc_stubs() -> None:
         "NSVariableStatusItemLength",
     ):
         setattr(appkit, name, type(name, (object,), {}))
+    appkit.NSImageOnly = 2
     appkit.NSObject = NSObject
     sys.modules["AppKit"] = appkit
 
@@ -120,3 +123,19 @@ def test_generate_dev_icon_script_uses_test_tube_glyph() -> None:
     src = Path("scripts/generate_dev_icon.py").read_text(encoding="utf-8")
     assert "🧪" in src
     assert "test-tube" in src.lower() or "test tube" in src.lower()
+
+
+def test_menubar_builds_template_glyph_helper(menubar_mod) -> None:
+    assert callable(menubar_mod._make_menubar_glyph_image)
+    assert "NSImageOnly" in Path("src/asusroutercontrol/menubar.py").read_text(
+        encoding="utf-8"
+    )
+    assert "statusItemWithLength_(22.0)" in Path(
+        "src/asusroutercontrol/menubar.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_dev_launcher_execs_venv_python() -> None:
+    src = Path("scripts/build_macos_app.sh").read_text(encoding="utf-8")
+    assert 'exec "\\${VENV_PY}" -m asusroutercontrol.menubar' in src
+    assert "checking venv imports" in src

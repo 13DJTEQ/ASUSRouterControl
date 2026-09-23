@@ -140,35 +140,26 @@ export SOUNDSHIELD_EXPORT_PATH="\${HOME}/.asusroutercontrol.dev/soundshield_netw
 _log "launch start bundle=\${ASUSROUTERCONTROL_APP_BUNDLE} env_file=\${ASUSROUTERCONTROL_ENV_FILE:-none}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
+# Use exec so Python *is* the .app main process (bash child processes often
+# fail to register a visible Sequoia status item).
 if [[ -x "\${VENV_PY}" ]]; then
   export PYTHONPATH="\${PROJECT_ROOT}/src:\${PYTHONPATH:-}"
-  _log "trying venv: \${VENV_PY}"
-  "\${VENV_PY}" -m asusroutercontrol.menubar >>"\${LAUNCH_LOG}" 2>&1
-  venv_exit=\$?
-  if [[ \${venv_exit} -eq 0 ]]; then
-    exit 0
+  _log "checking venv imports: \${VENV_PY}"
+  if "\${VENV_PY}" -c "import AppKit; import asusroutercontrol.menubar" >>"\${LAUNCH_LOG}" 2>&1; then
+    _log "exec venv menubar"
+    exec "\${VENV_PY}" -m asusroutercontrol.menubar >>"\${LAUNCH_LOG}" 2>&1
   fi
-  _log "venv exit=\${venv_exit}"
+  _log "venv import check failed"
 fi
 # Fallback to DEV-specific self-contained runtime built from current source.
 if [[ -x "\${DEV_RUNTIME_EXE}" ]]; then
-  _log "trying DEV runtime: \${DEV_RUNTIME_EXE}"
-  "\${DEV_RUNTIME_EXE}" >>"\${LAUNCH_LOG}" 2>&1
-  rt_exit=\$?
-  if [[ \${rt_exit} -eq 0 ]]; then
-    exit 0
-  fi
-  _log "DEV runtime exit=\${rt_exit}"
+  _log "exec DEV runtime: \${DEV_RUNTIME_EXE}"
+  exec "\${DEV_RUNTIME_EXE}" >>"\${LAUNCH_LOG}" 2>&1
 fi
 # Final fallback to shared dist runtime.
 if [[ -x "\${SELF_CONTAINED_EXE}" ]]; then
-  _log "trying dist runtime: \${SELF_CONTAINED_EXE}"
-  "\${SELF_CONTAINED_EXE}" >>"\${LAUNCH_LOG}" 2>&1
-  dist_exit=\$?
-  if [[ \${dist_exit} -eq 0 ]]; then
-    exit 0
-  fi
-  _log "dist runtime exit=\${dist_exit}"
+  _log "exec dist runtime: \${SELF_CONTAINED_EXE}"
+  exec "\${SELF_CONTAINED_EXE}" >>"\${LAUNCH_LOG}" 2>&1
 fi
 
 _fail_alert "No usable runtime found (see ~/.asusroutercontrol.dev/launcher.log). Run make setup then make build-dev-app in the project folder."

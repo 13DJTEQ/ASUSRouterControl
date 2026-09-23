@@ -29,7 +29,7 @@ from AppKit import (
     NSFont,
     NSFontAttributeName,
     NSImage,
-    NSImageRight,
+    NSImageOnly,
     NSMenu,
     NSMenuItem,
     NSObject,
@@ -37,7 +37,6 @@ from AppKit import (
     NSTimer,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
-    NSVariableStatusItemLength,
 )
 from PyObjCTools import AppHelper
 
@@ -94,6 +93,37 @@ def _make_spinner_image(frame_idx: int) -> NSImage:
         NSBezierPath.bezierPathWithOvalInRect_(
             ((dx - r, dy - r), (r * 2, r * 2))
         ).fill()
+    img.unlockFocus()
+    img.setTemplate_(True)
+    return img
+
+
+def _make_menubar_glyph_image(runtime_env: str) -> NSImage:
+    """Template menubar glyph — images render on Sequoia; emoji titles often do not.
+
+    DEV: test-tube silhouette. PROD: filled signal/beacon disc.
+    """
+    size = _SPINNER_IMG_SIZE
+    img = NSImage.alloc().initWithSize_((size, size))
+    img.lockFocus()
+    NSColor.blackColor().set()
+    if runtime_env != "prod":
+        # Test tube: neck + rounded body
+        neck = NSBezierPath.bezierPathWithRect_(((6.5, 9.0), (3.0, 5.5)))
+        neck.fill()
+        body = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((4.5, 2.0), (7.0, 8.0)), 2.0, 2.0
+        )
+        body.fill()
+        # Liquid level mark
+        NSColor.colorWithWhite_alpha_(0.0, 0.35).set()
+        NSBezierPath.bezierPathWithRect_(((5.2, 3.2), (5.6, 2.5))).fill()
+    else:
+        # Beacon: outer ring + solid core
+        ring = NSBezierPath.bezierPathWithOvalInRect_(((2.0, 2.0), (12.0, 12.0)))
+        ring.setLineWidth_(1.6)
+        ring.stroke()
+        NSBezierPath.bezierPathWithOvalInRect_(((5.5, 5.5), (5.0, 5.0))).fill()
     img.unlockFocus()
     img.setTemplate_(True)
     return img
@@ -331,10 +361,27 @@ class AppDelegate(NSObject):
         self._spinner_frame = 0
 
         self.statusbar = NSStatusBar.systemStatusBar()
-        self.statusitem = self.statusbar.statusItemWithLength_(NSVariableStatusItemLength)
+        # Fixed width so a template image always reserves menu-bar space.
+        # Emoji-only NSVariableStatusItemLength titles often collapse to
+        # zero width under Sequoia when the process is Python-hosted.
+        self.statusitem = self.statusbar.statusItemWithLength_(22.0)
         if hasattr(self.statusitem, "setVisible_"):
             self.statusitem.setVisible_(True)
+        self._glyph_image = _make_menubar_glyph_image(runtime_env)
         self._set_status_icon("Starting")
+        btn = self.statusitem.button()
+        visible = None
+        try:
+            if hasattr(self.statusitem, "isVisible"):
+                visible = bool(self.statusitem.isVisible())
+        except Exception:
+            visible = None
+        log.info(
+            "status item ready visible=%s button=%s image=%s",
+            visible,
+            btn is not None,
+            btn.image() is not None if btn is not None else None,
+        )
 
         self._build_menu()
 
@@ -353,9 +400,16 @@ class AppDelegate(NSObject):
 
     def _set_status_icon(self, state: str) -> None:
         btn = self.statusitem.button()
-        btn.setImage_(None)
-        btn.setImagePosition_(NSImageRight)
-        btn.setTitle_(self._icon_prefix)
+        if btn is None:
+            log.error("status item button is None — menu bar icon cannot appear")
+            return
+        glyph = getattr(self, "_glyph_image", None) or _make_menubar_glyph_image(
+            getattr(self, "_runtime_env", "dev")
+        )
+        btn.setImage_(glyph)
+        btn.setImagePosition_(NSImageOnly)
+        # Keep a non-empty accessibility title; do not rely on emoji for visibility.
+        btn.setTitle_("")
         env_label = "DEV" if self._runtime_env != "prod" else "PROD"
         btn.setToolTip_(f"ASUSRouterControl {env_label} — {state}")
 
@@ -1118,11 +1172,15 @@ class AppDelegate(NSObject):
     def _start_spinner(self):
         """Start the menubar icon spinner animation on the main thread."""
         self._spinner_frame = 0
-        self.statusitem.button().setTitle_(self._icon_prefix)
+        btn = self.statusitem.button()
+        if btn is not None:
+            btn.setTitle_("")
+            btn.setImagePosition_(NSImageOnly)
         env_label = "DEV" if self._runtime_env != "prod" else "PROD"
-        self.statusitem.button().setToolTip_(
-            f"ASUSRouterControl {env_label} — Running speed test"
-        )
+        if btn is not None:
+            btn.setToolTip_(
+                f"ASUSRouterControl {env_label} — Running speed test"
+            )
         self._spinner_timer = (
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 _SPINNER_INTERVAL, self, "tickSpinner:", None, True
@@ -1141,8 +1199,10 @@ class AppDelegate(NSObject):
         """Advance one animation frame — called by NSTimer on the main thread."""
         img = _make_spinner_image(self._spinner_frame % _SPINNER_N_DOTS)
         btn = self.statusitem.button()
+        if btn is None:
+            return
         btn.setImage_(img)
-        btn.setImagePosition_(NSImageRight)
+        btn.setImagePosition_(NSImageOnly)
         self._spinner_frame += 1
 
     @objc.typedSelector(b"v@:@")
