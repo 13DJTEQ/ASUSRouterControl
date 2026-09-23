@@ -210,11 +210,17 @@ def test_bw_master_status_wrong_mp_shows_status_not_force_set(monkeypatch, mem_k
                 "asusroutercontrol.prod.bw_master_password"
             ),
             "lookups_tried": 1,
+            "shared_projects": ["grok", "shared"],
+            "shared_services_searched": [
+                "universal-keychain-grok-prod-bw_master_password",
+                "universal-keychain-shared-prod-bw_master_password",
+            ],
             "vault_status": "locked",
             "last_unlock_error": (
                 "Keychain master password rejected by Bitwarden (wrong or corrupt). "
-                "Tried available Keychain candidates automatically; vault remains locked. "
-                "Check: asusrouter credentials bw-master --status"
+                "The asusroutercontrol Keychain item appears wrong/corrupt; also searched "
+                "shared/Grok universal-keychain-* candidates automatically. "
+                "Vault remains locked. Check: asusrouter credentials bw-master --status"
             ),
             "bw_session_present": False,
             "keychain_path": None,
@@ -229,13 +235,13 @@ def test_bw_master_status_wrong_mp_shows_status_not_force_set(monkeypatch, mem_k
     assert "rejected by Bitwarden" in result.output
     assert "quarantined_path:" in result.output
     assert "wrong_mp_cooldown: active" in result.output
-    assert "tried other Keychain candidates" in result.output.lower() or (
-        "Other Keychain candidates were tried" in result.output
-    )
-    # --force --set is dim/rare repair only, not the primary Repair: line.
+    assert "shared_projects_searched:" in result.output
+    assert "grok" in result.output
+    assert "import-from-keychain" in result.output
+    # --force --set is dim/rare typing repair only, not the primary path.
     assert "[yellow]Repair:[/yellow]" not in result.output
     assert "not a BW outage" in result.output or "Decryption failed" in result.output
-    assert "Rare repair" in result.output
+    assert "Rare typing repair" in result.output
     assert "bw-master --force --set" in result.output
 
 
@@ -255,6 +261,10 @@ def test_bw_master_status_missing(monkeypatch, mem_keyring):
                 "asusroutercontrol.prod.bw_master_password"
             ),
             "lookups_tried": 12,
+            "shared_projects": ["grok", "shared"],
+            "shared_services_searched": [
+                "universal-keychain-grok-prod-bw_master_password",
+            ],
             "vault_status": "locked",
             "last_unlock_error": "no master password",
             "bw_session_present": False,
@@ -267,4 +277,51 @@ def test_bw_master_status_missing(monkeypatch, mem_keyring):
     assert result.exit_code == 0, result.output
     assert "master_password_stored: false" in result.output
     assert "matched_path: (none)" in result.output
-    assert "bw-master --set" in result.output
+    assert "import-from-keychain" in result.output
+
+
+def test_bw_master_import_from_keychain_success(monkeypatch, mem_keyring):
+    monkeypatch.setattr(
+        "asusroutercontrol.cli.import_bitwarden_master_password_from_keychain",
+        lambda: {
+            "ok": True,
+            "source_path": (
+                "keyring:universal-keychain-grok-prod-bw_master_password/"
+                "grok.prod.bw_master_password"
+            ),
+            "canonical_path": (
+                "universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "vault_status": "unlocked",
+            "error": None,
+            "fingerprint": "len=12",
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["credentials", "bw-master", "--import-from-keychain"])
+    assert result.exit_code == 0, result.output
+    assert "Copied proven-good" in result.output
+    assert "universal-keychain-grok-prod-bw_master_password" in result.output
+    assert "fingerprint: len=12" in result.output
+
+
+def test_bw_master_import_from_keychain_failure(monkeypatch, mem_keyring):
+    monkeypatch.setattr(
+        "asusroutercontrol.cli.import_bitwarden_master_password_from_keychain",
+        lambda: {
+            "ok": False,
+            "source_path": None,
+            "canonical_path": (
+                "universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "vault_status": "locked",
+            "error": "No working Keychain master password found",
+            "fingerprint": None,
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["credentials", "bw-master", "--import-from-keychain"])
+    assert result.exit_code == 1
+    assert "Import failed" in result.output

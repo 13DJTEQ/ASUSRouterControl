@@ -331,6 +331,27 @@ _BW_MASTER_PASSWORD_FALLBACK_KEYS = (
     "bw-master-password",
 )
 _BW_MASTER_PASSWORD_FALLBACK_ENVS = ("prod", "shared", "dev", "test")
+# Cross-app / shared universal-keychain project names used by Grok Bots,
+# Cursor/cloud agents, and other tools that share the same Bitwarden vault MP
+# under a different Keychain service prefix (not asusroutercontrol-*).
+# Keep this list short — each entry expands into Keychain lookups.
+_BW_MASTER_PASSWORD_SHARED_PROJECTS = (
+    "shared",
+    "grok",
+    "grokbots",
+    "grok-bots",
+    "xai",
+    "cursor",
+    "hermes",
+    "agent",
+)
+# Lean key/env matrix for cross-app scan (full matrix stays for asusroutercontrol).
+_BW_MASTER_PASSWORD_SHARED_KEYS = (
+    "bw_master_password",
+    "bitwarden_master_password",
+    "master_password",
+)
+_BW_MASTER_PASSWORD_SHARED_ENVS = ("prod", "shared", "dev")
 # Pre-universal-keychain or ad-hoc Keychain locations (service, account).
 _BW_MASTER_PASSWORD_LEGACY_LOCATIONS: tuple[tuple[str, str], ...] = (
     (f"{_LEGACY_SERVICE}.bw_master_password", "default"),
@@ -344,9 +365,27 @@ _BW_MASTER_PASSWORD_LEGACY_LOCATIONS: tuple[tuple[str, str], ...] = (
     ("Bitwarden", "master_password"),
     ("bw", "master_password"),
     ("bitwarden-cli", "master_password"),
+    # Common Grok / agent ad-hoc Keychain labels (service, account).
+    ("Grok", "bw_master_password"),
+    ("Grok", "master_password"),
+    ("Grok Bots", "bw_master_password"),
+    ("Grok Bots", "master_password"),
+    ("grok", "bw_master_password"),
+    ("grok", "master_password"),
+    ("grokbots", "bw_master_password"),
+    ("Cursor", "bw_master_password"),
+    ("cursor", "bw_master_password"),
+    ("Hermes", "bw_master_password"),
+    ("hermes", "bw_master_password"),
 )
 _BW_PASSWORD_ENV = "BW_PASSWORD"
 _BW_SESSION_TOKEN_RE = re.compile(r'BW_SESSION="?([^"\s]+)"?')
+# Env vars that may hold the real MP when Grok/agents inject it (never logged).
+_BW_MASTER_PASSWORD_ENV_CANDIDATES = (
+    "BW_PASSWORD",
+    "BITWARDEN_MASTER_PASSWORD",
+    "BW_MASTER_PASSWORD",
+)
 
 # Last auto-unlock failure reason (never includes the master password itself).
 _last_bw_unlock_error: str | None = None
@@ -354,27 +393,36 @@ _last_bw_unlock_error: str | None = None
 _last_bw_mp_matched_path: str | None = None
 # Last lookup attempt labels (no secrets) for diagnostics.
 _last_bw_mp_lookups_tried: list[str] = []
+# Shared / Grok-compatible service names included in the last discovery scan.
+_last_bw_mp_shared_services_searched: list[str] = []
 # Dedupe repeated "vault locked / no MP" INFO lines during one Connect dialog.
 _bw_unlock_miss_logged: bool = False
 
 # Wrong / corrupt Keychain master password: quarantine bad keys, try others,
-# then cooldown so Connect/status do not spam bw unlock with exhausted candidates.
+# then soft cooldown so Connect/status do not spam bw unlock with exhausted
+# candidates. Cooldown clears automatically when the discovery candidate set
+# expands (e.g. new Grok/shared pairs after a code update).
 _BW_WRONG_MP_COOLDOWN_SECONDS = 15 * 60
 _BW_WRONG_MP_OPERATOR_HINT = (
     "Keychain master password rejected by Bitwarden (wrong or corrupt). "
-    "Tried available Keychain candidates automatically; vault remains locked. "
-    "Check: asusrouter credentials bw-master --status"
+    "The asusroutercontrol Keychain item appears wrong/corrupt; also searched "
+    "shared/Grok universal-keychain-* candidates automatically. "
+    "Vault remains locked. Check: asusrouter credentials bw-master --status"
 )
 _BW_NO_MP_OPERATOR_HINT = (
     "Bitwarden vault locked and no master password in Keychain "
     "(or Keychain denied this app). "
-    "One-time setup: asusrouter credentials bw-master --set && "
+    "Copy a working Grok/shared Keychain MP into the canonical path via "
+    "asusrouter credentials bw-master --import-from-keychain "
+    "(or Keychain Access → universal-keychain-*-bw_master_password), then "
     "bash scripts/bw_sync_router_env.sh"
 )
 _bw_wrong_mp_cooldown_until: float = 0.0
 _bw_wrong_mp_quarantined_paths: set[str] = set()
 _bw_wrong_mp_quarantined_digests: set[str] = set()
 _bw_wrong_mp_fail_logged: bool = False
+# Signature of the last discovery candidate-pair set used for soft cooldown reset.
+_bw_mp_discovery_signature: str | None = None
 
 
 def _set_bw_unlock_error(message: str | None) -> None:
@@ -422,6 +470,113 @@ def _mp_digest(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _mp_fingerprint(secret: str) -> str:
+    """Safe diagnostic label for an MP candidate (length only — never the secret)."""
+    return f"len={len(secret)}"
+
+
+def _sanitize_bw_master_password_candidate(secret: str | None) -> str | None:
+    """Strip whitespace/quotes and reject values that are clearly not a master password.
+
+    Prevents storing or unlocking with BW_SESSION tokens, export lines, or
+    empty/corrupt Keychain payloads that previously landed in bw_master_password.
+    """
+    if not isinstance(secret, str):
+        return None
+    cleaned = secret.replace("\x00", "").strip().strip("\r\n\t ")
+    if not cleaned:
+        return None
+    if (
+        (cleaned.startswith('"') and cleaned.endswith('"'))
+        or (cleaned.startswith("'") and cleaned.endswith("'"))
+    ) and len(cleaned) >= 2:
+        cleaned = cleaned[1:-1].strip().strip("\r\n\t ")
+    if not cleaned:
+        return None
+    upper = cleaned.upper()
+    if "BW_SESSION=" in upper or upper.startswith("EXPORT BW_SESSION"):
+        log.info(
+            "Rejecting Keychain MP candidate that looks like a BW_SESSION export (%s)",
+            _mp_fingerprint(cleaned),
+        )
+        return None
+    # Accidental paste of `bw unlock` export line without the key prefix.
+    if cleaned.startswith("export ") and "SESSION" in upper:
+        log.info(
+            "Rejecting Keychain MP candidate that looks like a shell export (%s)",
+            _mp_fingerprint(cleaned),
+        )
+        return None
+    env_session = os.environ.get(_BW_SESSION_ENV, "").strip()
+    if env_session and cleaned == env_session:
+        log.info(
+            "Rejecting Keychain MP candidate equal to current BW_SESSION (%s)",
+            _mp_fingerprint(cleaned),
+        )
+        return None
+    return cleaned
+
+
+def _uk_service(project: str, key: str, env: str) -> str:
+    return f"universal-keychain-{project}-{env}-{key}"
+
+
+def _uk_account(project: str, key: str, env: str) -> str:
+    return f"{project}.{env}.{key}"
+
+
+def _shared_mp_services_catalog() -> list[str]:
+    """Human-readable shared/Grok service names we search (no secrets)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for project in _BW_MASTER_PASSWORD_SHARED_PROJECTS:
+        for env in _BW_MASTER_PASSWORD_SHARED_ENVS:
+            for key in _BW_MASTER_PASSWORD_SHARED_KEYS:
+                svc = _uk_service(project, key, env)
+                if svc not in seen:
+                    seen.add(svc)
+                    names.append(svc)
+    for service, _account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
+        if service.startswith(f"{_LEGACY_SERVICE}.") or service == PROJECT:
+            continue
+        if service.startswith(f"universal-keychain-{PROJECT}-"):
+            continue
+        if service not in seen:
+            seen.add(service)
+            names.append(service)
+    return names
+
+
+def _discovery_signature(pairs: list[tuple[str, str]]) -> str:
+    blob = "\n".join(f"{s}\t{a}" for s, a in pairs)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _maybe_reset_cooldown_for_expanded_discovery(pairs: list[tuple[str, str]]) -> None:
+    """When the candidate-pair set grows (new Grok/shared names), clear cooldown.
+
+    Keeps digest quarantine for known-bad secrets so we do not re-try the same
+    corrupt asusroutercontrol value, but allows newly discovered paths immediately.
+    """
+    global _bw_mp_discovery_signature, _bw_wrong_mp_cooldown_until  # noqa: PLW0603
+    global _bw_wrong_mp_fail_logged  # noqa: PLW0603
+    sig = _discovery_signature(pairs)
+    prev = _bw_mp_discovery_signature
+    _bw_mp_discovery_signature = sig
+    if prev is None or prev == sig:
+        return
+    if not wrong_mp_cooldown_active() and not _bw_wrong_mp_quarantined_paths:
+        return
+    _bw_wrong_mp_cooldown_until = 0.0
+    _bw_wrong_mp_fail_logged = False
+    # Drop path quarantines so new shared services are attempted; keep digests.
+    _bw_wrong_mp_quarantined_paths.clear()
+    log.info(
+        "Bitwarden MP discovery set expanded (signature changed) — "
+        "cleared wrong-MP path quarantine/cooldown so new Grok/shared keys can be tried"
+    )
+
+
 def _clear_wrong_mp_cooldown() -> None:
     global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
     _bw_wrong_mp_cooldown_until = 0.0
@@ -462,9 +617,18 @@ def _enter_wrong_mp_cooldown(*, matched_path: str | None = None) -> str:
     global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
     path = (matched_path or get_bitwarden_master_password_quarantine() or "").strip() or None
     _bw_wrong_mp_cooldown_until = time.monotonic() + _BW_WRONG_MP_COOLDOWN_SECONDS
-    message = _BW_WRONG_MP_OPERATOR_HINT
+    shared = _last_bw_mp_shared_services_searched or _shared_mp_services_catalog()
+    shared_preview = ", ".join(shared[:8])
+    if len(shared) > 8:
+        shared_preview = f"{shared_preview}, … (+{len(shared) - 8} more)"
+    message = (
+        f"{_BW_WRONG_MP_OPERATOR_HINT} "
+        f"Shared/Grok services searched: {shared_preview or '(none)'}"
+    )
     if path:
-        message = f"{message} (quarantined={path}; item kept — auto-tried other Keychain keys)"
+        message = (
+            f"{message} (quarantined={path}; item kept — auto-tried other Keychain keys)"
+        )
     _set_bw_unlock_error(message)
     if not _bw_wrong_mp_fail_logged:
         log.warning(
@@ -505,7 +669,7 @@ def _format_key_path(source: str, service: str, account: str | None) -> str:
 
 
 def _bw_master_password_candidate_pairs() -> list[tuple[str, str]]:
-    """Plausible (service, account) pairs used historically by this project / keyring."""
+    """Plausible (service, account) pairs: this project + shared/Grok conventions."""
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -527,11 +691,21 @@ def _bw_master_password_candidate_pairs() -> list[tuple[str, str]]:
             add(svc, "default")
             add(svc, try_key)
 
-    # 3) Legacy / ad-hoc pairs.
+    # 3) Cross-app / Grok Bots / shared universal-keychain projects (lean matrix).
+    # Exact account form only — avoid 3x account explosion per service.
+    for project in _BW_MASTER_PASSWORD_SHARED_PROJECTS:
+        if project == PROJECT:
+            continue
+        for try_env in _BW_MASTER_PASSWORD_SHARED_ENVS:
+            for try_key in _BW_MASTER_PASSWORD_SHARED_KEYS:
+                svc = _uk_service(project, try_key, try_env)
+                add(svc, _uk_account(project, try_key, try_env))
+
+    # 4) Legacy / ad-hoc pairs (incl. Grok/Cursor/Hermes labels).
     for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
         add(service, account)
 
-    # 4) Common accidental variants (bare key as service, macOS username as account).
+    # 5) Common accidental variants (bare key as service, macOS username as account).
     user = (os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
     for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
         add(try_key, "default")
@@ -540,8 +714,34 @@ def _bw_master_password_candidate_pairs() -> list[tuple[str, str]]:
         if user:
             add(_service_name(try_key, DEFAULT_ENV), user)
             add(PROJECT, user)
+    # Username-as-account only for the most common shared projects.
+    if user:
+        for project in ("grok", "grokbots", "shared", "cursor"):
+            add(
+                _uk_service(project, "bw_master_password", DEFAULT_ENV),
+                user,
+            )
 
     return pairs
+
+
+def _is_asusroutercontrol_mp_pair(service: str, account: str) -> bool:
+    """True for Keychain pairs owned by this app (safe to purge after --set).
+
+    Shared/Grok/cross-app universal-keychain items must never be deleted when
+    normalizing or storing the ASUSRouterControl canonical MP.
+    """
+    if service.startswith(f"universal-keychain-{PROJECT}-"):
+        return True
+    if service.startswith(f"{_LEGACY_SERVICE}."):
+        return True
+    if service == PROJECT:
+        return True
+    if service in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+        return True
+    if account.startswith(f"{PROJECT}."):
+        return True
+    return False
 
 
 def _keyring_get_password(service: str, account: str) -> str | None:
@@ -556,9 +756,7 @@ def _keyring_get_password(service: str, account: str) -> str | None:
     except Exception as exc:
         log.debug("keyring get_password %s/%s failed: %s", service, account or '""', exc)
         return None
-    if isinstance(found, str) and found.strip():
-        return found.strip()
-    return None
+    return _sanitize_bw_master_password_candidate(found if isinstance(found, str) else None)
 
 
 def _security_get_generic_password(service: str, account: str | None) -> str | None:
@@ -602,7 +800,7 @@ def _security_get_generic_password(service: str, account: str | None) -> str | N
             log.debug("security find-generic-password failed for %s: %s", service, exc)
             return None
         if result.returncode == 0:
-            secret = (result.stdout or "").strip()
+            secret = _sanitize_bw_master_password_candidate(result.stdout or "")
             if secret:
                 return secret
     return None
@@ -667,6 +865,9 @@ def _security_set_generic_password(service: str, account: str, password: str) ->
 
 def _normalize_bw_master_password(secret: str) -> bool:
     """Write the master password to the canonical Keychain location (security -A)."""
+    secret = _sanitize_bw_master_password_candidate(secret) or ""
+    if not secret:
+        return False
     backend = _BACKENDS.get("keychain")
     wrote = False
     if backend is not None:
@@ -676,9 +877,10 @@ def _normalize_bw_master_password(secret: str) -> bool:
     if _security_set_generic_password(svc, acct, secret):
         wrote = True
         log.info(
-            "Persisted Bitwarden master password to login keychain via security at %s/%s",
+            "Persisted Bitwarden master password to login keychain via security at %s/%s (%s)",
             svc,
             acct,
+            _mp_fingerprint(secret),
         )
     elif _security_cli_available() and not wrote:
         log.warning(
@@ -689,10 +891,10 @@ def _normalize_bw_master_password(secret: str) -> bool:
 
 
 def _purge_noncanonical_bw_master_password_entries() -> int:
-    """Delete historical/alt Keychain MP locations; keep the canonical pair only.
+    """Delete historical/alt *ASUSRouterControl* Keychain MP locations only.
 
-    After a successful ``--force --set`` (or ``--set``), discovery must not fall
-    back to a stale wrong password that previously failed crypto unlock.
+    Keeps the canonical pair. Never deletes shared/Grok/cross-app Keychain items
+    that other tools (Grok Bots, Cursor agents) may rely on.
     """
     canonical = (_bw_mp_canonical_service(), _bw_mp_canonical_account())
     keyring_ok = _ensure_secure_keyring_backend()
@@ -701,6 +903,8 @@ def _purge_noncanonical_bw_master_password_entries() -> int:
     removed = 0
     for service, account in _bw_master_password_candidate_pairs():
         if (service, account) == canonical:
+            continue
+        if not _is_asusroutercontrol_mp_pair(service, account):
             continue
         if keyring_ok:
             try:
@@ -738,7 +942,7 @@ def _purge_noncanonical_bw_master_password_entries() -> int:
     if removed:
         log.info(
             "Purged %d non-canonical Bitwarden master password Keychain entr%s "
-            "(canonical retained)",
+            "(canonical retained; shared/Grok items untouched)",
             removed,
             "y" if removed == 1 else "ies",
         )
@@ -750,11 +954,17 @@ def store_bitwarden_master_password(password: str) -> bool:
 
     Always writes the canonical universal-keychain prod path via ``security -A``
     (required on macOS so DEV.app can unlock). Keyring is optional secondary.
-    Clears wrong-MP quarantine and removes non-canonical alt Keychain entries so
-    discovery cannot fall back to a stale wrong password.
+    Clears wrong-MP quarantine and removes non-canonical *asusroutercontrol* alt
+    Keychain entries so discovery cannot fall back to a stale wrong password.
+    Shared/Grok Keychain items are never deleted.
+    Rejects BW_SESSION tokens and other non-MP payloads.
     """
-    secret = (password or "").strip()
+    secret = _sanitize_bw_master_password_candidate(password)
     if not secret:
+        log.error(
+            "Refusing to store Bitwarden master password: empty or looks like "
+            "BW_SESSION / export (not a master password)"
+        )
         return False
     _ensure_login_keychain_env()
     backend = _BACKENDS.get("keychain")
@@ -790,11 +1000,12 @@ def store_bitwarden_master_password(password: str) -> bool:
             log.debug("Non-canonical BW MP purge skipped: %s", exc)
         log.info(
             "Stored Bitwarden master password at canonical %s/%s "
-            "(backend=%s security=%s)",
+            "(backend=%s security=%s %s)",
             _bw_mp_canonical_service(),
             _bw_mp_canonical_account(),
             wrote_backend,
             wrote_security,
+            _mp_fingerprint(secret),
         )
         return True
     return False
@@ -817,8 +1028,9 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
     """Scan Keychain for all MP hits (secret, matched_path), first-seen order.
 
     Does not normalize or mutate Keychain. Dedupes identical secrets.
+    Also considers process env vars used by Grok/agents (BW_PASSWORD, etc.).
     """
-    global _last_bw_mp_lookups_tried  # noqa: PLW0603
+    global _last_bw_mp_lookups_tried, _last_bw_mp_shared_services_searched  # noqa: PLW0603
 
     _ensure_login_keychain_env()
     keyring_ok = _ensure_secure_keyring_backend()
@@ -827,18 +1039,30 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
     hits: list[tuple[str, str]] = []
     seen_digests: set[str] = set()
     pairs = _bw_master_password_candidate_pairs()
+    _maybe_reset_cooldown_for_expanded_discovery(pairs)
+    _last_bw_mp_shared_services_searched = _shared_mp_services_catalog()
     log.info(
-        "Bitwarden master password Keychain lookup starting (%d candidate pairs, keyring=%s)",
+        "Bitwarden master password Keychain lookup starting "
+        "(%d candidate pairs, keyring=%s, shared_projects=%d)",
         len(pairs),
         "ok" if keyring_ok else "unavailable",
+        len(_BW_MASTER_PASSWORD_SHARED_PROJECTS),
     )
 
     def _accept(secret: str, path: str) -> None:
-        digest = _mp_digest(secret)
+        cleaned = _sanitize_bw_master_password_candidate(secret)
+        if not cleaned:
+            return
+        digest = _mp_digest(cleaned)
         if digest in seen_digests:
             return
         seen_digests.add(digest)
-        hits.append((secret, path))
+        hits.append((cleaned, path))
+        log.info(
+            "Bitwarden master password candidate accepted from %s (%s)",
+            path,
+            _mp_fingerprint(cleaned),
+        )
 
     for service, account in pairs:
         acct_label = account if account != "" else '""'
@@ -849,10 +1073,12 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
             if secret:
                 path = _format_key_path("keyring", service, account)
                 log.info(
-                    "Bitwarden master password Keychain hit via keyring at %s/%s after %d tries",
+                    "Bitwarden master password Keychain hit via keyring at %s/%s "
+                    "after %d tries (%s)",
                     service,
                     acct_label,
                     len(tried),
+                    _mp_fingerprint(secret),
                 )
                 _accept(secret, path)
 
@@ -861,10 +1087,12 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
         if secret:
             path = _format_key_path("security", service, account)
             log.info(
-                "Bitwarden master password Keychain hit via security at %s/%s after %d tries",
+                "Bitwarden master password Keychain hit via security at %s/%s "
+                "after %d tries (%s)",
                 service,
                 acct_label,
                 len(tried),
+                _mp_fingerprint(secret),
             )
             _accept(secret, path)
 
@@ -873,14 +1101,38 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
         if service in seen_services:
             continue
         seen_services.add(service)
+        # Wildcard account scan is expensive; limit to this app's services.
+        if not (
+            service.startswith(f"universal-keychain-{PROJECT}-")
+            or service.startswith(f"{_LEGACY_SERVICE}.")
+            or service == PROJECT
+            or service in _BW_MASTER_PASSWORD_FALLBACK_KEYS
+        ):
+            continue
         tried.append(f"security:{service}/*")
         secret = _security_get_generic_password(service, None)
         if secret:
             path = _format_key_path("security", service, None)
             log.info(
-                "Bitwarden master password Keychain hit via security at %s/* after %d tries",
+                "Bitwarden master password Keychain hit via security at %s/* "
+                "after %d tries (%s)",
                 service,
                 len(tried),
+                _mp_fingerprint(secret),
+            )
+            _accept(secret, path)
+
+    # Env-injected MP (Grok bots / agents often set BW_PASSWORD).
+    for env_name in _BW_MASTER_PASSWORD_ENV_CANDIDATES:
+        tried.append(f"env:{env_name}")
+        raw = os.environ.get(env_name)
+        secret = _sanitize_bw_master_password_candidate(raw)
+        if secret:
+            path = f"env:{env_name}"
+            log.info(
+                "Bitwarden master password hit via env %s (%s)",
+                env_name,
+                _mp_fingerprint(secret),
             )
             _accept(secret, path)
 
@@ -888,9 +1140,12 @@ def _collect_bitwarden_master_password_hits() -> list[tuple[str, str]]:
     if not hits:
         preview = "; ".join(tried[:24])
         more = f" (+{len(tried) - 24} more)" if len(tried) > 24 else ""
+        shared_preview = ", ".join(_last_bw_mp_shared_services_searched[:6])
         log.info(
-            "Bitwarden master password Keychain lookup miss after %d tries: %s%s",
+            "Bitwarden master password Keychain lookup miss after %d tries "
+            "(shared/Grok services include: %s): %s%s",
             len(tried),
+            shared_preview or "(none)",
             preview,
             more,
         )
@@ -990,7 +1245,10 @@ def _normalize_after_successful_unlock(secret: str, matched: str | None) -> None
 
 
 def delete_bitwarden_master_password() -> bool:
-    """Remove the Bitwarden master password from macOS Keychain (canonical + fallbacks)."""
+    """Remove the Bitwarden master password from macOS Keychain (canonical + ASUS alts).
+
+    Never deletes shared/Grok/cross-app Keychain items.
+    """
     global _last_bw_mp_matched_path  # noqa: PLW0603
     backend = _BACKENDS.get("keychain")
     if backend is None:
@@ -999,7 +1257,11 @@ def delete_bitwarden_master_password() -> bool:
     keyring_ok = _ensure_secure_keyring_backend()
     removed = False
     security = _security_bin()
-    pairs = _bw_master_password_candidate_pairs()
+    pairs = [
+        pair
+        for pair in _bw_master_password_candidate_pairs()
+        if _is_asusroutercontrol_mp_pair(pair[0], pair[1])
+    ]
     if keyring_ok:
         for service, account in pairs:
             try:
@@ -1027,7 +1289,6 @@ def delete_bitwarden_master_password() -> bool:
                 if result.returncode == 0:
                     removed = True
     if removed:
-        global _last_bw_mp_matched_path  # noqa: PLW0603
         _last_bw_mp_matched_path = None
         _clear_wrong_mp_cooldown()
     return removed
@@ -1074,12 +1335,19 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
             f"{_bw_mp_canonical_service()}/{_bw_mp_canonical_account()}"
         ),
         "lookups_tried": len(_last_bw_mp_lookups_tried),
+        "shared_services_searched": list(
+            _last_bw_mp_shared_services_searched or _shared_mp_services_catalog()
+        ),
+        "shared_projects": list(_BW_MASTER_PASSWORD_SHARED_PROJECTS),
         "vault_status": vault,
         "last_unlock_error": get_last_bitwarden_unlock_error(),
         "bw_session_present": bool(os.environ.get(_BW_SESSION_ENV, "").strip()),
         # KEYCHAIN_PATH is intentionally unused (keyring#623); security -A only.
         "keychain_path": None,
         "master_password_usable": secret is not None,
+        "master_password_fingerprint": (
+            _mp_fingerprint(secret) if secret else None
+        ),
     }
 
 
@@ -1238,6 +1506,14 @@ def ensure_bitwarden_unlocked() -> str:
     for master, path in candidates:
         last_path = path
         _last_bw_mp_matched_path = path
+        master = _sanitize_bw_master_password_candidate(master)
+        if not master:
+            continue
+        log.info(
+            "Attempting Bitwarden unlock with Keychain MP from %s (%s)",
+            path,
+            _mp_fingerprint(master),
+        )
         result = _bw_run(
             ["unlock", "--passwordenv", _BW_PASSWORD_ENV, "--raw"],
             extra_env={_BW_PASSWORD_ENV: master},
@@ -1253,8 +1529,9 @@ def ensure_bitwarden_unlocked() -> str:
             ):
                 _quarantine_wrong_mp(matched_path=path, secret=master)
                 log.info(
-                    "Keychain MP at %s rejected by Bitwarden; trying other candidates",
+                    "Keychain MP at %s rejected by Bitwarden (%s); trying other candidates",
                     path,
+                    _mp_fingerprint(master),
                 )
                 continue
             _set_bw_unlock_error(reason)
@@ -1276,8 +1553,9 @@ def ensure_bitwarden_unlocked() -> str:
             _clear_wrong_mp_cooldown()
             _normalize_after_successful_unlock(master, path)
             log.info(
-                "Bitwarden vault unlocked via Keychain master password (%s)",
+                "Bitwarden vault unlocked via Keychain master password (%s, %s)",
                 path,
+                _mp_fingerprint(master),
             )
             return state
         _set_bw_unlock_error(
@@ -1288,6 +1566,89 @@ def ensure_bitwarden_unlocked() -> str:
     # Every candidate failed crypto unlock.
     _enter_wrong_mp_cooldown(matched_path=last_path)
     return "locked"
+
+
+def import_bitwarden_master_password_from_keychain() -> dict[str, str | bool | None]:
+    """Copy a proven-good shared/Grok Keychain MP into the canonical path.
+
+    Non-interactive: searches all candidates (including shared projects), tries
+    ``bw unlock``, and on success writes the winning secret to the ASUSRouterControl
+    canonical Keychain item. Never prompts for the master password.
+    """
+    result: dict[str, str | bool | None] = {
+        "ok": False,
+        "source_path": None,
+        "canonical_path": (
+            f"{_bw_mp_canonical_service()}/{_bw_mp_canonical_account()}"
+        ),
+        "vault_status": None,
+        "error": None,
+        "fingerprint": None,
+    }
+    # Clear path quarantine so shared hits newly in the discovery set are tried.
+    _bw_wrong_mp_quarantined_paths.clear()
+    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
+    _bw_wrong_mp_cooldown_until = 0.0
+    _bw_wrong_mp_fail_logged = False
+
+    state = ensure_bitwarden_unlocked()
+    result["vault_status"] = state
+    matched = get_last_bitwarden_master_password_match()
+    result["source_path"] = matched
+    if state != "unlocked":
+        result["error"] = (
+            get_last_bitwarden_unlock_error()
+            or "No working Keychain master password found among searched services"
+        )
+        shared = _last_bw_mp_shared_services_searched or _shared_mp_services_catalog()
+        preview = ", ".join(shared[:10])
+        if len(shared) > 10:
+            preview = f"{preview}, … (+{len(shared) - 10} more)"
+        result["error"] = (
+            f"{result['error']}. Shared/Grok services searched: {preview}. "
+            "In Keychain Access, find a working item used by Grok Bots "
+            "(service like universal-keychain-grok-*-bw_master_password or "
+            "universal-keychain-shared-*-bw_master_password) and re-run "
+            "asusrouter credentials bw-master --import-from-keychain"
+        )
+        return result
+
+    secret = get_bitwarden_master_password()
+    if not secret:
+        # Vault unlocked via existing BW_SESSION — still try to materialize
+        # from Keychain hits if any usable secret exists (including quarantined).
+        hits = _collect_bitwarden_master_password_hits()
+        secret = hits[0][0] if hits else None
+        matched = hits[0][1] if hits else matched
+        result["source_path"] = matched
+    if not secret:
+        result["error"] = (
+            "Vault unlocked but no Keychain MP candidate available to copy "
+            "(session-only unlock). Shared/Grok Keychain item still required "
+            "for future auto-unlock."
+        )
+        result["ok"] = False
+        return result
+
+    result["fingerprint"] = _mp_fingerprint(secret)
+    if not _normalize_bw_master_password(secret):
+        result["error"] = "Unlock succeeded but failed to write canonical Keychain path"
+        return result
+    global _last_bw_mp_matched_path  # noqa: PLW0603
+    _last_bw_mp_matched_path = _format_key_path(
+        "keyring",
+        _bw_mp_canonical_service(),
+        _bw_mp_canonical_account(),
+    )
+    result["ok"] = True
+    result["source_path"] = matched
+    log.info(
+        "Imported Bitwarden master password from %s → canonical %s (%s)",
+        matched,
+        result["canonical_path"],
+        result["fingerprint"],
+    )
+    return result
 
 
 def _bw_run(

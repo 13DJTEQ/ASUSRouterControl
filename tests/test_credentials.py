@@ -1575,3 +1575,155 @@ class TestBitwardenMasterPasswordFallbacks:
             assert creds.get_bitwarden_master_password() is None
         assert any("lookup miss" in r.message.lower() for r in caplog.records)
 
+    def test_sanitize_rejects_bw_session_and_strips_whitespace(self):
+        from asusroutercontrol import credentials as creds
+
+        assert creds._sanitize_bw_master_password_candidate("  good-mp\n") == "good-mp"
+        assert creds._sanitize_bw_master_password_candidate('"quoted-mp"') == "quoted-mp"
+        assert (
+            creds._sanitize_bw_master_password_candidate('export BW_SESSION="tok"') is None
+        )
+        assert creds._sanitize_bw_master_password_candidate("BW_SESSION=tok") is None
+        assert creds._mp_fingerprint("abcdef") == "len=6"
+
+    def test_store_rejects_bw_session_token(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password('export BW_SESSION="abc"') is False
+        assert creds.store_bitwarden_master_password("BW_SESSION=abc") is False
+        assert creds.get_bitwarden_master_password() is None
+
+    def test_discovery_finds_grok_shared_project(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        creds.delete_bitwarden_master_password()
+        grok_svc = creds._uk_service("grok", "bw_master_password", "prod")
+        grok_acct = creds._uk_account("grok", "bw_master_password", "prod")
+        mem_keyring.set_password(grok_svc, grok_acct, "grok-good-mp\n")
+        assert creds.get_bitwarden_master_password() == "grok-good-mp"
+        matched = creds.get_last_bitwarden_master_password_match() or ""
+        assert "universal-keychain-grok-prod-bw_master_password" in matched
+        pairs = creds._bw_master_password_candidate_pairs()
+        assert (grok_svc, grok_acct) in pairs
+        shared = creds._shared_mp_services_catalog()
+        assert any("grok" in s for s in shared)
+
+    def test_purge_preserves_grok_shared_keychain_items(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        grok_svc = creds._uk_service("grok", "bw_master_password", "prod")
+        grok_acct = creds._uk_account("grok", "bw_master_password", "prod")
+        mem_keyring.set_password(grok_svc, grok_acct, "grok-keep-me")
+        alt_svc = creds._service_name("bitwarden_master_password", "shared")
+        alt_acct = creds._account_name("bitwarden_master_password", "shared")
+        mem_keyring.set_password(alt_svc, alt_acct, "stale-asus-alt")
+
+        assert creds.store_bitwarden_master_password("canonical-good-mp") is True
+        # ASUSRouterControl alt purged; Grok shared item preserved.
+        assert mem_keyring.get_password(alt_svc, alt_acct) is None
+        assert mem_keyring.get_password(grok_svc, grok_acct) == "grok-keep-me"
+
+    def test_discovery_expansion_clears_cooldown_for_new_grok_key(
+        self, monkeypatch, mem_keyring
+    ):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("bad-canonical") is True
+        creds._clear_wrong_mp_cooldown()
+
+        def fake_login_check(self):
+            if os.environ.get("BW_SESSION") == "GROKSESSION":
+                return "unlocked"
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            pw = (extra_env or {}).get(creds._BW_PASSWORD_ENV, "")
+            if pw == "grok-good-mp":
+                return SimpleNamespace(returncode=0, stdout="GROKSESSION\n", stderr="")
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Invalid master password.",
+            )
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        monkeypatch.delenv("BW_SESSION", raising=False)
+
+        def _persist(token: str) -> None:
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds, "_persist_bw_session", _persist)
+
+        # First pass: only bad canonical → cooldown.
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+        assert creds.wrong_mp_cooldown_active() is True
+
+        # Simulate discovery expansion (new code with Grok pairs) by forcing
+        # signature change + adding a Grok Keychain hit.
+        creds._bw_mp_discovery_signature = "old-signature"
+        grok_svc = creds._uk_service("grok", "bw_master_password", "prod")
+        grok_acct = creds._uk_account("grok", "bw_master_password", "prod")
+        mem_keyring.set_password(grok_svc, grok_acct, "grok-good-mp")
+
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert os.environ.get("BW_SESSION") == "GROKSESSION"
+        assert creds.wrong_mp_cooldown_active() is False
+
+    def test_import_from_keychain_copies_grok_mp(self, monkeypatch, mem_keyring):
+        from types import SimpleNamespace
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        creds.delete_bitwarden_master_password()
+        grok_svc = creds._uk_service("grok", "bw_master_password", "prod")
+        grok_acct = creds._uk_account("grok", "bw_master_password", "prod")
+        mem_keyring.set_password(grok_svc, grok_acct, "  grok-import-mp\n")
+
+        def fake_login_check(self):
+            if os.environ.get("BW_SESSION") == "IMPSESSION":
+                return "unlocked"
+            return "locked"
+
+        def fake_bw_run(arguments, *, extra_env=None):
+            pw = (extra_env or {}).get(creds._BW_PASSWORD_ENV, "")
+            assert pw == "grok-import-mp"  # stripped
+            return SimpleNamespace(returncode=0, stdout="IMPSESSION\n", stderr="")
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
+        monkeypatch.setattr(creds, "_security_set_generic_password", lambda *a, **k: True)
+        monkeypatch.delenv("BW_SESSION", raising=False)
+
+        def _persist(token: str) -> None:
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds, "_persist_bw_session", _persist)
+
+        info = creds.import_bitwarden_master_password_from_keychain()
+        assert info["ok"] is True
+        assert info["fingerprint"] == "len=14"
+        assert "grok" in str(info["source_path"])
+        assert creds._BACKENDS["keychain"].get("bw_master_password", env="prod") == (
+            "grok-import-mp"
+        )
+        # Source Grok item left intact.
+        assert mem_keyring.get_password(grok_svc, grok_acct) == "  grok-import-mp\n"
+
+    def test_env_bw_password_candidate(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        creds.delete_bitwarden_master_password()
+        monkeypatch.setattr(creds, "_security_get_generic_password", lambda *a, **k: None)
+        monkeypatch.setenv("BW_PASSWORD", " env-injected-mp \n")
+        assert creds.get_bitwarden_master_password() == "env-injected-mp"
+        assert (creds.get_last_bitwarden_master_password_match() or "").startswith("env:")
+
