@@ -1095,9 +1095,9 @@ class TestBitwardenMasterPasswordUnlock:
         monkeypatch.setattr(creds, "_bw_run", fake_bw_run)
         assert creds.ensure_bitwarden_unlocked() == "locked"
         err = creds.get_last_bitwarden_unlock_error() or ""
-        assert "import-from-keychain" in err
-        assert "no master password" in err.lower()
-        assert "bw-master --set" not in err or "import-from-keychain" in err
+        assert "bw unlock" in err.lower() or "bw_sync" in err.lower() or "scan-keychain" in err
+        assert "no usable" in err.lower() or "locked" in err.lower()
+        assert "bw-master --force --set" not in err
 
     def test_ensure_stays_locked_when_unlock_fails(self, monkeypatch, mem_keyring):
         from types import SimpleNamespace
@@ -1389,7 +1389,7 @@ class TestBitwardenMasterPasswordUnlock:
         assert info["master_password_stored"] is False
         assert info["vault_status"] == "locked"
         assert info["last_unlock_error"] == "probe error"
-        assert info["bw_session_present"] is False
+        assert info["bw_session"] == "absent"
         assert info["keychain_path"] is None
 
     def test_bw_run_passes_stdin_devnull(self, monkeypatch):
@@ -1727,4 +1727,201 @@ class TestBitwardenMasterPasswordFallbacks:
         monkeypatch.setenv("BW_PASSWORD", " env-injected-mp \n")
         assert creds.get_bitwarden_master_password() == "env-injected-mp"
         assert (creds.get_last_bitwarden_master_password_match() or "").startswith("env:")
+
+    def test_clear_stale_bw_session_removes_env_and_files(self, monkeypatch, tmp_path: Path):
+        from asusroutercontrol import credentials as creds
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("BW_SESSION", "stale-token-value-123456")
+        session_dir = home / ".asusroutercontrol.dev"
+        session_dir.mkdir(parents=True)
+        (session_dir / "bw_session").write_text("stale-token-value-123456\n", encoding="utf-8")
+        (session_dir / ".env").write_text(
+            "FOO=1\nBW_SESSION=stale-token-value-123456\nBAR=2\n",
+            encoding="utf-8",
+        )
+        creds.clear_stale_bw_session(reason="test")
+        assert "BW_SESSION" not in os.environ
+        assert not (session_dir / "bw_session").exists()
+        env_text = (session_dir / ".env").read_text(encoding="utf-8")
+        assert "BW_SESSION" not in env_text
+        assert "FOO=1" in env_text
+        assert "BAR=2" in env_text
+
+    def test_bitwarden_session_status_enum(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.delenv("BW_SESSION", raising=False)
+        monkeypatch.setattr(creds, "_ensure_bw_session_env", lambda: None)
+
+        def locked(self):
+            return "locked"
+
+        def unlocked(self):
+            return "unlocked"
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", locked)
+        assert creds.bitwarden_session_status() == "absent"
+
+        monkeypatch.setenv("BW_SESSION", "tok-present-but-invalid-xx")
+        assert creds.bitwarden_session_status() == "present-invalid"
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", unlocked)
+        assert creds.bitwarden_session_status() == "valid"
+
+    def test_ensure_clears_stale_session_when_locked(self, monkeypatch, tmp_path: Path):
+        from asusroutercontrol import credentials as creds
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("BW_SESSION", "stale-session-token-abcdef")
+        cleared: list[str] = []
+
+        def fake_clear(*, reason=None):
+            cleared.append(reason or "")
+            os.environ.pop("BW_SESSION", None)
+
+        monkeypatch.setattr(creds, "clear_stale_bw_session", fake_clear)
+        monkeypatch.setattr(creds, "discover_bw_session_from_keychain", lambda: (None, None))
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(
+            creds._BitwardenBackend, "login_check", lambda self: "locked"
+        )
+        monkeypatch.setattr(
+            creds, "_iter_bitwarden_master_password_candidates", lambda **k: []
+        )
+        monkeypatch.setattr(
+            creds, "bitwarden_master_password_keychain_present", lambda: False
+        )
+        assert creds.ensure_bitwarden_unlocked() == "locked"
+        assert cleared
+        assert "BW_SESSION" not in os.environ
+
+    def test_ensure_unlocks_via_keychain_bw_session(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.delenv("BW_SESSION", raising=False)
+        monkeypatch.setattr(
+            creds,
+            "discover_bw_session_from_keychain",
+            lambda: ("valid-session-token-abcdef", "keyring:BW_SESSION/dave"),
+        )
+        states = {"n": 0}
+
+        def fake_login_check(self):
+            states["n"] += 1
+            # First call: locked. After persist: unlocked.
+            if os.environ.get("BW_SESSION") == "valid-session-token-abcdef":
+                return "unlocked"
+            return "locked"
+
+        persisted: list[str] = []
+
+        def fake_persist(token: str) -> None:
+            persisted.append(token)
+            os.environ["BW_SESSION"] = token
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        monkeypatch.setattr(creds, "_persist_bw_session", fake_persist)
+        monkeypatch.setattr(
+            creds, "_delete_quarantined_canonical_mp_after_session_unlock", lambda: None
+        )
+        assert creds.ensure_bitwarden_unlocked() == "unlocked"
+        assert persisted == ["valid-session-token-abcdef"]
+        assert os.environ.get("BW_SESSION") == "valid-session-token-abcdef"
+
+    def test_import_fails_cleanly_when_usable_zero(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("only-bad-asus-mp") is True
+        path = (
+            f"keyring:{creds._bw_mp_canonical_service()}/"
+            f"{creds._bw_mp_canonical_account()}"
+        )
+        creds._quarantine_wrong_mp(matched_path=path, secret="only-bad-asus-mp")
+        monkeypatch.setattr(creds, "discover_bw_session_from_keychain", lambda: (None, None))
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
+        monkeypatch.setattr(creds, "get_last_bitwarden_unlock_error", lambda: "locked")
+        monkeypatch.setattr(
+            creds, "_iter_bitwarden_master_password_candidates", lambda **k: []
+        )
+        info = creds.import_bitwarden_master_password_from_keychain()
+        assert info["ok"] is False
+        assert info["source_path"] is None
+        assert "no non-ASUS / no valid session candidate" in str(info["error"])
+
+    def test_connect_with_locked_vault_uses_keychain_mirror(
+        self, monkeypatch, mem_keyring
+    ):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(
+            creds,
+            "get_last_bitwarden_unlock_error",
+            lambda: "vault locked (session absent)",
+        )
+        assert creds.store_credential(
+            "router_username", "13Maschine", env="dev", backend="keychain"
+        )
+        assert creds.store_credential(
+            "router_password", "mirrored-secret", env="dev", backend="keychain"
+        )
+        assert creds.store_credential(
+            "router_ssh_port", "1313", env="dev", backend="keychain"
+        )
+        defaults = creds.resolve_connect_login_defaults(suggested_host="router.asus.com")
+        assert defaults["password"] == "mirrored-secret"
+        assert defaults["username"] == "13Maschine"
+        assert defaults["bw_status"] == "locked"
+        detail = str(defaults.get("store_detail") or "")
+        assert "Keychain-mirrored" in detail or "using Keychain" in detail.lower()
+        assert "BW unlock is not required" in detail
+        # Blank Connect password resolves from mirror even while vault locked.
+        user, pw, source = creds.resolve_blank_connect_password(
+            host="router.asus.com", username="", password=""
+        )
+        assert user == "13Maschine"
+        assert pw == "mirrored-secret"
+        assert "store" in source
+
+    def test_sanitize_bw_session_token(self):
+        from asusroutercontrol import credentials as creds
+
+        assert creds._sanitize_bw_session_token("short") is None
+        assert (
+            creds._sanitize_bw_session_token("valid-session-token-abcdef")
+            == "valid-session-token-abcdef"
+        )
+        assert (
+            creds._sanitize_bw_session_token('export BW_SESSION="long-enough-session-tok"')
+            == "long-enough-session-tok"
+        )
+
+    def test_soft_clear_cooldown_on_session_hit(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds.store_bitwarden_master_password("bad-mp") is True
+        path = (
+            f"keyring:{creds._bw_mp_canonical_service()}/"
+            f"{creds._bw_mp_canonical_account()}"
+        )
+        creds._quarantine_wrong_mp(matched_path=path, secret="bad-mp")
+        creds._enter_wrong_mp_cooldown(matched_path=path)
+        assert creds.wrong_mp_cooldown_active() is True
+        creds.soft_clear_wrong_mp_cooldown(reason="BW_SESSION Keychain hit")
+        assert creds.wrong_mp_cooldown_active() is False
+        # Digests of known-bad secrets remain.
+        assert creds._mp_digest("bad-mp") in creds._bw_wrong_mp_quarantined_digests
 

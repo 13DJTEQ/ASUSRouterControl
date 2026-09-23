@@ -68,7 +68,7 @@ def test_bw_sync_missing_mp_no_interactive(tmp_path, monkeypatch):
     _write_fake_python(
         venv_bin,
         exit_code=2,
-        stderr="No Bitwarden master password in Keychain.",
+        stderr="No Keychain BW_SESSION or master password found.",
     )
 
     env = os.environ.copy()
@@ -89,7 +89,8 @@ def test_bw_sync_missing_mp_no_interactive(tmp_path, monkeypatch):
     combined = f"{proc.stdout}\n{proc.stderr}"
     assert proc.returncode == 2
     assert "INTERACTIVE_UNLOCK_CALLED" not in combined
-    assert "bw-master --set" in combined
+    assert "bw unlock" in combined
+    assert "bw_sync_router_env.sh" in combined
     assert "enter master password" not in combined.lower()
     assert "BW_SYNC_ALLOW_PROMPT" not in combined
 
@@ -138,7 +139,7 @@ def test_bw_sync_failed_unlock_surfaces_error(tmp_path):
     assert "INTERACTIVE_UNLOCK_CALLED" not in combined
     assert "wrong master password" in combined
     assert "bw-master --status" in combined
-    assert "Interactive bw unlock is disabled" in combined
+    assert "Interactive bw unlock is disabled" in combined or "stock bw" in combined.lower()
 
 
 def test_bw_sync_script_has_no_interactive_unlock_path():

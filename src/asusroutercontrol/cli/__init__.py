@@ -29,6 +29,8 @@ from asusroutercontrol.credentials import (
     get_last_bitwarden_unlock_error,
     import_bitwarden_master_password_from_keychain,
     migrate_legacy_credentials,
+    scan_keychain_bw_labels,
+    soft_clear_wrong_mp_cooldown,
     store_bitwarden_master_password,
     store_credential,
     wrong_mp_cooldown_active,
@@ -851,15 +853,24 @@ def credentials_cleanup():
     "--status",
     "do_status",
     is_flag=True,
-    help="Show Keychain MP presence, vault status, and last unlock error.",
+    help="Show Keychain MP presence, vault status, and BW_SESSION enum.",
 )
 @click.option(
     "--import-from-keychain",
     "do_import",
     is_flag=True,
     help=(
-        "Non-interactive: unlock using a shared/Grok Keychain MP candidate, "
-        "then copy the proven-good secret into the canonical asusroutercontrol path."
+        "Non-interactive: try Keychain BW_SESSION, then MP candidates; "
+        "copy a proven-good MP into the canonical asusroutercontrol path."
+    ),
+)
+@click.option(
+    "--scan-keychain",
+    "do_scan",
+    is_flag=True,
+    help=(
+        "List Keychain dump labels (svce/acct/labl) matching BW_SESSION / "
+        "master-password patterns — secrets are never printed."
     ),
 )
 @click.option(
@@ -879,23 +890,46 @@ def credentials_bw_master(
     do_delete: bool,
     do_status: bool,
     do_import: bool,
+    do_scan: bool,
     do_force: bool,
     do_replace: bool,
 ):
-    """Manage Bitwarden master password in Keychain for automated unlock."""
-    flags = sum(bool(x) for x in (do_set, do_delete, do_status, do_import))
+    """Manage Bitwarden master password / session Keychain helpers."""
+    flags = sum(bool(x) for x in (do_set, do_delete, do_status, do_import, do_scan))
     if flags != 1:
         raise click.UsageError(
-            "Specify exactly one of --set, --delete, --status, or --import-from-keychain"
+            "Specify exactly one of --set, --delete, --status, "
+            "--import-from-keychain, or --scan-keychain"
         )
     if (do_force or do_replace) and not do_set:
         raise click.UsageError("--force/--replace only apply with --set")
+    if do_scan:
+        labels = scan_keychain_bw_labels()
+        if labels:
+            soft_clear_wrong_mp_cooldown(reason="scan-keychain found labels")
+        console.print(f"keychain_labels: {len(labels)}")
+        if not labels:
+            console.print(
+                "[dim]No matching Keychain labels "
+                "(BW_SESSION / bw_master / universal-keychain-*). "
+                "security dump-keychain may be unavailable off-macOS.[/dim]"
+            )
+            return
+        for entry in labels:
+            svce = entry.get("svce") or "(none)"
+            acct = entry.get("acct") or "(none)"
+            labl = entry.get("labl") or "(none)"
+            console.print(f"  svce={svce!r}  acct={acct!r}  labl={labl!r}")
+        console.print(
+            "[dim]Secrets omitted. Paste useful labels when debugging unlock.[/dim]"
+        )
+        return
     if do_status:
         info = bitwarden_unlock_status(attempt_unlock=True)
         stored = bool(info.get("master_password_stored"))
         state = str(info.get("vault_status") or "unknown")
         err = info.get("last_unlock_error")
-        session = bool(info.get("bw_session_present"))
+        session = str(info.get("bw_session") or "absent")
         matched = info.get("master_password_matched_path")
         quarantined = info.get("master_password_quarantined_path")
         cooldown = bool(info.get("wrong_mp_cooldown_active"))
@@ -946,7 +980,13 @@ def credentials_bw_master(
                 + suffix
             )
         console.print(f"Bitwarden vault: {state}")
-        console.print(f"BW_SESSION in env: {'yes' if session else 'no'}")
+        console.print(f"bw_session: {session}")
+        if info.get("bw_session_keychain_present"):
+            console.print(
+                f"bw_session_keychain: present ({info.get('bw_session_keychain_path')})"
+            )
+        else:
+            console.print("bw_session_keychain: absent")
         if err:
             console.print(f"Last unlock error: {err}")
         elif state == "unlocked":
@@ -960,63 +1000,64 @@ def credentials_bw_master(
             usable = info.get("master_password_usable_count")
             candidates = info.get("master_password_candidate_count")
             console.print(
-                "[yellow]Note:[/yellow] Decryption failed means the "
-                "asusroutercontrol Keychain value is not the real Bitwarden "
-                "master password — Grok/shared services were also searched. "
+                "[yellow]Note:[/yellow] Decryption failed means a Keychain MP "
+                "value is not the real Bitwarden master password. "
+                "Prefer Keychain BW_SESSION or Terminal bw unlock + bw_sync. "
                 "Not a BW outage."
             )
             if not stored or (isinstance(candidates, int) and candidates == 0):
                 console.print(
-                    "[yellow]Non-interactive repair:[/yellow] "
-                    "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan] "
-                    "(copies a working Grok/shared Keychain MP after unlock test)"
+                    "[yellow]Dave path:[/yellow] "
+                    "Terminal [cyan]bw unlock[/cyan] once, export BW_SESSION, "
+                    "then [cyan]bash scripts/bw_sync_router_env.sh[/cyan] "
+                    "(Connect uses the Keychain mirror; vault may stay locked)."
                 )
             elif isinstance(usable, int) and usable == 0:
                 console.print(
                     "[yellow]Non-interactive repair:[/yellow] "
-                    "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan]"
+                    "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan] "
+                    "or [cyan]--scan-keychain[/cyan] for labels"
                 )
                 console.print(
-                    "[dim]Keychain Access: look for universal-keychain-grok-*-"
-                    "bw_master_password or universal-keychain-shared-*-"
-                    "bw_master_password (items Grok Bots already use). "
-                    "Rare typing repair: asusrouter credentials bw-master "
+                    "[dim]Rare typing repair: asusrouter credentials bw-master "
                     "--force --set[/dim]"
                 )
         elif not stored and state == "locked":
             console.print(
-                "[yellow]Non-interactive repair:[/yellow] "
-                "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan]"
-            )
-            console.print(
-                "[dim]If Keychain Access shows a working Grok/shared item, look for "
-                "universal-keychain-grok-*-bw_master_password, "
-                "universal-keychain-shared-*-bw_master_password, or "
-                "universal-keychain-asusroutercontrol-*-bw_master_password "
-                "and re-run --import-from-keychain / --status after pulling this fix "
-                "— do not type the master password unless zero candidates exist.[/dim]"
+                "[yellow]Dave path:[/yellow] "
+                "Terminal [cyan]bw unlock[/cyan] once, export BW_SESSION, "
+                "then [cyan]bash scripts/bw_sync_router_env.sh[/cyan]. "
+                "Optional: [cyan]asusrouter credentials bw-master --scan-keychain[/cyan]"
             )
         return
     if do_import:
         console.print(
-            "[cyan]Importing Bitwarden master password from shared/Grok Keychain "
-            "candidates (non-interactive)…[/cyan]"
+            "[cyan]Importing unlock secret from Keychain "
+            "(BW_SESSION first, then MP candidates)…[/cyan]"
         )
         info = import_bitwarden_master_password_from_keychain()
         if info.get("source_path"):
             console.print(f"source_path: {info['source_path']}")
+        else:
+            console.print("source_path: (none)")
         if info.get("fingerprint"):
             console.print(f"fingerprint: {info['fingerprint']}")
         console.print(f"canonical_path: {info.get('canonical_path')}")
         console.print(f"Bitwarden vault: {info.get('vault_status')}")
         if info.get("ok"):
+            if str(info.get("fingerprint") or "").startswith("session"):
+                console.print(
+                    "[green]Vault unlocked via Keychain BW_SESSION "
+                    "(no master-password copy required).[/green]"
+                )
+            else:
+                console.print(
+                    "[green]Copied proven-good Keychain MP into canonical "
+                    "asusroutercontrol path.[/green]"
+                )
             console.print(
-                "[green]Copied proven-good Keychain MP into canonical "
-                "asusroutercontrol path.[/green]"
-            )
-            console.print(
-                "[dim]Shared/Grok source item was left intact. "
-                "Later unlocks use Keychain only (no typing).[/dim]"
+                "[dim]Later Connect can use the Keychain-mirrored router password "
+                "even if the vault locks again.[/dim]"
             )
             return
         err = info.get("error") or "import failed"
@@ -1043,13 +1084,15 @@ def credentials_bw_master(
                 "[yellow]Stored value was rejected by Bitwarden (wrong or corrupt).[/yellow]"
             )
             console.print(
-                "Auto-unlock already tried other Keychain candidates "
-                "(including shared/Grok). "
+                "Prefer Terminal [cyan]bw unlock[/cyan] + "
+                "[cyan]bash scripts/bw_sync_router_env.sh[/cyan] "
+                "(Keychain mirror for Connect). "
                 "Check: [cyan]asusrouter credentials bw-master --status[/cyan]"
             )
             console.print(
-                "[yellow]Preferred (no typing):[/yellow] "
-                "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan]"
+                "[yellow]Also try:[/yellow] "
+                "[cyan]asusrouter credentials bw-master --import-from-keychain[/cyan] "
+                "or [cyan]--scan-keychain[/cyan]"
             )
             console.print(
                 "[dim]Rare typing repair: "
@@ -1068,10 +1111,10 @@ def credentials_bw_master(
         "[cyan]Enter Bitwarden master password to store in Keychain (one-time).[/cyan]"
     )
     console.print(
-        "[dim]Prefer --import-from-keychain when Grok Bots already have a working "
-        "Keychain MP. Confirm once below only if no shared candidate exists. "
-        "After success, status / bw_sync / probe / DEV.app will not ask for the "
-        "master password.[/dim]"
+        "[dim]Prefer Terminal bw unlock + bw_sync (Keychain mirror) or "
+        "--import-from-keychain / Keychain BW_SESSION. Confirm once below only "
+        "if no session or shared candidate exists. After success, status / "
+        "bw_sync / probe / DEV.app will not ask for the master password.[/dim]"
     )
     password = click.prompt(
         "Bitwarden master password",

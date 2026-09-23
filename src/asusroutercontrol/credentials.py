@@ -319,6 +319,239 @@ def _ensure_bw_session_env() -> None:
             return
 
 
+def _strip_bw_session_from_env_file(path: Path) -> None:
+    """Remove BW_SESSION / BITWARDEN_SESSION lines from a .env file."""
+    try:
+        if not path.is_file():
+            return
+        lines: list[str] = []
+        changed = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key = line.split("=", 1)[0].strip() if "=" in line else ""
+            if key in {_BW_SESSION_ENV, "BITWARDEN_SESSION"}:
+                changed = True
+                continue
+            lines.append(line)
+        if changed:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            text = ("\n".join(lines) + "\n") if lines else ""
+            path.write_text(text, encoding="utf-8")
+    except OSError:
+        log.debug("Could not strip BW_SESSION from %s", path, exc_info=True)
+
+
+def clear_stale_bw_session(*, reason: str | None = None) -> None:
+    """Clear process env + persisted session files when BW_SESSION is locked/stale.
+
+    Called when ``bw status`` reports locked while a session token is set.
+    Does not delete Keychain BW_SESSION items (community tokens may still be valid
+    after a re-export); only clears our process/file caches.
+    """
+    had = bool(os.environ.get(_BW_SESSION_ENV, "").strip())
+    os.environ.pop(_BW_SESSION_ENV, None)
+    os.environ.pop("BITWARDEN_SESSION", None)
+    for session_path in _bw_session_file_candidates():
+        try:
+            if session_path.is_file():
+                session_path.unlink()
+        except OSError:
+            log.debug("Could not remove stale BW_SESSION file %s", session_path, exc_info=True)
+    for env_path in _bw_session_env_file_candidates():
+        _strip_bw_session_from_env_file(env_path.expanduser())
+    # Also clear common home .env targets used by _persist_bw_session.
+    for env_path in (
+        Path.home() / ".asusroutercontrol.dev" / ".env",
+        Path.home() / ".asusroutercontrol" / ".env",
+    ):
+        _strip_bw_session_from_env_file(env_path)
+    if had:
+        log.info(
+            "Cleared stale BW_SESSION from process env and persisted files%s",
+            f" ({reason})" if reason else "",
+        )
+
+
+# Community Keychain locations that may hold a live BW_SESSION token
+# (service name "BW_SESSION", account = $USER / common variants).
+_BW_SESSION_KEYCHAIN_SERVICES = (
+    "BW_SESSION",
+    "bw_session",
+    "Bitwarden Session",
+    "bitwarden-session",
+)
+
+
+def _bw_session_keychain_account_candidates() -> list[str]:
+    user = (os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
+    accounts: list[str] = []
+    for candidate in (
+        user,
+        "default",
+        "BW_SESSION",
+        "bw_session",
+        "session",
+        "",
+    ):
+        if candidate not in accounts:
+            accounts.append(candidate)
+    return accounts
+
+
+def _bw_session_keychain_candidate_pairs() -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for service in _BW_SESSION_KEYCHAIN_SERVICES:
+        for account in _bw_session_keychain_account_candidates():
+            key = (service, account)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+    return pairs
+
+
+def _sanitize_bw_session_token(raw: str | None) -> str | None:
+    """Accept a plausible BW_SESSION token; reject master-password-sized noise."""
+    if raw is None:
+        return None
+    token = str(raw).strip().strip("'").strip('"')
+    if not token:
+        return None
+    # Export-style line: extract the token.
+    match = _BW_SESSION_TOKEN_RE.search(token)
+    if match:
+        token = match.group(1).strip()
+    if not token or " " in token or "\n" in token:
+        return None
+    if token.lower().startswith("export "):
+        return None
+    # Reject obvious master-password phrases / too-short junk.
+    if len(token) < 16:
+        return None
+    return token
+
+
+def _read_bw_session_from_keychain_pair(service: str, account: str) -> str | None:
+    secret = _keyring_get_password(service, account)
+    cleaned = _sanitize_bw_session_token(secret)
+    if cleaned:
+        return cleaned
+    if account == "":
+        secret = _security_get_generic_password(service, None)
+    else:
+        secret = _security_get_generic_password(service, account)
+    return _sanitize_bw_session_token(secret)
+
+
+def discover_bw_session_from_keychain() -> tuple[str | None, str | None]:
+    """Find a community Keychain BW_SESSION token (service/account), if any.
+
+    Returns (token, matched_path). Does not validate unlock — callers must
+    export and check ``bw status``.
+    """
+    _ensure_login_keychain_env()
+    _ensure_secure_keyring_backend()
+    for service, account in _bw_session_keychain_candidate_pairs():
+        token = _read_bw_session_from_keychain_pair(service, account)
+        if not token:
+            continue
+        acct_label = account if account else "*"
+        path = _format_key_path(
+            "keyring" if account else "security",
+            service,
+            account if account else None,
+        )
+        log.info(
+            "Discovered Keychain BW_SESSION candidate at %s/%s (len=%d)",
+            service,
+            acct_label,
+            len(token),
+        )
+        return token, path
+    return None, None
+
+
+def scan_keychain_bw_labels() -> list[dict[str, str]]:
+    """List Keychain dump labels matching BW_SESSION / MP patterns (no secrets).
+
+    Uses ``security dump-keychain`` and returns svce/acct/labl metadata only so
+    an operator can paste labels without exposing passwords or session tokens.
+    """
+    security = _security_bin()
+    if not security or not Path("/usr/bin/security").is_file():
+        return []
+    blob_parts: list[str] = []
+    keychains = [p for p in _login_keychain_paths() if Path(p).is_file()]
+    targets = keychains or [None]
+    for keychain in targets:
+        cmd = [security, "dump-keychain"]
+        if keychain:
+            cmd.append(keychain)
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and result.stdout:
+            blob_parts.append(result.stdout)
+    if not blob_parts:
+        return []
+    blob = "\n".join(blob_parts)
+    # Match class=genp blocks with svce / acct / labl attributes.
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    current: dict[str, str] = {}
+
+    def _flush() -> None:
+        nonlocal current
+        if not current:
+            return
+        svce = current.get("svce", "")
+        acct = current.get("acct", "")
+        labl = current.get("labl", "")
+        hay = f"{svce} {acct} {labl}".lower()
+        interesting = any(
+            needle in hay
+            for needle in (
+                "bw_session",
+                "bw-session",
+                "bitwarden session",
+                "bw_master",
+                "master_password",
+                "master-password",
+                "universal-keychain-",
+            )
+        )
+        if interesting:
+            key = (svce, acct, labl)
+            if key not in seen:
+                seen.add(key)
+                entries.append({"svce": svce, "acct": acct, "labl": labl})
+        current = {}
+
+    attr_re = re.compile(
+        r'"(svce|acct|labl)"<blob>=(?:<NULL>|"((?:\\.|[^"\\])*)")'
+    )
+    for line in blob.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("keychain:") or stripped.startswith("class:"):
+            if current:
+                _flush()
+            continue
+        match = attr_re.search(stripped)
+        if match:
+            current[match.group(1)] = match.group(2) or ""
+    _flush()
+    return entries
+
+
 # Keychain-only secret used to unlock Bitwarden without an interactive prompt.
 # Never stored in the Bitwarden vault itself (chicken-and-egg).
 _BW_MASTER_PASSWORD_KEY = "bw_master_password"
@@ -405,17 +638,22 @@ _bw_unlock_miss_logged: bool = False
 _BW_WRONG_MP_COOLDOWN_SECONDS = 15 * 60
 _BW_WRONG_MP_OPERATOR_HINT = (
     "Keychain master password rejected by Bitwarden (wrong or corrupt). "
-    "The asusroutercontrol Keychain item appears wrong/corrupt; also searched "
-    "shared/Grok universal-keychain-* candidates automatically. "
-    "Vault remains locked. Check: asusrouter credentials bw-master --status"
+    "Vault remains locked. Prefer Keychain-mirrored router password for Connect "
+    "(Terminal: bw unlock once, export BW_SESSION, then "
+    "bash scripts/bw_sync_router_env.sh). "
+    "Check: asusrouter credentials bw-master --status"
 )
 _BW_NO_MP_OPERATOR_HINT = (
-    "Bitwarden vault locked and no master password in Keychain "
-    "(or Keychain denied this app). "
-    "Copy a working Grok/shared Keychain MP into the canonical path via "
-    "asusrouter credentials bw-master --import-from-keychain "
-    "(or Keychain Access → universal-keychain-*-bw_master_password), then "
-    "bash scripts/bw_sync_router_env.sh"
+    "Bitwarden vault locked and no usable Keychain master password or "
+    "BW_SESSION. For Connect: leave password blank if a Keychain mirror "
+    "already exists; otherwise in Terminal run: bw unlock (once), export "
+    "BW_SESSION, then bash scripts/bw_sync_router_env.sh. "
+    "Scan labels: asusrouter credentials bw-master --scan-keychain"
+)
+_BW_LOCKED_SYNC_HINT = (
+    "Vault locked. In Terminal: bw unlock once, then "
+    "export BW_SESSION=\"<token>\" and re-run bash scripts/bw_sync_router_env.sh "
+    "(no interactive prompt in this script)."
 )
 _bw_wrong_mp_cooldown_until: float = 0.0
 _bw_wrong_mp_quarantined_paths: set[str] = set()
@@ -553,7 +791,7 @@ def _discovery_signature(pairs: list[tuple[str, str]]) -> str:
 
 
 def _maybe_reset_cooldown_for_expanded_discovery(pairs: list[tuple[str, str]]) -> None:
-    """When the candidate-pair set grows (new Grok/shared names), clear cooldown.
+    """When the candidate-pair set grows, soft-clear path quarantine/cooldown.
 
     Keeps digest quarantine for known-bad secrets so we do not re-try the same
     corrupt asusroutercontrol value, but allows newly discovered paths immediately.
@@ -567,13 +805,24 @@ def _maybe_reset_cooldown_for_expanded_discovery(pairs: list[tuple[str, str]]) -
         return
     if not wrong_mp_cooldown_active() and not _bw_wrong_mp_quarantined_paths:
         return
+    soft_clear_wrong_mp_cooldown(reason="discovery set expanded")
+
+
+def soft_clear_wrong_mp_cooldown(*, reason: str | None = None) -> None:
+    """Soft-clear path quarantine + cooldown (keep digests of known-bad secrets).
+
+    Triggered when a Keychain BW_SESSION hit appears or dump-keychain finds new
+    labels — allows alternative unlock paths without re-trying exhausted MPs.
+    """
+    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
+    if not wrong_mp_cooldown_active() and not _bw_wrong_mp_quarantined_paths:
+        return
     _bw_wrong_mp_cooldown_until = 0.0
     _bw_wrong_mp_fail_logged = False
-    # Drop path quarantines so new shared services are attempted; keep digests.
     _bw_wrong_mp_quarantined_paths.clear()
     log.info(
-        "Bitwarden MP discovery set expanded (signature changed) — "
-        "cleared wrong-MP path quarantine/cooldown so new Grok/shared keys can be tried"
+        "Soft-cleared wrong-MP path quarantine/cooldown%s",
+        f" ({reason})" if reason else "",
     )
 
 
@@ -1294,6 +1543,29 @@ def delete_bitwarden_master_password() -> bool:
     return removed
 
 
+def bitwarden_session_status() -> str:
+    """Return ``absent`` | ``present-invalid`` | ``valid`` for BW_SESSION hygiene.
+
+    ``valid`` means a session token is set and ``bw status`` reports unlocked.
+    ``present-invalid`` means a token is set but the vault is still locked (stale).
+    Does not attempt unlock or Keychain discovery.
+    """
+    token = (os.environ.get(_BW_SESSION_ENV, "") or "").strip()
+    if not token:
+        _ensure_bw_session_env()
+        token = (os.environ.get(_BW_SESSION_ENV, "") or "").strip()
+    if not token:
+        return "absent"
+    backend = _BACKENDS.get("bitwarden")
+    if backend is None or not isinstance(backend, _BitwardenBackend):
+        return "present-invalid"
+    # Probe with the current env token only — do not auto-unlock here.
+    state = backend.login_check()
+    if state == "unlocked":
+        return "valid"
+    return "present-invalid"
+
+
 def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | bool | int | None]:
     """Diagnostics for Keychain MP + vault state.
 
@@ -1322,6 +1594,8 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
     remaining = 0
     if cooldown:
         remaining = max(0, int(_bw_wrong_mp_cooldown_until - time.monotonic()))
+    session_state = bitwarden_session_status()
+    session_kc_token, session_kc_path = discover_bw_session_from_keychain()
     return {
         "master_password_stored": bool(all_hits),
         "master_password_matched_path": matched,
@@ -1341,7 +1615,10 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
         "shared_projects": list(_BW_MASTER_PASSWORD_SHARED_PROJECTS),
         "vault_status": vault,
         "last_unlock_error": get_last_bitwarden_unlock_error(),
-        "bw_session_present": bool(os.environ.get(_BW_SESSION_ENV, "").strip()),
+        # Enum — never a boolean "yes". present-invalid means stale token was/is set.
+        "bw_session": session_state,
+        "bw_session_keychain_present": bool(session_kc_token),
+        "bw_session_keychain_path": session_kc_path,
         # KEYCHAIN_PATH is intentionally unused (keyring#623); security -A only.
         "keychain_path": None,
         "master_password_usable": secret is not None,
@@ -1431,19 +1708,57 @@ def _classify_bw_unlock_failure(stderr: str, stdout: str = "") -> str:
     return f"bw unlock failed: {raw[:180]}"
 
 
+def _try_apply_bw_session_token(token: str, *, source: str) -> str | None:
+    """Export *token* as BW_SESSION and return vault status if unlocked, else None."""
+    cleaned = _sanitize_bw_session_token(token)
+    if not cleaned:
+        return None
+    _persist_bw_session(cleaned)
+    backend = _BACKENDS.get("bitwarden")
+    if backend is None or not isinstance(backend, _BitwardenBackend):
+        return None
+    state = backend.login_check()
+    if state == "unlocked":
+        log.info("Bitwarden vault unlocked via BW_SESSION from %s", source)
+        return state
+    # Token did not unlock — leave clearing to the caller.
+    return None
+
+
+def _delete_quarantined_canonical_mp_after_session_unlock() -> None:
+    """Remove the bad ASUS canonical MP Keychain item after a non-MP unlock.
+
+    Only deletes when the canonical path is quarantined. Shared/Grok items are
+    never touched. Explicit cleanup remains via ``bw-master --delete``.
+    """
+    canon_svc = _bw_mp_canonical_service()
+    canon_acct = _bw_mp_canonical_account()
+    canon_path = _format_key_path("keyring", canon_svc, canon_acct)
+    quarantined = _path_is_quarantined(canon_path) or any(
+        q.split(":", 1)[-1].startswith(f"{canon_svc}/")
+        for q in _bw_wrong_mp_quarantined_paths
+    )
+    if not quarantined:
+        return
+    if delete_bitwarden_master_password():
+        log.info(
+            "Deleted quarantined ASUS canonical bw_master_password after "
+            "successful unlock from another source"
+        )
+
+
 def ensure_bitwarden_unlocked() -> str:
-    """Unlock Bitwarden using Keychain master password when the vault is locked.
+    """Unlock Bitwarden without prompting for the master password.
 
-    Never prompts on stdin. Returns the post-attempt vault status string from
-    login_check(). Records a human-readable failure via get_last_bitwarden_unlock_error().
+    Order:
+    1. Reload runtime ``.env`` / session files (DEV.app LaunchServices path).
+    2. If already unlocked → success.
+    3. If locked with a stale ``BW_SESSION`` → clear process env + persisted files.
+    4. Try community Keychain service ``BW_SESSION`` (account ``$USER`` / variants).
+    5. Try Keychain master-password candidates (secondary; includes shared labels).
+    6. Leave vault locked — Connect may still use a Keychain-mirrored router password.
 
-    Always reloads synced runtime ``.env`` / session files first so DEV.app Connect
-    picks up a Terminal ``bw_sync`` session even when LaunchServices has no env.
-
-    On crypto / wrong-password failure for one Keychain key, quarantines that key
-    and automatically tries other Keychain candidates. Only after all candidates
-    fail does it enter a cooldown. Connect can still proceed via Keychain-mirrored
-    router credentials while the vault stays locked.
+    Never prompts on stdin. Records failure via get_last_bitwarden_unlock_error().
     """
     # load_runtime_env_files is defined later; resolve at call time.
     try:
@@ -1471,6 +1786,26 @@ def ensure_bitwarden_unlocked() -> str:
         else:
             _set_bw_unlock_error(f"Bitwarden vault status: {state}")
         return state
+
+    # Locked: any existing BW_SESSION is stale/invalid — clear before discovery.
+    if (os.environ.get(_BW_SESSION_ENV, "") or "").strip():
+        clear_stale_bw_session(reason="bw status locked with BW_SESSION set")
+
+    # Primary non-MP path: community Keychain BW_SESSION.
+    kc_token, kc_path = discover_bw_session_from_keychain()
+    if kc_token:
+        soft_clear_wrong_mp_cooldown(reason=f"BW_SESSION Keychain hit at {kc_path}")
+        unlocked = _try_apply_bw_session_token(
+            kc_token, source=kc_path or "keychain:BW_SESSION"
+        )
+        if unlocked == "unlocked":
+            _set_bw_unlock_error(None)
+            _bw_unlock_miss_logged = False
+            _clear_wrong_mp_cooldown()
+            _delete_quarantined_canonical_mp_after_session_unlock()
+            return unlocked
+        # Keychain token also stale — do not persist it as healthy.
+        clear_stale_bw_session(reason="Keychain BW_SESSION did not unlock vault")
 
     candidates = _iter_bitwarden_master_password_candidates(skip_quarantined=True)
     if not candidates:
@@ -1569,11 +1904,14 @@ def ensure_bitwarden_unlocked() -> str:
 
 
 def import_bitwarden_master_password_from_keychain() -> dict[str, str | bool | None]:
-    """Copy a proven-good shared/Grok Keychain MP into the canonical path.
+    """Import a proven-good unlock secret into the canonical Keychain MP path.
 
-    Non-interactive: searches all candidates (including shared projects), tries
-    ``bw unlock``, and on success writes the winning secret to the ASUSRouterControl
-    canonical Keychain item. Never prompts for the master password.
+    Non-interactive. Prefers community Keychain ``BW_SESSION`` when it unlocks
+    the vault (session-only — does not invent an MP). Otherwise tries MP
+    candidates excluding quarantined ASUS items. Never prompts.
+
+    When ``usable=0`` and no session candidate works, fails clearly without
+    setting ``source_path`` to a quarantined ASUS item.
     """
     result: dict[str, str | bool | None] = {
         "ok": False,
@@ -1585,70 +1923,120 @@ def import_bitwarden_master_password_from_keychain() -> dict[str, str | bool | N
         "error": None,
         "fingerprint": None,
     }
-    # Clear path quarantine so shared hits newly in the discovery set are tried.
-    _bw_wrong_mp_quarantined_paths.clear()
-    global _bw_wrong_mp_cooldown_until, _bw_wrong_mp_fail_logged  # noqa: PLW0603
-    _bw_wrong_mp_cooldown_until = 0.0
-    _bw_wrong_mp_fail_logged = False
+    # Soft-clear path quarantine so newly discovered session/MP labels are tried.
+    soft_clear_wrong_mp_cooldown(reason="import-from-keychain")
+    # Also allow digest-blocked alternates during an explicit import attempt.
+    global _bw_wrong_mp_quarantined_digests  # noqa: PLW0603
+    saved_digests = set(_bw_wrong_mp_quarantined_digests)
+    _bw_wrong_mp_quarantined_digests.clear()
 
-    state = ensure_bitwarden_unlocked()
-    result["vault_status"] = state
-    matched = get_last_bitwarden_master_password_match()
-    result["source_path"] = matched
-    if state != "unlocked":
-        result["error"] = (
-            get_last_bitwarden_unlock_error()
-            or "No working Keychain master password found among searched services"
-        )
-        shared = _last_bw_mp_shared_services_searched or _shared_mp_services_catalog()
-        preview = ", ".join(shared[:10])
-        if len(shared) > 10:
-            preview = f"{preview}, … (+{len(shared) - 10} more)"
-        result["error"] = (
-            f"{result['error']}. Shared/Grok services searched: {preview}. "
-            "In Keychain Access, find a working item used by Grok Bots "
-            "(service like universal-keychain-grok-*-bw_master_password or "
-            "universal-keychain-shared-*-bw_master_password) and re-run "
-            "asusrouter credentials bw-master --import-from-keychain"
-        )
-        return result
+    try:
+        # Prefer Keychain BW_SESSION before MP theater.
+        kc_token, kc_path = discover_bw_session_from_keychain()
+        if kc_token:
+            unlocked = _try_apply_bw_session_token(
+                kc_token, source=kc_path or "keychain:BW_SESSION"
+            )
+            if unlocked == "unlocked":
+                result["vault_status"] = "unlocked"
+                result["source_path"] = kc_path
+                result["ok"] = True
+                result["error"] = None
+                result["fingerprint"] = f"session_len={len(kc_token)}"
+                _clear_wrong_mp_cooldown()
+                _delete_quarantined_canonical_mp_after_session_unlock()
+                log.info(
+                    "import-from-keychain: vault unlocked via Keychain BW_SESSION (%s); "
+                    "no MP copy needed",
+                    kc_path,
+                )
+                return result
 
-    secret = get_bitwarden_master_password()
-    if not secret:
-        # Vault unlocked via existing BW_SESSION — still try to materialize
-        # from Keychain hits if any usable secret exists (including quarantined).
-        hits = _collect_bitwarden_master_password_hits()
-        secret = hits[0][0] if hits else None
-        matched = hits[0][1] if hits else matched
+        usable = _iter_bitwarden_master_password_candidates(skip_quarantined=True)
+        # Exclude quarantined-only ASUS paths from being reported as source.
+        non_asus_usable = [
+            (secret, path)
+            for secret, path in usable
+            if not _is_asus_only_mp_path(path)
+        ]
+        state = ensure_bitwarden_unlocked()
+        result["vault_status"] = state
+
+        if state != "unlocked":
+            result["source_path"] = None
+            result["error"] = (
+                "no non-ASUS / no valid session candidate "
+                "(usable=0 after Keychain BW_SESSION + MP scan). "
+                f"{get_last_bitwarden_unlock_error() or _BW_NO_MP_OPERATOR_HINT}"
+            )
+            return result
+
+        # Vault unlocked — only copy an MP when we have a usable non-session secret.
+        matched = get_last_bitwarden_master_password_match()
+        secret = get_bitwarden_master_password()
+        if not secret:
+            hits = _collect_bitwarden_master_password_hits()
+            # Prefer non-quarantined, non-ASUS-bad hits.
+            for hit_secret, hit_path in hits:
+                if _path_is_quarantined(hit_path):
+                    continue
+                if _mp_digest(hit_secret) in saved_digests and _is_asus_only_mp_path(
+                    hit_path
+                ):
+                    continue
+                secret, matched = hit_secret, hit_path
+                break
+
+        if not secret:
+            # Session-only unlock — success for vault, but no MP to canonicalize.
+            result["ok"] = True
+            result["source_path"] = matched or kc_path
+            result["error"] = None
+            result["fingerprint"] = "session-only"
+            return result
+
+        if matched and _path_is_quarantined(matched) and not non_asus_usable:
+            result["source_path"] = None
+            result["ok"] = False
+            result["error"] = (
+                "no non-ASUS / no valid session candidate "
+                "(only quarantined ASUS Keychain MP remains)"
+            )
+            return result
+
         result["source_path"] = matched
-    if not secret:
-        result["error"] = (
-            "Vault unlocked but no Keychain MP candidate available to copy "
-            "(session-only unlock). Shared/Grok Keychain item still required "
-            "for future auto-unlock."
+        result["fingerprint"] = _mp_fingerprint(secret)
+        if not _normalize_bw_master_password(secret):
+            result["error"] = "Unlock succeeded but failed to write canonical Keychain path"
+            return result
+        global _last_bw_mp_matched_path  # noqa: PLW0603
+        _last_bw_mp_matched_path = _format_key_path(
+            "keyring",
+            _bw_mp_canonical_service(),
+            _bw_mp_canonical_account(),
         )
-        result["ok"] = False
+        result["ok"] = True
+        log.info(
+            "Imported Bitwarden master password from %s → canonical %s (%s)",
+            matched,
+            result["canonical_path"],
+            result["fingerprint"],
+        )
         return result
+    finally:
+        # Restore digests for secrets that still failed; successful path cleared them.
+        if not result.get("ok"):
+            _bw_wrong_mp_quarantined_digests.update(saved_digests)
 
-    result["fingerprint"] = _mp_fingerprint(secret)
-    if not _normalize_bw_master_password(secret):
-        result["error"] = "Unlock succeeded but failed to write canonical Keychain path"
-        return result
-    global _last_bw_mp_matched_path  # noqa: PLW0603
-    _last_bw_mp_matched_path = _format_key_path(
-        "keyring",
-        _bw_mp_canonical_service(),
-        _bw_mp_canonical_account(),
-    )
-    result["ok"] = True
-    result["source_path"] = matched
-    log.info(
-        "Imported Bitwarden master password from %s → canonical %s (%s)",
-        matched,
-        result["canonical_path"],
-        result["fingerprint"],
-    )
-    return result
+
+def _is_asus_only_mp_path(path: str | None) -> bool:
+    """True when *path* refers to an ASUSRouterControl-owned Keychain MP item."""
+    if not path:
+        return False
+    rest = path.split(":", 1)[-1]
+    service = rest.split("/", 1)[0]
+    account = rest.split("/", 1)[1] if "/" in rest else ""
+    return _is_asusroutercontrol_mp_pair(service, account)
 
 
 def _bw_run(
@@ -2074,7 +2462,8 @@ class _BitwardenBackend(_CredentialBackend):
             else:
                 log.info(
                     "Bitwarden backend unhealthy: vault is locked. "
-                    "Store the master password with: asusrouter credentials bw-master --set"
+                    "Connect can use Keychain-mirrored router password; "
+                    "or Terminal: bw unlock once then bash scripts/bw_sync_router_env.sh"
                 )
         elif state == "unauthenticated":
             log.info("Bitwarden backend unhealthy: not logged in. Run 'bw login'.")
@@ -2850,8 +3239,9 @@ def missing_mirrored_password_message(*, bw_status: str | None = None) -> str:
     return (
         f"Bitwarden vault is {status} and no Keychain-mirrored router password "
         "was found. Do not retry LOGIN with a blank password (Captcha risk). "
-        "Run: bash scripts/bw_sync_router_env.sh && "
-        "asusrouter credentials bw-master --set"
+        "In Terminal: bw unlock once, export BW_SESSION, then "
+        "bash scripts/bw_sync_router_env.sh (mirrors login into Keychain). "
+        "Or confirm a prior sync already wrote the Keychain mirror."
     )
 
 
@@ -2966,8 +3356,8 @@ def format_connect_failure_detail(
     mp_match = get_last_bitwarden_master_password_match()
     if vault == "locked" and not unlock_err:
         extras.append(
-            "Keychain master password missing — run: "
-            "asusrouter credentials bw-master --set"
+            "Vault locked — use Keychain mirror or Terminal: "
+            "bw unlock once, then bash scripts/bw_sync_router_env.sh"
         )
     elif mp_match and vault == "locked":
         extras.append(f"MP Keychain path={mp_match}")
@@ -3106,16 +3496,17 @@ def resolve_connect_login_defaults(
         detail = (
             f"Bitwarden vault locked — using Keychain-mirrored login "
             f"user={resolved_username!r} ssh_port={ssh_port}. "
-            "Leave password blank to reuse the mirrored admin password."
+            "Leave password blank to reuse the mirrored admin password. "
+            "BW unlock is not required when the mirror is present."
         )
         if unlock_err:
             detail = f"{detail} ({unlock_err})"
     elif bw_status == "locked":
         unlock_err = get_last_bitwarden_unlock_error()
         detail = (
-            "Bitwarden vault is locked — Connect needs an unlocked vault or a "
-            "Keychain password synced via: bash scripts/bw_sync_router_env.sh. "
-            "One-time: asusrouter credentials bw-master --set. "
+            "Bitwarden vault is locked and no Keychain-mirrored router password "
+            "was found. In Terminal: bw unlock once, export BW_SESSION, then "
+            "bash scripts/bw_sync_router_env.sh. "
             "Router Login Name may not be 'admin'."
         )
         if unlock_err:
