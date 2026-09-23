@@ -536,6 +536,69 @@ class TestBitwardenRouterItemLookup:
         }
         assert _ssh_port_from_bitwarden_item(uri_item) == 2222
 
+    def test_locked_vault_defaults_to_keychain_backend(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
+        monkeypatch.setattr(creds, "ensure_bitwarden_unlocked", lambda: "locked")
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "get_last_bitwarden_unlock_error", lambda: "no master password")
+        assert creds.store_credential("router_username", "13Maschine", backend="keychain")
+        assert creds.store_credential("router_password", "lab-secret", backend="keychain")
+        assert creds.store_credential("router_ssh_port", "1313", backend="keychain")
+        defaults = creds.resolve_connect_login_defaults(
+            suggested_host="router.asus.com",
+        )
+        assert defaults["credential_backend"] == "keychain"
+        assert defaults["username"] == "13Maschine"
+        assert defaults["password_from_store"] is True
+        assert defaults["ssh_port"] == 1313
+        detail = str(defaults.get("store_detail") or "").lower()
+        assert "keychain-mirrored" in detail or "using keychain" in detail
+
+    def test_resolve_blank_connect_password_fills_store(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keychain")
+        monkeypatch.setenv("ASUSROUTERCONTROL_RUNTIME_ENV", "dev")
+        monkeypatch.setattr(creds, "load_runtime_env_files", lambda: None)
+        monkeypatch.setattr(creds, "lookup_bitwarden_router_item", lambda host_hint=None: None)
+        assert creds.store_credential(
+            "router_username", "13Maschine", env="dev", backend="keychain"
+        )
+        assert creds.store_credential(
+            "router_password", "lab-secret", env="dev", backend="keychain"
+        )
+        user, pw, source = creds.resolve_blank_connect_password(
+            host="router.asus.com",
+            username="admin",
+            password="",
+        )
+        # Without env override, blank password fills from store; admin stays unless env set.
+        assert pw == "lab-secret"
+        assert "store" in source
+        user2, pw2, source2 = creds.resolve_blank_connect_password(
+            host="router.asus.com",
+            username="",
+            password="",
+        )
+        assert user2 == "13Maschine"
+        assert pw2 == "lab-secret"
+
+    def test_keychain_get_falls_back_to_security_cli(self, monkeypatch):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setattr(creds, "_ensure_login_keychain_env", lambda: None)
+        monkeypatch.setattr(creds, "_ensure_secure_keyring_backend", lambda: False)
+        monkeypatch.setattr(
+            creds,
+            "_security_get_generic_password",
+            lambda svc, acct: "from-security" if "router_password" in svc else None,
+        )
+        backend = creds._KeychainBackend()
+        assert backend.get("router_password", env="dev") == "from-security"
+
     def test_locked_vault_detail_always_shown(self, monkeypatch):
         from asusroutercontrol import credentials as creds
 
@@ -550,6 +613,7 @@ class TestBitwardenRouterItemLookup:
         assert defaults["username"] == ""
         assert "locked" in str(defaults.get("store_detail") or "").lower()
         assert "login name" in str(defaults.get("store_detail") or "").lower()
+        assert defaults["credential_backend"] == "keychain"
 
     def test_env_router_username_used_when_store_empty(self, monkeypatch):
         from asusroutercontrol import credentials as creds

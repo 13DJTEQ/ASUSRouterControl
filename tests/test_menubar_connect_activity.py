@@ -43,3 +43,9 @@ def test_menubar_connect_resolves_blank_password() -> None:
     assert "resolve_blank_connect_password" in src
     assert "Connect failure detail:" in src
     assert "fill_source" in src
+
+
+def test_menubar_coerces_bitwarden_store_when_vault_locked() -> None:
+    src = Path("src/asusroutercontrol/menubar.py").read_text(encoding="utf-8")
+    assert 'bw_state != "unlocked" and credential_backend == "bitwarden"' in src
+    assert 'credential_backend = "keychain"' in src
