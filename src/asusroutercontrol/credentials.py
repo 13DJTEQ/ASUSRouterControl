@@ -2255,7 +2255,6 @@ def resolve_connect_login_defaults(
     stored_port = get_router_ssh_port(host_hint=suggested_host)
     # Env override already applied inside get_router_credentials.
     resolved_username = username or ""
-    active = _active_backend_name()
     if preferred_backend in _GUI_CREDENTIAL_BACKENDS:
         backend = preferred_backend
     elif bw_status == "unlocked":
