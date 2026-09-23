@@ -157,7 +157,11 @@ def test_program_arguments_xml_escapes() -> None:
     xml = program_arguments_xml(
         ("/Applications/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl",)
     )
-    assert "<string>/Applications/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl</string>" in xml
+    expected = (
+        "<string>/Applications/ASUSRouterControl.app/"
+        "Contents/MacOS/ASUSRouterControl</string>"
+    )
+    assert expected in xml
     xml2 = program_arguments_xml(("/tmp/a&b<c>.app/bin",))
     assert "&amp;" in xml2
     assert "&lt;" in xml2
