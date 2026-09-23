@@ -614,7 +614,8 @@ def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
     )
 
     for service, account in pairs:
-        label = f"{service}/{account if account != '' else '\"\"'}"
+        acct_label = account if account != "" else '""'
+        label = f"{service}/{acct_label}"
         if keyring_ok:
             tried.append(f"keyring:{label}")
             secret = _keyring_get_password(service, account)
@@ -625,7 +626,7 @@ def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
                 log.info(
                     "Bitwarden master password Keychain hit via keyring at %s/%s after %d tries",
                     service,
-                    account if account != "" else '""',
+                    acct_label,
                     len(tried),
                 )
                 return secret, path
@@ -639,7 +640,7 @@ def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
             log.info(
                 "Bitwarden master password Keychain hit via security at %s/%s after %d tries",
                 service,
-                account if account != "" else '""',
+                acct_label,
                 len(tried),
             )
             return secret, path
