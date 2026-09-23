@@ -80,3 +80,15 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 - Keep backend behavior aligned with `FirmwareBackend` operation support; unsupported operations should surface via `BackendOperationUnsupported` (or equivalent explicit failure), not silent no-ops.
 - Any change that affects telemetry collection should keep `datastore.py` schema/query compatibility in mind; this project relies heavily on longitudinal reads (trends, reports, recommendation cooldowns).
 - Prefer extending existing scheduler/probe loops rather than creating ad-hoc collectors, so data retention, rollback, and failure-backoff behavior remain consistent.
+
+## Operator tooling: complete one-shot scripts (required)
+
+Agents must ship **complete one-shot** operator instructions for Desktop/ops drops (especially `hermes-desktop-ops/`). Never tell an operator to run `./install-to-desktop.sh` / `./hermes-desktop-repair.sh` (or similar) before those files exist on the Mac.
+
+Canonical rule: [`.cursor/rules/one-shot-operator-scripts.mdc`](.cursor/rules/one-shot-operator-scripts.mdc)
+
+Summary:
+- Primary path = single pasteable `curl … -o ~/Desktop/….sh && chmod +x && /bin/bash …` that downloads the full toolset then runs.
+- Relative paths only after the same one-shot just created them; checkout-based steps are secondary.
+- zsh-safe: no paste blocks with parentheses comment lines.
+- New tools (repair, monitor, …) must land in the **same** bootstrap so one curl gets everything.

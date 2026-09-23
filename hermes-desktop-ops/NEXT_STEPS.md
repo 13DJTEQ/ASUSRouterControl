@@ -7,15 +7,16 @@ MOE Mac-A primary: **`H1_desktop_python_gateway`** (score 7). Mac B still needed
 
 H1 is clearly leading on Mac A (`port_9130_closed` + system Python cannot import `hermes_cli` + venv OK). Interim repair is reasonable **without** waiting for Mac B; dual-Mac confirmation remains preferred before treating H1 as fleet-wide.
 
-On Mac A (after optional re-bootstrap so `hermes-desktop-repair.sh` is present):
+On Mac A — paste **as one line** (refreshes full Desktop toolset, then dry-run repair). Do not paste comment lines with parentheses.
 
 ```bash
-# Prefer fresh ops drop (also picks up monitor + repair script):
-curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/bootstrap-desktop-collector.sh -o ~/Desktop/bootstrap-desktop-collector.sh && chmod +x ~/Desktop/bootstrap-desktop-collector.sh && /bin/bash ~/Desktop/bootstrap-desktop-collector.sh --skip-collect
+curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/bootstrap-desktop-collector.sh -o ~/Desktop/bootstrap-desktop-collector.sh && chmod +x ~/Desktop/bootstrap-desktop-collector.sh && /bin/bash ~/Desktop/bootstrap-desktop-collector.sh --skip-collect && /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-repair.sh
+```
 
-cd ~/Desktop/hermes-desktop-ops
-./hermes-desktop-repair.sh                 # dry-run (default)
-./hermes-desktop-repair.sh --apply         # only if dry-run looks right
+Apply only after dry-run looks right (one line):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/bootstrap-desktop-collector.sh -o ~/Desktop/bootstrap-desktop-collector.sh && chmod +x ~/Desktop/bootstrap-desktop-collector.sh && /bin/bash ~/Desktop/bootstrap-desktop-collector.sh --skip-collect && /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-repair.sh --apply
 ```
 
 Manual H1 commands if repair script is unavailable:
