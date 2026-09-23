@@ -1,8 +1,8 @@
-"""Tests for credentials.py — pluggable backends (Bitwarden, 1Password, Keychain).
+"""Tests for credentials.py — live backends (Bitwarden, Keychain) + 1Password scaffold.
 
 These tests exercise the backend registry, env-aware fallbacks, and the public
 CRUD surface.  Backends are mocked in-memory so no real vault/keychain/CLI is
-involved.
+involved. 1Password is kept only to assert the scaffold remains inert.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _reset_backend_registry(monkeypatch):
 
 @pytest.fixture
 def credential_stores(monkeypatch):
-    """Patch credentials.py to use in-memory 1Password + keyring stores."""
+    """Patch credentials.py to use in-memory Bitwarden + keyring stores."""
     backend = _InMemoryKeyring()
     op_store: dict[tuple[str, str], str] = {}
     bw_store: dict[tuple[str, str], str] = {}
@@ -151,6 +151,16 @@ class TestBackendSelection:
         monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "keeper")
         assert creds_mod._active_backend_name() == "bitwarden"
 
+    def test_1password_env_is_ignored_as_scaffold(self, monkeypatch):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+        assert creds_mod._active_backend_name() == "bitwarden"
+
+    def test_1password_not_in_live_fallback_order(self):
+        assert "1password" not in creds_mod._READ_FALLBACK_ORDER
+        assert "1password" not in creds_mod._WRITE_FALLBACK_ORDER
+        assert "1password" in creds_mod._BACKENDS  # scaffold still registered
+        assert "1password" not in creds_mod._ACTIVE_BACKENDS
+
 
 # ---------------------------------------------------------------------------
 # store_credential / get_credential via active backend
@@ -158,8 +168,8 @@ class TestBackendSelection:
 
 
 class TestStoreAndGet:
-    def test_store_then_get(self, monkeypatch, mem_keyring, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_store_then_get(self, monkeypatch, mem_keyring, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import get_credential, store_credential
 
         assert store_credential("router_password", "s3cr3t") is True
@@ -177,13 +187,28 @@ class TestStoreAndGet:
         monkeypatch.setenv("ROUTER_PASSWORD", "fromenv")
         assert get_credential("router_password") == "fromenv"
 
-    def test_1password_beats_env(self, monkeypatch, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_bitwarden_beats_env(self, monkeypatch, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import get_credential, store_credential
 
         monkeypatch.setenv("ROUTER_PASSWORD", "fromenv")
-        store_credential("router_password", "from1password")
-        assert get_credential("router_password") == "from1password"
+        store_credential("router_password", "frombitwarden")
+        assert get_credential("router_password") == "frombitwarden"
+
+    def test_scaffold_1password_write_rejected(self, monkeypatch, op_store):
+        from asusroutercontrol.credentials import store_credential
+
+        assert store_credential("router_password", "nope", backend="1password") is False
+        assert ("prod", "router_password") not in op_store
+
+    def test_scaffold_1password_not_used_in_get_fallback(self, monkeypatch, op_store, bw_store):
+        """Even with a seeded 1Password scaffold store, live get ignores it."""
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
+        monkeypatch.delenv("ROUTER_PASSWORD", raising=False)
+        op_store[("prod", "router_password")] = "from1password"
+        from asusroutercontrol.credentials import get_credential
+
+        assert get_credential("router_password") is None
 
     def test_keychain_fallback_beats_env(self, monkeypatch, mem_keyring):
         from asusroutercontrol.credentials import _account_name, _service_name, get_credential
@@ -208,17 +233,17 @@ class TestStoreAndGet:
 
     def test_store_failure_returns_false(self, monkeypatch):
         """If backend write fails, store_credential returns False."""
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         monkeypatch.setattr(
-            creds_mod._BACKENDS["1password"], "store", lambda *a, **kw: False
+            creds_mod._BACKENDS["bitwarden"], "store", lambda *a, **kw: False
         )
         from asusroutercontrol.credentials import store_credential
 
         assert store_credential("router_password", "value") is False
 
-    def test_get_with_shared_env_fallback(self, monkeypatch, op_store):
+    def test_get_with_shared_env_fallback(self, monkeypatch, bw_store):
         """When env=dev and dev item is missing, fall back to shared."""
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import get_credential, store_credential
 
         store_credential("router_password", "sharedpass", env="shared")
@@ -238,17 +263,17 @@ class TestStoreAndGet:
 
 
 class TestDeleteCredential:
-    def test_delete_existing(self, monkeypatch, mem_keyring, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_delete_existing(self, monkeypatch, mem_keyring, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import delete_credential, store_credential
 
         store_credential("router_username", "admin")
         assert delete_credential("router_username") is True
 
     def test_delete_nonexistent_returns_false(self, monkeypatch):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         monkeypatch.setattr(
-            creds_mod._BACKENDS["1password"], "delete", lambda *a, **kw: False
+            creds_mod._BACKENDS["bitwarden"], "delete", lambda *a, **kw: False
         )
         from asusroutercontrol.credentials import delete_credential
 
@@ -261,8 +286,8 @@ class TestDeleteCredential:
 
 
 class TestGetRouterCredentials:
-    def test_returns_both(self, monkeypatch, mem_keyring, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_returns_both(self, monkeypatch, mem_keyring, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import get_router_credentials, store_credential
 
         store_credential("router_username", "admin")
@@ -290,8 +315,8 @@ class TestMigrateLegacyCredentials:
     def _seed_legacy(self, mem_keyring, key: str, value: str):
         mem_keyring.set_password(f"com.asusroutercontrol.{key}", "default", value)
 
-    def test_migrates_router_password(self, monkeypatch, mem_keyring, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_migrates_router_password(self, monkeypatch, mem_keyring, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import get_credential, migrate_legacy_credentials
 
         self._seed_legacy(mem_keyring, "router.password", "legacypass")
@@ -316,15 +341,15 @@ class TestMigrateLegacyCredentials:
         assert "router_password" in migrated
         assert get_credential("router_password") == "canonical-fallback"
 
-    def test_dry_run_does_not_write(self, monkeypatch, mem_keyring, op_store):
+    def test_dry_run_does_not_write(self, monkeypatch, mem_keyring, bw_store):
         from asusroutercontrol.credentials import migrate_legacy_credentials
 
         self._seed_legacy(mem_keyring, "router.password", "legacypass")
         migrate_legacy_credentials(dry_run=True)
-        assert ("prod", "router_password") not in op_store
+        assert ("prod", "router_password") not in bw_store
 
-    def test_skips_already_migrated(self, monkeypatch, mem_keyring, op_store):
-        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "1password")
+    def test_skips_already_migrated(self, monkeypatch, mem_keyring, bw_store):
+        monkeypatch.setenv("ASUSROUTERCONTROL_CREDENTIAL_BACKEND", "bitwarden")
         from asusroutercontrol.credentials import migrate_legacy_credentials, store_credential
 
         store_credential("router_password", "already")
@@ -977,3 +1002,65 @@ class TestBitwardenMasterPasswordFallbacks:
         monkeypatch.setattr(creds, "_persist_bw_session", _persist)
         assert creds.ensure_bitwarden_unlocked() == "unlocked"
         assert os.environ.get("BW_SESSION") == "SESSIONFROMFALLBACK"
+
+    def test_status_reports_matched_path(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        assert creds._BACKENDS["keychain"].store(
+            "bw_master_password", "path-mp", env="dev"
+        )
+
+        def fake_login_check(self):
+            return "locked"
+
+        monkeypatch.setattr(creds._BitwardenBackend, "login_check", fake_login_check)
+        info = creds.bitwarden_unlock_status(attempt_unlock=False)
+        assert info["master_password_stored"] is True
+        assert info["master_password_matched_path"]
+        assert "bw_master_password" in str(info["master_password_matched_path"])
+        assert info["master_password_canonical"] == (
+            f"{creds._bw_mp_canonical_service()}/{creds._bw_mp_canonical_account()}"
+        )
+        assert info["lookups_tried"] >= 1
+
+    def test_get_via_security_fallback(self, monkeypatch, mem_keyring):
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        # Ensure keyring has nothing; security stub returns the secret.
+        creds.delete_bitwarden_master_password()
+
+        svc = creds._service_name("bw_master_password", "shared")
+        acct = creds._account_name("bw_master_password", "shared")
+
+        def fake_security(service, account):
+            if service == svc and account == acct:
+                return "security-only-mp"
+            return None
+
+        monkeypatch.setattr(creds, "_security_get_generic_password", fake_security)
+        monkeypatch.setattr(creds, "_security_set_generic_password", lambda *a, **k: True)
+        assert creds.get_bitwarden_master_password() == "security-only-mp"
+        match = creds.get_last_bitwarden_master_password_match()
+        assert match is not None
+        assert match.startswith("security:")
+        assert svc in match
+        # Normalized into canonical keyring location.
+        assert (
+            creds._BACKENDS["keychain"].get("bw_master_password", env="prod")
+            == "security-only-mp"
+        )
+
+    def test_get_logs_lookup_miss(self, monkeypatch, mem_keyring, caplog):
+        import logging
+
+        from asusroutercontrol import credentials as creds
+
+        monkeypatch.setitem(creds._BACKENDS, "keychain", creds._KeychainBackend())
+        creds.delete_bitwarden_master_password()
+        monkeypatch.setattr(creds, "_security_get_generic_password", lambda *a, **k: None)
+        with caplog.at_level(logging.INFO, logger="asusroutercontrol.credentials"):
+            assert creds.get_bitwarden_master_password() is None
+        assert any("lookup miss" in r.message.lower() for r in caplog.records)
+

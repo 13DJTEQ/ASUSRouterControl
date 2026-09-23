@@ -24,6 +24,7 @@ from asusroutercontrol.credentials import (
     delete_legacy_credentials,
     ensure_bitwarden_unlocked,
     get_bitwarden_master_password,
+    get_last_bitwarden_master_password_match,
     get_last_bitwarden_unlock_error,
     migrate_legacy_credentials,
     store_bitwarden_master_password,
@@ -770,7 +771,7 @@ def incident_rollback(
 
 @cli.command()
 def setup():
-    """Store router credentials in 1Password (universal-keychain format)."""
+    """Store router credentials in Bitwarden (universal-keychain format)."""
     console.print("[bold]ASUSRouterControl Setup[/bold]\n")
 
     username = click.prompt("Router username", default="admin")
@@ -797,7 +798,7 @@ def credentials():
 @credentials.command("migrate")
 @click.option("--dry-run", is_flag=True, help="Show what would be migrated without writing.")
 def credentials_migrate(dry_run: bool):
-    """Migrate keychain fallback entries to 1Password canonical storage."""
+    """Migrate keychain fallback entries to canonical Bitwarden/Keychain storage."""
     import logging
     logging.basicConfig(level=logging.INFO)
 
@@ -820,7 +821,7 @@ def credentials_migrate(dry_run: bool):
 
 @credentials.command("cleanup")
 def credentials_cleanup():
-    """Remove keychain fallback entries after migration to 1Password."""
+    """Remove keychain fallback entries after migration to canonical storage."""
     removed = delete_legacy_credentials()
     if not removed:
         console.print("[dim]No keychain fallback entries to remove.[/dim]")
@@ -880,8 +881,22 @@ def credentials_bw_master(
         state = str(info.get("vault_status") or "unknown")
         err = info.get("last_unlock_error")
         session = bool(info.get("bw_session_present"))
+        matched = info.get("master_password_matched_path")
+        canonical = info.get("master_password_canonical")
+        lookups = info.get("lookups_tried")
+        keychain_path = info.get("keychain_path")
         console.print(f"master_password_stored: {'true' if stored else 'false'}")
         console.print(f"Keychain master password: {'present' if stored else 'missing'}")
+        if matched:
+            console.print(f"matched_path: {matched}")
+        else:
+            console.print("matched_path: (none)")
+        if canonical:
+            console.print(f"canonical_path: {canonical}")
+        if lookups is not None:
+            console.print(f"lookups_tried: {lookups}")
+        if keychain_path:
+            console.print(f"KEYCHAIN_PATH: {keychain_path}")
         console.print(f"Bitwarden vault: {state}")
         console.print(f"BW_SESSION in env: {'yes' if session else 'no'}")
         if err:
@@ -894,6 +909,13 @@ def credentials_bw_master(
             console.print(
                 "[yellow]One-time setup:[/yellow] "
                 "[cyan]asusrouter credentials bw-master --set[/cyan]"
+            )
+            console.print(
+                "[dim]If Keychain Access shows an existing item, look for service "
+                "universal-keychain-asusroutercontrol-*-bw_master_password "
+                "(or com.asusroutercontrol.bw_master_password) and re-run status "
+                "after pulling this fix — do not re-enter the master password "
+                "unless matched_path stays (none).[/dim]"
             )
         return
     if do_delete:

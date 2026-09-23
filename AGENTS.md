@@ -47,7 +47,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 ### Runtime layers and responsibilities
 - **Configuration & credentials**
   - `config.py` loads non-secret runtime config from env / `.env`.
-  - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with 1Password and keychain fallback migration helpers.
+  - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with macOS Keychain fallback/mirroring. 1Password remains scaffold-only and is not used in the live credential chain.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
   - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).

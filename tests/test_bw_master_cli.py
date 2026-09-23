@@ -100,9 +100,19 @@ def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
         "asusroutercontrol.cli.bitwarden_unlock_status",
         lambda *, attempt_unlock=False: {
             "master_password_stored": True,
+            "master_password_matched_path": (
+                "keyring:universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "master_password_canonical": (
+                "universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "lookups_tried": 1,
             "vault_status": "unlocked",
             "last_unlock_error": None,
             "bw_session_present": True,
+            "keychain_path": None,
         },
     )
 
@@ -110,6 +120,8 @@ def test_bw_master_status_reports_boolean(monkeypatch, mem_keyring):
     result = runner.invoke(cli, ["credentials", "bw-master", "--status"])
     assert result.exit_code == 0, result.output
     assert "master_password_stored: true" in result.output
+    assert "matched_path:" in result.output
+    assert "universal-keychain-asusroutercontrol-prod-bw_master_password" in result.output
     assert "Bitwarden vault: unlocked" in result.output
     assert "status-mp" not in result.output
 
@@ -121,9 +133,16 @@ def test_bw_master_status_missing(monkeypatch, mem_keyring):
         "asusroutercontrol.cli.bitwarden_unlock_status",
         lambda *, attempt_unlock=False: {
             "master_password_stored": False,
+            "master_password_matched_path": None,
+            "master_password_canonical": (
+                "universal-keychain-asusroutercontrol-prod-bw_master_password/"
+                "asusroutercontrol.prod.bw_master_password"
+            ),
+            "lookups_tried": 12,
             "vault_status": "locked",
             "last_unlock_error": "no master password",
             "bw_session_present": False,
+            "keychain_path": None,
         },
     )
 
@@ -131,4 +150,5 @@ def test_bw_master_status_missing(monkeypatch, mem_keyring):
     result = runner.invoke(cli, ["credentials", "bw-master", "--status"])
     assert result.exit_code == 0, result.output
     assert "master_password_stored: false" in result.output
+    assert "matched_path: (none)" in result.output
     assert "bw-master --set" in result.output

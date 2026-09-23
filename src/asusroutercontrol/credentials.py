@@ -1,13 +1,14 @@
-"""Secure credential management with pluggable backends: Bitwarden, 1Password, macOS Keychain.
+"""Secure credential management with pluggable backends: Bitwarden and macOS Keychain.
 
 Canonical naming follows the universal-keychain convention:
   Service / vault item title: universal-keychain-asusroutercontrol-{env}-{key}
   Account metadata: asusroutercontrol.{env}.{key}
 
 The active backend is controlled by ASUSROUTERCONTROL_CREDENTIAL_BACKEND env var
-("bitwarden" | "1password" | "keychain").  Defaults to Bitwarden.
-When the backend is unreachable, reads fall back through the remaining backends
-in priority order.
+("bitwarden" | "keychain").  Defaults to Bitwarden.
+When the backend is unreachable, reads fall back through Bitwarden ↔ Keychain.
+A 1Password backend class remains as inert scaffold only — it is never selected
+by default, never used in Connect resolution, and is ignored if requested via env.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ def _build_macos_keyring():
 
 
 def _ensure_secure_keyring_backend() -> bool:
+    _ensure_login_keychain_env()
     backend = keyring.get_keyring()
     if not _is_fail_backend(backend):
         return True
@@ -96,6 +98,26 @@ def _service_name(key: str, env: str = DEFAULT_ENV) -> str:
 def _account_name(key: str, env: str = DEFAULT_ENV) -> str:
     return f"{PROJECT}.{env}.{key}"
 
+def _login_keychain_paths() -> list[str]:
+    """Prefer the user login keychain shared by Terminal CLI and DEV.app."""
+    home = Path.home()
+    return [
+        str(home / "Library" / "Keychains" / "login.keychain-db"),
+        str(home / "Library" / "Keychains" / "login.keychain"),
+    ]
+
+
+def _ensure_login_keychain_env() -> None:
+    """Point KEYCHAIN_PATH at the login keychain when present (macOS)."""
+    if os.environ.get("KEYCHAIN_PATH", "").strip():
+        return
+    for path in _login_keychain_paths():
+        if Path(path).expanduser().is_file():
+            os.environ["KEYCHAIN_PATH"] = path
+            log.info("Using login keychain via KEYCHAIN_PATH=%s", path)
+            return
+
+
 
 # ---------------------------------------------------------------------------
 # 1Password helpers
@@ -126,10 +148,9 @@ def _op_run(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
         _op_cli_found = True
         return result
     except FileNotFoundError:
+        # Scaffold-only path: never prompt operators to install `op`.
         if _op_cli_found is not False:
-            log.warning(
-                "1Password CLI ('op') not found; skipping 1Password credential backend"
-            )
+            log.debug("1Password CLI ('op') not found; scaffold backend inert")
         _op_cli_found = False
         return None
     except OSError as exc:
@@ -298,21 +319,32 @@ _BW_MASTER_PASSWORD_FALLBACK_KEYS = (
     "bitwarden_master_password",
     "master_password",
     "bw_password",
+    "bw-master-password",
 )
-_BW_MASTER_PASSWORD_FALLBACK_ENVS = ("prod", "shared", "dev")
+_BW_MASTER_PASSWORD_FALLBACK_ENVS = ("prod", "shared", "dev", "test")
 # Pre-universal-keychain or ad-hoc Keychain locations (service, account).
 _BW_MASTER_PASSWORD_LEGACY_LOCATIONS: tuple[tuple[str, str], ...] = (
     (f"{_LEGACY_SERVICE}.bw_master_password", "default"),
     (f"{_LEGACY_SERVICE}.bitwarden_master_password", "default"),
     (f"{_LEGACY_SERVICE}.master_password", "default"),
+    (f"{_LEGACY_SERVICE}.bw_password", "default"),
     (PROJECT, "bw_master_password"),
     (PROJECT, "bitwarden_master_password"),
+    (PROJECT, "master_password"),
+    (PROJECT, "bw_password"),
+    ("Bitwarden", "master_password"),
+    ("bw", "master_password"),
+    ("bitwarden-cli", "master_password"),
 )
 _BW_PASSWORD_ENV = "BW_PASSWORD"
 _BW_SESSION_TOKEN_RE = re.compile(r'BW_SESSION="?([^"\s]+)"?')
 
 # Last auto-unlock failure reason (never includes the master password itself).
 _last_bw_unlock_error: str | None = None
+# Last successful Keychain lookup path, e.g. "keyring:svc/acct" or "security:svc/acct".
+_last_bw_mp_matched_path: str | None = None
+# Last lookup attempt labels (no secrets) for diagnostics.
+_last_bw_mp_lookups_tried: list[str] = []
 
 
 def _set_bw_unlock_error(message: str | None) -> None:
@@ -325,113 +357,403 @@ def get_last_bitwarden_unlock_error() -> str | None:
     return _last_bw_unlock_error
 
 
-def _normalize_bw_master_password(secret: str) -> bool:
-    """Write the master password to the canonical Keychain location."""
-    backend = _BACKENDS.get("keychain")
-    if backend is None:
+def get_last_bitwarden_master_password_match() -> str | None:
+    """Return the Keychain path that last satisfied a master-password read."""
+    return _last_bw_mp_matched_path
+
+
+def _bw_mp_canonical_service() -> str:
+    return _service_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV)
+
+
+def _bw_mp_canonical_account() -> str:
+    return _account_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV)
+
+
+
+def _security_bin() -> str | None:
+    fixed = Path("/usr/bin/security")
+    if fixed.is_file():
+        return str(fixed)
+    return None
+
+
+def _format_key_path(source: str, service: str, account: str | None) -> str:
+    acct = "*" if account is None else account
+    return f"{source}:{service}/{acct}"
+
+
+def _bw_master_password_candidate_pairs() -> list[tuple[str, str]]:
+    """Plausible (service, account) pairs used historically by this project / keyring."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(service: str, account: str) -> None:
+        key = (service, account)
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append(key)
+
+    # 1) Canonical universal-keychain location (prod).
+    add(_bw_mp_canonical_service(), _bw_mp_canonical_account())
+
+    # 2) Alternate env + key combinations (incl. shared/dev from earlier stores).
+    for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
+        for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+            svc = _service_name(try_key, try_env)
+            add(svc, _account_name(try_key, try_env))
+            add(svc, "default")
+            add(svc, try_key)
+
+    # 3) Legacy / ad-hoc pairs.
+    for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
+        add(service, account)
+
+    # 4) Common accidental variants (bare key as service, macOS username as account).
+    user = (os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
+    for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+        add(try_key, "default")
+        add(f"{_LEGACY_SERVICE}.{try_key}", "default")
+        add(PROJECT, try_key)
+        if user:
+            add(_service_name(try_key, DEFAULT_ENV), user)
+            add(PROJECT, user)
+
+    return pairs
+
+
+def _keyring_get_password(service: str, account: str) -> str | None:
+    try:
+        found = keyring.get_password(service, account)
+    except Exception as exc:
+        log.debug("keyring get_password %s/%s failed: %s", service, account or '""', exc)
+        return None
+    if isinstance(found, str) and found.strip():
+        return found.strip()
+    return None
+
+
+def _security_get_generic_password(service: str, account: str | None) -> str | None:
+    """Read via `security find-generic-password`, preferring the login keychain.
+
+    Using the security(1) CLI reaches the same login keychain Terminal uses and
+    can succeed when Python keyring misses due to ACL / app-identity differences.
+    """
+    security = _security_bin()
+    if security is None:
+        return None
+    if not Path("/usr/bin/security").is_file() and security == "security":
+        # Non-macOS CI: avoid spawning a missing binary repeatedly.
+        return None
+
+    base = [security, "find-generic-password", "-s", service]
+    if account is not None:
+        base.extend(["-a", account])
+    base.append("-w")
+
+    keychain_targets: list[str | None] = []
+    for path in _login_keychain_paths():
+        if Path(path).expanduser().is_file():
+            keychain_targets.append(path)
+    keychain_targets.append(None)  # default search list
+
+    for keychain in keychain_targets:
+        cmd = list(base)
+        if keychain:
+            cmd.append(keychain)
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            log.debug("security find-generic-password failed for %s: %s", service, exc)
+            return None
+        if result.returncode == 0:
+            secret = (result.stdout or "").strip()
+            if secret:
+                return secret
+    return None
+
+
+def _security_set_generic_password(service: str, account: str, password: str) -> bool:
+    """Write/update a generic password on the login keychain, allow-all apps (-A).
+
+    -A ensures Terminal CLI and DEV.app share the same Keychain item without
+    per-app ACL denials that make get_password return None.
+    """
+    security = _security_bin()
+    if security is None or not Path("/usr/bin/security").is_file():
         return False
-    return bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    keychains = [p for p in _login_keychain_paths() if Path(p).expanduser().is_file()]
+    targets: list[str | None] = keychains or [None]
+    ok = False
+    for keychain in targets:
+        del_cmd = [security, "delete-generic-password", "-s", service, "-a", account]
+        add_cmd = [
+            security,
+            "add-generic-password",
+            "-U",
+            "-A",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-w",
+            password,
+        ]
+        if keychain:
+            del_cmd.append(keychain)
+            add_cmd.append(keychain)
+        try:
+            subprocess.run(
+                del_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                stdin=subprocess.DEVNULL,
+            )
+            result = subprocess.run(
+                add_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            log.debug("security add-generic-password failed for %s/%s: %s", service, account, exc)
+            continue
+        if result.returncode == 0:
+            ok = True
+            break
+        err = f"{result.stdout}\n{result.stderr}".strip()
+        log.debug("security add-generic-password %s/%s: %s", service, account, err)
+    return ok
+
+
+def _normalize_bw_master_password(secret: str) -> bool:
+    """Write the master password to the canonical Keychain location (keyring + security)."""
+    backend = _BACKENDS.get("keychain")
+    wrote = False
+    if backend is not None:
+        wrote = bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    svc = _bw_mp_canonical_service()
+    acct = _bw_mp_canonical_account()
+    if _security_set_generic_password(svc, acct, secret):
+        wrote = True
+        log.info(
+            "Persisted Bitwarden master password to login keychain via security at %s/%s",
+            svc,
+            acct,
+        )
+    return wrote
 
 
 def store_bitwarden_master_password(password: str) -> bool:
-    """Persist the Bitwarden master password in macOS Keychain (Keychain backend only)."""
+    """Persist the Bitwarden master password in macOS Keychain (Keychain backend only).
+
+    Always writes the canonical universal-keychain prod path, and also mirrors
+    into the login keychain via `security` with -A so DEV.app and CLI share it.
+    """
     secret = (password or "").strip()
     if not secret:
         return False
+    _ensure_login_keychain_env()
     backend = _BACKENDS.get("keychain")
     if backend is None:
         log.error("Keychain backend unavailable — cannot store Bitwarden master password")
         return False
-    return bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    wrote_keyring = bool(backend.store(_BW_MASTER_PASSWORD_KEY, secret, env=DEFAULT_ENV))
+    wrote_security = _security_set_generic_password(
+        _bw_mp_canonical_service(),
+        _bw_mp_canonical_account(),
+        secret,
+    )
+    if wrote_keyring or wrote_security:
+        global _last_bw_mp_matched_path  # noqa: PLW0603
+        _last_bw_mp_matched_path = _format_key_path(
+            "keyring" if wrote_keyring else "security",
+            _bw_mp_canonical_service(),
+            _bw_mp_canonical_account(),
+        )
+        log.info(
+            "Stored Bitwarden master password at canonical %s/%s (keyring=%s security=%s)",
+            _bw_mp_canonical_service(),
+            _bw_mp_canonical_account(),
+            wrote_keyring,
+            wrote_security,
+        )
+        return True
+    return False
+
+
+def _discover_bitwarden_master_password() -> tuple[str | None, str | None]:
+    """Search Keychain for the BW master password across historical locations.
+
+    Returns (secret, matched_path). matched_path is like ``keyring:svc/acct`` or
+    ``security:svc/acct`` (account may be ``*`` when omitted for security).
+    """
+    global _last_bw_mp_matched_path, _last_bw_mp_lookups_tried  # noqa: PLW0603
+
+    _ensure_login_keychain_env()
+    keyring_ok = _ensure_secure_keyring_backend()
+
+    tried: list[str] = []
+    pairs = _bw_master_password_candidate_pairs()
+    log.info(
+        "Bitwarden master password Keychain lookup starting (%d candidate pairs, keyring=%s)",
+        len(pairs),
+        "ok" if keyring_ok else "unavailable",
+    )
+
+    for service, account in pairs:
+        label = f"{service}/{account if account != '' else '\"\"'}"
+        if keyring_ok:
+            tried.append(f"keyring:{label}")
+            secret = _keyring_get_password(service, account)
+            if secret:
+                path = _format_key_path("keyring", service, account)
+                _last_bw_mp_matched_path = path
+                _last_bw_mp_lookups_tried = tried
+                log.info(
+                    "Bitwarden master password Keychain hit via keyring at %s/%s after %d tries",
+                    service,
+                    account if account != "" else '""',
+                    len(tried),
+                )
+                return secret, path
+
+        tried.append(f"security:{label}")
+        secret = _security_get_generic_password(service, account)
+        if secret:
+            path = _format_key_path("security", service, account)
+            _last_bw_mp_matched_path = path
+            _last_bw_mp_lookups_tried = tried
+            log.info(
+                "Bitwarden master password Keychain hit via security at %s/%s after %d tries",
+                service,
+                account if account != "" else '""',
+                len(tried),
+            )
+            return secret, path
+
+    # Service-only security probes (any account) for unique services already tried.
+    seen_services: set[str] = set()
+    for service, _account in pairs:
+        if service in seen_services:
+            continue
+        seen_services.add(service)
+        tried.append(f"security:{service}/*")
+        secret = _security_get_generic_password(service, None)
+        if secret:
+            path = _format_key_path("security", service, None)
+            _last_bw_mp_matched_path = path
+            _last_bw_mp_lookups_tried = tried
+            log.info(
+                "Bitwarden master password Keychain hit via security at %s/* after %d tries",
+                service,
+                len(tried),
+            )
+            return secret, path
+
+    _last_bw_mp_matched_path = None
+    _last_bw_mp_lookups_tried = tried
+    preview = "; ".join(tried[:24])
+    more = f" (+{len(tried) - 24} more)" if len(tried) > 24 else ""
+    log.info(
+        "Bitwarden master password Keychain lookup miss after %d tries: %s%s",
+        len(tried),
+        preview,
+        more,
+    )
+    return None, None
 
 
 def get_bitwarden_master_password() -> str | None:
     """Read the Bitwarden master password from macOS Keychain, if present.
 
     Searches the canonical universal-keychain location first, then alternate
-    key/env names and legacy Keychain pairs. When found under a non-canonical
-    location, normalizes by writing the canonical entry for future reads.
+    key/env names, legacy Keychain pairs, and ``security find-generic-password``
+    on the login keychain. When found under a non-canonical location, normalizes
+    by writing the canonical entry for future reads (CLI and DEV.app).
     """
-    backend = _BACKENDS.get("keychain")
-    if backend is None:
+    secret, matched = _discover_bitwarden_master_password()
+    if not secret:
         return None
 
-    # 1) Canonical prod key.
-    value = backend.get(_BW_MASTER_PASSWORD_KEY, env=DEFAULT_ENV)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-
-    if not _ensure_secure_keyring_backend():
-        return None
-
-    # 2) Alternate key / env combinations used by earlier store attempts.
-    for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
-        for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
-            if try_env == DEFAULT_ENV and try_key == _BW_MASTER_PASSWORD_KEY:
-                continue
-            found = backend.get(try_key, env=try_env)
-            if isinstance(found, str) and found.strip():
-                secret = found.strip()
-                if _normalize_bw_master_password(secret):
-                    log.info(
-                        "Normalized Bitwarden master password Keychain entry "
-                        "from %s/%s → canonical %s/%s",
-                        _service_name(try_key, try_env),
-                        _account_name(try_key, try_env),
-                        _service_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV),
-                        _account_name(_BW_MASTER_PASSWORD_KEY, DEFAULT_ENV),
-                    )
-                return secret
-
-    # 3) Legacy / ad-hoc service+account pairs.
-    for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
-        try:
-            found = keyring.get_password(service, account)
-        except Exception as exc:
-            log.debug("Legacy Keychain read %s/%s failed: %s", service, account, exc)
-            continue
-        if isinstance(found, str) and found.strip():
-            secret = found.strip()
-            if _normalize_bw_master_password(secret):
-                log.info(
-                    "Normalized Bitwarden master password Keychain entry "
-                    "from legacy %s/%s → canonical location",
-                    service,
-                    account,
-                )
-            return secret
-    return None
+    canonical = _format_key_path(
+        "keyring",
+        _bw_mp_canonical_service(),
+        _bw_mp_canonical_account(),
+    )
+    # Normalize when the hit was not already the canonical keyring path, or when
+    # security found it (so keyring + allow-all ACL are updated for DEV.app).
+    needs_normalize = matched != canonical or (matched or "").startswith("security:")
+    if needs_normalize:
+        if _normalize_bw_master_password(secret):
+            log.info(
+                "Normalized Bitwarden master password Keychain entry "
+                "from %s → canonical %s/%s",
+                matched,
+                _bw_mp_canonical_service(),
+                _bw_mp_canonical_account(),
+            )
+            global _last_bw_mp_matched_path  # noqa: PLW0603
+            # Prefer reporting the original hit so status explains the discovery.
+            _last_bw_mp_matched_path = matched
+    return secret
 
 
 def delete_bitwarden_master_password() -> bool:
     """Remove the Bitwarden master password from macOS Keychain (canonical + fallbacks)."""
+    global _last_bw_mp_matched_path  # noqa: PLW0603
     backend = _BACKENDS.get("keychain")
     if backend is None:
         return False
-    if not _ensure_secure_keyring_backend():
-        return False
+    _ensure_login_keychain_env()
+    keyring_ok = _ensure_secure_keyring_backend()
     removed = False
-    # Prefer direct keyring deletes so missing fallbacks do not spam error logs.
-    for try_env in _BW_MASTER_PASSWORD_FALLBACK_ENVS:
-        for try_key in _BW_MASTER_PASSWORD_FALLBACK_KEYS:
+    security = _security_bin()
+    pairs = _bw_master_password_candidate_pairs()
+    if keyring_ok:
+        for service, account in pairs:
             try:
-                keyring.delete_password(
-                    _service_name(try_key, try_env),
-                    _account_name(try_key, try_env),
-                )
+                keyring.delete_password(service, account)
                 removed = True
             except Exception:
                 continue
-    for service, account in _BW_MASTER_PASSWORD_LEGACY_LOCATIONS:
-        try:
-            keyring.delete_password(service, account)
-            removed = True
-        except Exception:
-            continue
+    if security and Path("/usr/bin/security").is_file():
+        for service, account in pairs:
+            for keychain in [p for p in _login_keychain_paths() if Path(p).is_file()] + [None]:
+                cmd = [security, "delete-generic-password", "-s", service, "-a", account]
+                if keychain:
+                    cmd.append(keychain)
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                    continue
+                if result.returncode == 0:
+                    removed = True
+    if removed:
+        _last_bw_mp_matched_path = None
     return removed
 
 
-def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | bool | None]:
+def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | bool | int | None]:
     """Diagnostics for Keychain MP + vault state.
 
     When attempt_unlock is True, runs ensure_bitwarden_unlocked() first so
@@ -446,11 +768,20 @@ def bitwarden_unlock_status(*, attempt_unlock: bool = False) -> dict[str, str | 
             vault = "unknown"
         else:
             vault = backend.login_check()
+
+    secret = get_bitwarden_master_password()
+    matched = get_last_bitwarden_master_password_match() if secret else None
     return {
-        "master_password_stored": get_bitwarden_master_password() is not None,
+        "master_password_stored": secret is not None,
+        "master_password_matched_path": matched,
+        "master_password_canonical": (
+            f"{_bw_mp_canonical_service()}/{_bw_mp_canonical_account()}"
+        ),
+        "lookups_tried": len(_last_bw_mp_lookups_tried),
         "vault_status": vault,
         "last_unlock_error": get_last_bitwarden_unlock_error(),
         "bw_session_present": bool(os.environ.get(_BW_SESSION_ENV, "").strip()),
+        "keychain_path": os.environ.get("KEYCHAIN_PATH") or None,
     }
 
 
@@ -1041,21 +1372,35 @@ class _BitwardenBackend(_CredentialBackend):
 # Backend registry
 # ---------------------------------------------------------------------------
 
+# Live credential backends used by Connect / CLI / menubar.
+_ACTIVE_BACKENDS = frozenset({"bitwarden", "keychain"})
+
+# 1Password remains registered only as inert scaffold (tests / dead code path).
+_SCAFFOLD_BACKENDS = frozenset({"1password"})
+
 _BACKENDS: dict[str, _CredentialBackend] = {
     "1password": _OnePasswordBackend(),
     "keychain": _KeychainBackend(),
     "bitwarden": _BitwardenBackend(),
 }
 
-_READ_FALLBACK_ORDER = ["bitwarden", "1password", "keychain"]
-_WRITE_FALLBACK_ORDER = ["bitwarden", "1password", "keychain"]
+_READ_FALLBACK_ORDER = ["bitwarden", "keychain"]
+_WRITE_FALLBACK_ORDER = ["bitwarden", "keychain"]
 
 
 def _active_backend_name() -> str:
     raw = os.environ.get(_CREDENTIAL_BACKEND_ENV, "bitwarden").strip().lower()
-    if raw in _BACKENDS:
+    if raw in _ACTIVE_BACKENDS:
         return raw
-    log.warning("Unknown credential backend '%s'; falling back to bitwarden", raw)
+    if raw in _SCAFFOLD_BACKENDS:
+        log.warning(
+            "Credential backend '%s' is scaffold-only and not used; "
+            "falling back to bitwarden",
+            raw,
+        )
+        return "bitwarden"
+    if raw:
+        log.warning("Unknown credential backend '%s'; falling back to bitwarden", raw)
     return "bitwarden"
 
 
@@ -1087,8 +1432,6 @@ def get_credential(key: str, *, env: str = DEFAULT_ENV) -> str | None:
     # Fall back through remaining backends (reads only)
     for fallback_name in _READ_FALLBACK_ORDER:
         if fallback_name == active.name:
-            continue
-        if fallback_name == "1password" and _op_cli_found is False:
             continue
         backend = _BACKENDS[fallback_name]
         for try_env in _fallback_envs(env):
@@ -1124,12 +1467,18 @@ def store_credential(
     env: str = DEFAULT_ENV,
     backend: str | None = None,
 ) -> bool:
-    """Store credential in the active backend (or an explicit backend)."""
+    """Store credential in the active backend (or an explicit live backend)."""
     if backend is None:
         target = _active_backend()
     else:
         name = backend.strip().lower()
-        if name not in _BACKENDS:
+        if name in _SCAFFOLD_BACKENDS:
+            log.error(
+                "Credential backend '%s' is scaffold-only and cannot be used for writes",
+                name,
+            )
+            return False
+        if name not in _ACTIVE_BACKENDS:
             log.error("Unknown credential backend '%s'", backend)
             return False
         target = _BACKENDS[name]
@@ -1828,6 +2177,8 @@ def store_router_credentials(
     """
     resolved_env = env or _runtime_credential_env()
     target_name = (backend or _active_backend_name()).strip().lower()
+    if target_name in _SCAFFOLD_BACKENDS or target_name not in _ACTIVE_BACKENDS:
+        target_name = "bitwarden"
     ok_user = store_credential(
         "router_username", username, env=resolved_env, backend=target_name
     )
