@@ -94,7 +94,7 @@ See `PLAN_PIPE.md` and `moe-rca-hermes-desktop.md`. Paste each Mac's `*.report.m
 
 ## After Mac A succeeds (operator)
 
-See [`NEXT_STEPS.md`](NEXT_STEPS.md): paste Mac A `*.report.md`, bootstrap Mac B, optionally re-bootstrap Mac A for monitor + live progress.
+See [`NEXT_STEPS.md`](NEXT_STEPS.md): Mac A reports ingested (MOE H1); optional interim H1 repair; bootstrap Mac B for dual-system RCA.
 ## Requirements
 
 - macOS Apple Silicon preferred

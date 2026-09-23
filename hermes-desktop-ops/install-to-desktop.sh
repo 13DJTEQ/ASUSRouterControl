@@ -31,8 +31,8 @@ chmod +x \
   "${DEST}/hermes-desktop-archive.sh" \
   "${DEST}/install-to-desktop.sh" \
   "${DEST}/bootstrap-desktop-collector.sh" \
-  "${DEST}/hermes-desktop-monitor.sh" 2>/dev/null || true
-[[ -f "${DEST}/hermes-desktop-repair.sh" ]] && chmod +x "${DEST}/hermes-desktop-repair.sh" || true
+  "${DEST}/hermes-desktop-monitor.sh" \
+  "${DEST}/hermes-desktop-repair.sh" 2>/dev/null || true
 
 # Convenience copy of monitor on Desktop root for quick curl-less check-ins
 cp "${DEST}/hermes-desktop-monitor.sh" "${HOME}/Desktop/hermes-desktop-monitor.sh" 2>/dev/null || true
@@ -41,4 +41,5 @@ chmod +x "${HOME}/Desktop/hermes-desktop-monitor.sh" 2>/dev/null || true
 printf '[install] hermes-desktop-ops → %s\n' "${DEST}"
 printf '[install] next: /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-archive.sh\n'
 printf '[install] monitor: /bin/bash ~/Desktop/hermes-desktop-monitor.sh\n'
+printf '[install] repair (dry-run): /bin/bash ~/Desktop/hermes-desktop-ops/hermes-desktop-repair.sh\n'
 printf '%s\n' "${DEST}"

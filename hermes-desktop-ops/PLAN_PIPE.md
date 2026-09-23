@@ -33,7 +33,7 @@ Each hypothesis: `id`, `title`, `score`, `upstream_refs`, `evidence`, `plan_sect
 
 | Host | Status |
 |------|--------|
-| Mac A `adminisorsMBP14` | Collector **SUCCEEDED** (`hermes-incident-adminisorsMBP14-20260923T203559Z`). **Pending report paste** — need `.report.md` / `.report.json` from Desktop. |
+| Mac A `adminisorsMBP14` | Collector **SUCCEEDED**; **reports ingested**. MOE primary **`H1_desktop_python_gateway`** (score 7). |
 | Mac B | Still pending — run bootstrap one-liner (see `NEXT_STEPS.md`). |
 
 Canonical findings live in [`moe-rca-hermes-desktop.md`](moe-rca-hermes-desktop.md). Operator runbook: [`NEXT_STEPS.md`](NEXT_STEPS.md).

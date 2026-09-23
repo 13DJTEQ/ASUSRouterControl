@@ -160,8 +160,8 @@ fi
 chmod +x "${DEST}/hermes-desktop-archive.sh" \
   "${DEST}/install-to-desktop.sh" \
   "${DEST}/bootstrap-desktop-collector.sh" \
-  "${DEST}/hermes-desktop-monitor.sh" 2>/dev/null || true
-[[ -f "${DEST}/hermes-desktop-repair.sh" ]] && chmod +x "${DEST}/hermes-desktop-repair.sh" || true
+  "${DEST}/hermes-desktop-monitor.sh" \
+  "${DEST}/hermes-desktop-repair.sh" 2>/dev/null || true
 [[ -f "${DEST}/lib/build_report.py" ]] || die "missing lib/build_report.py after install"
 [[ -f "${DEST}/lib/live_progress.sh" ]] || die "missing lib/live_progress.sh after install"
 

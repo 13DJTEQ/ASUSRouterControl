@@ -1,37 +1,37 @@
 # Next steps (operator)
 
-Mac A (`adminisorsMBP14`) collector **succeeded**. Manifest ingested into MOE docs.
-**`.report.md` / `.report.json` still missing from chat/uploads** — H1–H4 evidence scores cannot be classified from the manifest alone.
+Mac A (`adminisorsMBP14`) collector **succeeded**; **`.report.md` / `.report.json` ingested**.  
+MOE Mac-A primary: **`H1_desktop_python_gateway`** (score 7). Mac B still needed for dual-system RCA.
 
-## 1. Paste Mac A reports (required for H1–H4)
+## 1. Mac A — optional interim H1 repair (supported now)
 
-Manifest already recorded:
+H1 is clearly leading on Mac A (`port_9130_closed` + system Python cannot import `hermes_cli` + venv OK). Interim repair is reasonable **without** waiting for Mac B; dual-Mac confirmation remains preferred before treating H1 as fleet-wide.
 
-| Field | Value |
-|-------|-------|
-| incident_id | `hermes-incident-adminisorsMBP14-20260923T203559Z` |
-| archive | `hermes-incident-adminisorsMBP14-20260923T203559Z.zip` |
-| collected_at_utc | `20260923T203559Z` |
-| hostname | `adminisorsMBP14` |
-| collector `primary_hypothesis` | `H1_desktop_python_gateway` *(asserted only — no scores yet)* |
-| plan_pipe_format | `hermes-desktop-ops/report-v1` |
-
-On Mac A, open or cat and **upload/paste** into chat / into `moe-rca-hermes-desktop.md` → **Findings from collectors**:
+On Mac A (after optional re-bootstrap so `hermes-desktop-repair.sh` is present):
 
 ```bash
-cat ~/Desktop/hermes-incident-adminisorsMBP14-20260923T203559Z.report.md
-# optional machine feed:
-cat ~/Desktop/hermes-incident-adminisorsMBP14-20260923T203559Z.report.json
+# Prefer fresh ops drop (also picks up monitor + repair script):
+curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/bootstrap-desktop-collector.sh -o ~/Desktop/bootstrap-desktop-collector.sh && chmod +x ~/Desktop/bootstrap-desktop-collector.sh && /bin/bash ~/Desktop/bootstrap-desktop-collector.sh --skip-collect
+
+cd ~/Desktop/hermes-desktop-ops
+./hermes-desktop-repair.sh                 # dry-run (default)
+./hermes-desktop-repair.sh --apply         # only if dry-run looks right
 ```
 
-Exact paths:
+Manual H1 commands if repair script is unavailable:
 
-- `~/Desktop/hermes-incident-adminisorsMBP14-20260923T203559Z.report.md`
-- `~/Desktop/hermes-incident-adminisorsMBP14-20260923T203559Z.report.json`
+```bash
+hermes doctor
+hermes gateway status
+# Ensure Desktop/gateway uses venv Python, not /usr/bin/python3
+launchctl kickstart -k "gui/$(id -u)/ai.hermes.gateway"
+# Recheck:
+nc -z 127.0.0.1 9130 && echo "9130 open" || echo "9130 still closed"
+```
 
-Do not invent hypothesis scores without these files. Manifest `primary_hypothesis` is not a substitute for scored evidence.
+**Do not** lead with `hermes auth add nous --type oauth` on Mac A yet — H2 is secondary (score 3; refresh token not null; no quarantine hint).
 
-## 2. Run the same bootstrap on Mac B
+## 2. Run the same bootstrap on Mac B (still needed)
 
 One line (Terminal on Mac B):
 
@@ -39,14 +39,21 @@ One line (Terminal on Mac B):
 curl -fsSL https://raw.githubusercontent.com/13DJTEQ/ASUSRouterControl/cursor/hermes-desktop-ops-cfe4/hermes-desktop-ops/bootstrap-desktop-collector.sh -o ~/Desktop/bootstrap-desktop-collector.sh && chmod +x ~/Desktop/bootstrap-desktop-collector.sh && /bin/bash ~/Desktop/bootstrap-desktop-collector.sh
 ```
 
-Then paste Mac B's `*.report.md` (and ideally `*.report.json` / manifest) the same way.
+Then upload/paste Mac B's `*.report.md` and `*.report.json` the same way as Mac A.
 
-## 3. Optional — re-bootstrap Mac A for newer ops
+## 3. After both reports
 
-Mac A's installed drop listed **no** `hermes-desktop-monitor.sh` (older snapshot). Collector still worked. To pick up monitor + 20s live heartbeats for future runs, re-run the same bootstrap one-liner on Mac A (`--skip-collect` if you only want tools refresh):
+- Merge max scores into `moe-rca-hermes-desktop.md` → Combined primary hypotheses
+- Gate Fast→Slow repair on the dual-Mac leading H*
+- If H2 leads on either host: `hermes auth add nous --type oauth` (no external OAuth token health-checks)
 
-```bash
-/bin/bash ~/Desktop/bootstrap-desktop-collector.sh --skip-collect
-```
+## Mac A ingest reference
 
-Or re-run the full curl one-liner from `README.md`.
+| Field | Value |
+|-------|-------|
+| incident_id | `hermes-incident-adminisorsMBP14-20260923T203559Z` |
+| hostname | `adminisorsMBP14` |
+| collected_at_utc | `20260923T203559Z` |
+| primary_hypothesis | `H1_desktop_python_gateway` |
+| H1 / H2 / H4 / H3 scores | 7 / 3 / 3 / 2 |
+| plan_pipe_format | `hermes-desktop-ops/report-v1` |
