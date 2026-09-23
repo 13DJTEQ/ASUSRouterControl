@@ -90,8 +90,11 @@ cd /path/to/ASUSRouterControl/hermes-desktop-ops
 
 ## Pipe report into the plan
 
-See `PLAN_PIPE.md`. Paste each Mac's `*.report.md` under **Findings from collectors**.
+See `PLAN_PIPE.md` and `moe-rca-hermes-desktop.md`. Paste each Mac's `*.report.md` under **Findings from collectors**.
 
+## After Mac A succeeds (operator)
+
+See [`NEXT_STEPS.md`](NEXT_STEPS.md): paste Mac A `*.report.md`, bootstrap Mac B, optionally re-bootstrap Mac A for monitor + live progress.
 ## Requirements
 
 - macOS Apple Silicon preferred

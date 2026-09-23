@@ -28,3 +28,12 @@ Each hypothesis: `id`, `title`, `score`, `upstream_refs`, `evidence`, `plan_sect
 ### Combined primary hypotheses
 <!-- take max score per id across both reports -->
 ```
+
+## Status (2026-09-23)
+
+| Host | Status |
+|------|--------|
+| Mac A `adminisorsMBP14` | Collector **SUCCEEDED** (`hermes-incident-adminisorsMBP14-20260923T203559Z`). **Pending report paste** — need `.report.md` / `.report.json` from Desktop. |
+| Mac B | Still pending — run bootstrap one-liner (see `NEXT_STEPS.md`). |
+
+Canonical findings live in [`moe-rca-hermes-desktop.md`](moe-rca-hermes-desktop.md). Operator runbook: [`NEXT_STEPS.md`](NEXT_STEPS.md).
