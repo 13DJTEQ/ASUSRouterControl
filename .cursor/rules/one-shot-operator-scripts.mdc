@@ -1,0 +1,39 @@
+---
+description: Operator tooling must ship as complete one-shot scripts — never instruct operators to run paths that are not yet on the machine.
+alwaysApply: true
+---
+
+# Complete one-shot operator scripts
+
+Past pain: operators were told to run `./install-to-desktop.sh` or `./hermes-desktop-repair.sh` before those files existed on the Mac.
+
+## Hard requirements
+
+When writing operator instructions, READMEs, PR bodies, chat replies, or new Desktop/ops tooling:
+
+1. **Primary path = one-shot bootstrap.** Lead with a single pasteable command that downloads the full toolset and runs it. Example shape:
+
+   ```bash
+   curl -fsSL <raw-url>/bootstrap-….sh -o ~/Desktop/bootstrap-….sh && chmod +x ~/Desktop/bootstrap-….sh && /bin/bash ~/Desktop/bootstrap-….sh
+   ```
+
+2. **Never instruct operators to run a relative path** (`./foo.sh`, `cd … && ./bar.sh`) that assumes an already-present checkout or Desktop drop **unless** the immediately preceding one-shot in the same paste just created that path.
+
+3. **Scripts must be self-contained or bootstrap their own dependencies.** No “first clone the repo”, “first copy these files”, or “if you already installed yesterday’s drop” as the primary path.
+
+4. **README structure:** one-liner first; multi-step “if you already have a checkout / already installed” is secondary and clearly labeled.
+
+5. **zsh-safe pastes:** paste instructions as **one line**. Do not tell operators to paste comment lines that contain parentheses — zsh can treat `(…)` as glob qualifiers and break the paste.
+
+6. **One bootstrap gets everything.** When adding new operator tools (repair, monitor, archive, etc.), update the **same** bootstrap/`install-to-desktop` drop so one curl installs the full current toolset. Do not ship a second “install this extra script” as the primary path for a Mac that may have a stale drop.
+
+## Allowed secondary paths
+
+- Absolute paths under `~/Desktop/…` **after** a one-shot that just installed them (same session / same paste block).
+- “If you already have the repo checked out” sections, placed **below** the one-shot, never above it.
+
+## Applies especially to
+
+- `hermes-desktop-ops/` and any similar Desktop/ops drops
+- Repair, monitor, collector, install, and bootstrap scripts
+- Operator-facing docs (`README.md`, `NEXT_STEPS.md`, MOE runbooks) and PR/chat paste blocks
