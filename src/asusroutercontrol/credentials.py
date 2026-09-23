@@ -363,7 +363,7 @@ _BW_WRONG_MP_COOLDOWN_SECONDS = 15 * 60
 _BW_WRONG_MP_OPERATOR_HINT = (
     "Keychain master password rejected by Bitwarden (wrong or corrupt). "
     "Tried available Keychain candidates automatically; vault remains locked. "
-    "Run: asusrouter credentials bw-master --force --set"
+    "Check: asusrouter credentials bw-master --status"
 )
 _BW_NO_MP_OPERATOR_HINT = (
     "Bitwarden vault locked and no master password in Keychain "

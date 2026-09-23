@@ -121,7 +121,9 @@ def test_bw_master_set_without_force_skips_prompt_when_quarantined(
     result = runner.invoke(cli, ["credentials", "bw-master", "--set"])
     assert result.exit_code == 0, result.output
     assert "already stored" in result.output.lower()
-    assert "force --set" in result.output
+    out = " ".join(result.output.split())
+    assert "--force --set" in out
+    assert "bw-master --status" in out
     assert "rejected by Bitwarden" in result.output
 
 

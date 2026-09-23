@@ -1119,7 +1119,8 @@ class TestBitwardenMasterPasswordUnlock:
         assert creds.ensure_bitwarden_unlocked() == "locked"
         err = creds.get_last_bitwarden_unlock_error() or ""
         assert "wrong or corrupt" in err.lower() or "rejected by bitwarden" in err.lower()
-        assert "bw-master --force --set" in err
+        assert "bw-master --status" in err
+        assert "bw-master --force --set" not in err
         assert creds.wrong_mp_cooldown_active() is True
 
     def test_decryption_failure_enters_cooldown_and_dedupes_log(
@@ -1161,7 +1162,8 @@ class TestBitwardenMasterPasswordUnlock:
         assert unlock_calls["n"] == 1  # cooldown skips further bw unlock
         err = creds.get_last_bitwarden_unlock_error() or ""
         assert "Keychain master password rejected by Bitwarden" in err
-        assert "bw-master --force --set" in err
+        assert "bw-master --status" in err
+        assert "bw-master --force --set" not in err
         assert creds.get_bitwarden_master_password_quarantine()
         warn_lines = [
             r
@@ -1247,7 +1249,8 @@ class TestBitwardenMasterPasswordUnlock:
 
         assert creds.ensure_bitwarden_unlocked() == "locked"
         err = creds.get_last_bitwarden_unlock_error() or ""
-        assert "bw-master --force --set" in err
+        assert "bw-master --status" in err
+        assert "bw-master --force --set" not in err
         assert "no master password" not in err.lower()
 
         info = creds.bitwarden_unlock_status(attempt_unlock=False)
@@ -1421,8 +1424,11 @@ class TestBitwardenMasterPasswordUnlock:
         assert "rejected by bitwarden" in _classify_bw_unlock_failure(
             "Invalid master password."
         ).lower()
-        assert "bw-master --force --set" in _classify_bw_unlock_failure(
+        assert "bw-master --status" in _classify_bw_unlock_failure(
             "ERROR bitwarden_crypto::keys::master_key: error=The decryption operation failed"
+        )
+        assert "bw-master --force --set" not in _classify_bw_unlock_failure(
+            "Invalid master password."
         )
         assert "not logged in" in _classify_bw_unlock_failure("You are not logged in").lower()
 
