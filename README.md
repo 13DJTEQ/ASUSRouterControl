@@ -10,7 +10,7 @@ asusrouter setup
 ```
 
 The `setup` command stores router credentials securely in Bitwarden via the `bw` CLI (default).
-Alternate backends (1Password, macOS Keychain) are available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND`.
+macOS Keychain is available via `ASUSROUTERCONTROL_CREDENTIAL_BACKEND=keychain` (Bitwarden remains the default). 1Password code exists only as unused scaffold.
 Set `ROUTER_BACKEND=merlin` (default) or `ROUTER_BACKEND=freshtomato` in `.env` to select firmware backend.
 
 ## Developer validation
@@ -90,7 +90,7 @@ ASUSRouterControl is a Python 3.11+ async-first application (~25K LOC source, ~6
 
 **Configuration & Credentials**
 - `config.py` — frozen `Config` dataclass, env/.env driven, runtime-environment isolation (dev vs prod data dirs)
-- `credentials.py` — pluggable backend registry (Bitwarden primary, 1Password and macOS Keychain fallbacks)
+- `credentials.py` — pluggable backend registry (Bitwarden primary, macOS Keychain fallback; 1Password scaffold only)
 
 **Firmware Backends** (strategy pattern)
 - `backends/base.py` — `FirmwareBackend` ABC with `BackendOperationUnsupported` exception

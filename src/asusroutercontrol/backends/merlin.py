@@ -49,6 +49,22 @@ class MerlinBackend(FirmwareBackend):
 
     async def connect(self) -> None:
         self._session = aiohttp.ClientSession()
+        try:
+            from asusrouter.connection_config import (
+                ARConnectionConfigKey as ARCCKey,
+            )
+
+            connection_config = {
+                # Let the library heal HTTP↔HTTPS and port mismatches itself.
+                ARCCKey.ALLOW_FALLBACK: True,
+                ARCCKey.ALLOW_UPGRADE_HTTP_TO_HTTPS: True,
+                # ASUS routers use self-signed certs by default.
+                ARCCKey.VERIFY_SSL: False,
+                ARCCKey.STRICT_SSL: False,
+            }
+        except Exception:  # noqa: BLE001 — older asusrouter without config keys
+            connection_config = None
+
         self._router = AsusRouter(
             hostname=self._hostname,
             username=self._username,
@@ -56,8 +72,14 @@ class MerlinBackend(FirmwareBackend):
             use_ssl=self._use_ssl,
             port=self._port,
             session=self._session,
+            connection_config=connection_config,
         )
-        await self._router.async_connect()
+        connected = await self._router.async_connect()
+        if connected is False:
+            raise RuntimeError(
+                "Cannot access EndpointService.LOGIN. Failed in `async_connect` "
+                f"(no asus_token from {self._hostname})"
+            )
         log.info("Connected to router at %s", self._hostname)
 
     async def disconnect(self) -> None:
@@ -155,7 +177,9 @@ class MerlinBackend(FirmwareBackend):
             fw_data = await router.async_get_data(AsusData.FIRMWARE)
             if fw_data and isinstance(fw_data, dict):
                 info.firmware_version = fw_data.get("current")
-                info.model = fw_data.get("model")
+                from asusroutercontrol.router_model import model_from_firmware_payload
+
+                info.model = model_from_firmware_payload(fw_data)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             log.debug("Firmware data unavailable", exc_info=True)
 

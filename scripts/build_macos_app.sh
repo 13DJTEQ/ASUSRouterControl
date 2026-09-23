@@ -72,6 +72,7 @@ build_dev_app() {
   local launcher="${macos_dir}/asusroutercontrol-launcher"
   local plist_path="${contents_dir}/Info.plist"
   local dest_app="${TEST_BUILDS_DIR}/${app_name}"
+  local home_dir="${HOME}"
 
   rm -rf "${app_dir}"
   mkdir -p "${macos_dir}" "${resources_dir}"
@@ -114,6 +115,11 @@ VENV_PY="\${PROJECT_ROOT}/.venv/bin/python"
 DEV_RUNTIME_EXE="${dev_runtime_exe}"
 SELF_CONTAINED_EXE="\${PROJECT_ROOT}/dist/ASUSRouterControl.app/Contents/MacOS/ASUSRouterControl"
 export ASUSROUTERCONTROL_RUNTIME_ENV="dev"
+export ASUSROUTERCONTROL_ENV_FILE="${HOME}/.asusroutercontrol.dev/.env"
+export DATA_DIR="${HOME}/.asusroutercontrol.dev"
+# Do not set KEYCHAIN_PATH — keyring ignores it (jaraco/keyring#623) and warns.
+# Login-keychain access uses ``security -A`` with explicit paths in credentials.py.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin:${PATH:-}"
 # Prefer source-tree runtime for dev builds so the process remains associated
 # with the DEV app bundle identity in the menubar.
 if [[ -x "\${VENV_PY}" ]]; then
@@ -141,6 +147,18 @@ EOF
   "${VENV_PY}" "${SCRIPT_DIR}/generate_dev_icon.py" --output "${icon_icns}"
   cp "${icon_icns}" "${resources_dir}/Icon.icns"
 
+  local pkg_version
+  pkg_version="$("${VENV_PY}" -c "from asusroutercontrol import __version__; print(__version__)" 2>/dev/null || true)"
+  if [[ -z "${pkg_version}" ]]; then
+    pkg_version="0.2.0"
+  fi
+  local git_sha
+  git_sha="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+  local build_stamp
+  build_stamp="$(date -u +%Y%m%d%H%M%S)-${git_sha}"
+  # CFBundleVersion must be unique per rebuild so Finder/About don't look "reverted".
+  local bundle_version="${build_stamp}"
+
   cat > "${plist_path}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -161,13 +179,24 @@ EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>${pkg_version}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${bundle_version}</string>
   <key>CFBundleIconFile</key>
   <string>Icon</string>
   <key>LSUIElement</key>
   <true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>ASUSROUTERCONTROL_RUNTIME_ENV</key>
+    <string>dev</string>
+    <key>ASUSROUTERCONTROL_ENV_FILE</key>
+    <string>${home_dir}/.asusroutercontrol.dev/.env</string>
+    <key>DATA_DIR</key>
+    <string>${home_dir}/.asusroutercontrol.dev</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:${home_dir}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 </dict>
 </plist>
 EOF
@@ -176,9 +205,41 @@ EOF
   rm -rf "${dest_app}"
   cp -R "${app_dir}" "${dest_app}"
   touch "${dest_app}/Contents/Resources/DEV_BUILD"
+  printf '%s\n' "${build_stamp}" > "${dest_app}/Contents/Resources/BUILD_STAMP"
+  printf 'ASUSRouterControl DEV %s (git %s)\n' "${pkg_version}" "${git_sha}" \
+    > "${dest_app}/Contents/Resources/ABOUT.txt"
+
+  local bundle_exec_path="${dest_app}/Contents/MacOS/asusroutercontrol-launcher"
+  if [[ ! -x "${bundle_exec_path}" ]]; then
+    echo "CFBundleExecutable missing or not executable: ${bundle_exec_path}" >&2
+    exit 1
+  fi
+  chmod +x "${bundle_exec_path}"
+
+  if command -v plutil >/dev/null 2>&1; then
+    if ! plutil -lint "${dest_app}/Contents/Info.plist" >/dev/null; then
+      echo "Info.plist failed plutil -lint:" >&2
+      plutil -lint "${dest_app}/Contents/Info.plist" >&2 || true
+      exit 1
+    fi
+  fi
+
+  # Quarantine / build xattrs commonly trigger LS error -54 on `open`.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "${dest_app}" 2>/dev/null || true
+  fi
+
+  local lsregister_bin="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "${lsregister_bin}" ]]; then
+    "${lsregister_bin}" -u "${dest_app}" >/dev/null 2>&1 || true
+    "${lsregister_bin}" -f "${dest_app}" >/dev/null 2>&1 || true
+  fi
 
   echo "Built ${app_name}"
   echo "Output: ${dest_app}"
+  echo "CFBundleShortVersionString=${pkg_version}"
+  echo "CFBundleVersion=${bundle_version}"
+  echo "CFBundleExecutable=asusroutercontrol-launcher"
 }
 
 build_prod_dmg() {

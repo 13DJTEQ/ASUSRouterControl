@@ -33,7 +33,7 @@ class TestConfigDefaults:
 
     def test_default_ssh_port(self, env_clean):
         cfg = load_config()
-        assert cfg.ssh_port == 1313
+        assert cfg.ssh_port == 22
 
     def test_default_data_dir_is_under_home(self, env_clean):
         cfg = load_config()

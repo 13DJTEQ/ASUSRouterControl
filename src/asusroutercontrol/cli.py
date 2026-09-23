@@ -20,7 +20,6 @@ from asusroutercontrol.credentials import (
     delete_legacy_credentials,
     get_router_credentials,
     migrate_legacy_credentials,
-    store_credential,
 )
 from asusroutercontrol.datastore import DataStore
 
@@ -1178,24 +1177,114 @@ async def _run_with_backend(coro_factory):
 
 
 @cli.command()
-def setup():
-    """Store router credentials in 1Password (universal-keychain format)."""
+@click.option("--host", default=None, help="Router hostname/IP (default: discover or config).")
+@click.option("--http-port", default=80, show_default=True, type=int)
+@click.option("--ssh-port", default=22, show_default=True, type=int)
+@click.option("--ssh/--no-ssh", default=True, show_default=True, help="Probe optional SSH.")
+@click.option(
+    "--credential-backend",
+    type=click.Choice(["bitwarden", "keychain", "1password"]),
+    default=None,
+    help="Credential store (default: process backend; Keychain recommended for GUI).",
+)
+@click.option("--backend", "router_backend", default="merlin", show_default=True)
+def setup(host, http_port, ssh_port, ssh, credential_backend, router_backend):
+    """Connect to a customer router: test HTTP (+ optional SSH), save profile + credentials."""
+    import asyncio
+
+    from asusroutercontrol.connect import setup_router_connection
+    from asusroutercontrol.discovery import discover_router_candidates, pick_default_host
+
     console.print("[bold]ASUSRouterControl Setup[/bold]\n")
+    console.print(
+        "HTTP admin API is required. SSH is optional and will not block setup.\n"
+        "Shipping SSH default is port 22; lab routers can override (e.g. 1313).\n"
+    )
 
-    username = click.prompt("Router username", default="admin")
-    password = click.prompt("Router password", hide_input=True)
+    candidates = discover_router_candidates(http_port=http_port, probe=True)
+    suggested = host or pick_default_host(candidates)
+    if candidates:
+        console.print("[dim]Discovered candidates:[/dim]")
+        for c in candidates:
+            mark = "✓" if c.reachable else "·"
+            console.print(f"  {mark} {c.host} ({c.source})")
+        console.print()
 
-    ok_user = store_credential("router_username", username)
-    ok_pass = store_credential("router_password", password)
+    from asusroutercontrol.credentials import (
+        get_router_credentials,
+        get_router_ssh_port,
+        resolve_connect_login_defaults,
+    )
 
-    if ok_user and ok_pass:
-        backend_name = _active_backend_name()
-        msg = f"\n[green]Credentials stored in {backend_name} "
-        msg += "(universal-keychain).[/green]"
-        console.print(msg)
-        console.print("Config file: copy .env.example to .env and adjust ROUTER_HOST if needed.")
+    saved_user, saved_pass = get_router_credentials()
+    saved_port = get_router_ssh_port()
+    defaults = resolve_connect_login_defaults(
+        suggested_host=suggested,
+        config_ssh_port=int(ssh_port or 22),
+        preferred_backend=credential_backend,
+    )
+
+    resolved_host = click.prompt("Router host", default=suggested)
+    username = click.prompt("Router username", default=str(defaults["username"] or "admin"))
+    password_prompt = "Router password"
+    if saved_pass:
+        password_prompt += " [leave blank to reuse stored]"
+    password = click.prompt(password_prompt, hide_input=True, default="", show_default=False)
+    password = password or saved_pass or ""
+    if not password:
+        raise click.ClickException(
+            "Password is required (or store it in Bitwarden/Keychain first)."
+        )
+    use_ssl = click.confirm("Use HTTPS?", default=False)
+    ssh_enabled = ssh
+    if ssh_enabled:
+        ssh_enabled = click.confirm("Probe SSH on this router?", default=True)
+    resolved_ssh_port = int(defaults["ssh_port"] or ssh_port or 22)
+    if ssh_enabled:
+        resolved_ssh_port = click.prompt(
+            "SSH port",
+            default=saved_port or ssh_port,
+            type=int,
+        )
+
+    cred_backend = credential_backend or str(
+        defaults["credential_backend"] or _active_backend_name()
+    )
+    console.print(f"\n[dim]Credential backend: {cred_backend}[/dim]")
+
+    try:
+        result = asyncio.run(
+            setup_router_connection(
+                host=resolved_host,
+                username=username,
+                password=password,
+                http_port=http_port,
+                use_ssl=use_ssl,
+                backend=router_backend,
+                ssh_enabled=ssh_enabled,
+                ssh_port=resolved_ssh_port,
+                credential_backend=cred_backend,
+            )
+        )
+    except Exception as exc:
+        console.print(f"\n[red]Setup failed:[/red] {exc}")
+        raise SystemExit(1) from exc
+
+    console.print(
+        f"\n[green]Connected via HTTP[/green] — profile "
+        f"[cyan]{result.profile.id}[/cyan] saved to {result.profiles_path}"
+    )
+    console.print(f"Credentials stored in [cyan]{result.credentials_backend}[/cyan].")
+    if result.probe.ssh_ok is True:
+        console.print("[green]SSH probe succeeded[/green] — full monitoring enabled.")
+    elif result.probe.ssh_ok is False:
+        console.print(
+            "[yellow]SSH probe failed[/yellow] — continuing with HTTP-only monitoring."
+        )
+        if result.probe.ssh_error:
+            console.print(f"  [dim]{result.probe.ssh_error}[/dim]")
     else:
-        console.print("\n[red]Failed to store credentials.[/red]")
+        console.print("[dim]SSH not probed.[/dim]")
 
 
 @cli.group()

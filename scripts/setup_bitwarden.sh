@@ -39,18 +39,51 @@ if [[ "$STATUS" == "unauthenticated" ]]; then
     STATUS=$(bw status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
 fi
 
-# ── Step 3: Unlock if needed ─────────────────────────────────────────────────
+# ── Step 3: Unlock if needed (Keychain MP only — never interactive) ──────────
 if [[ "$STATUS" == "locked" ]]; then
     echo ""
-    echo "Unlocking vault..."
-    export BW_SESSION=$(bw unlock --passwordenv BW_SESSION 2>/dev/null | sed -n 's/.*BW_SESSION=\([^ ]*\).*/\1/p' || true)
-    if [[ -z "${BW_SESSION:-}" ]]; then
-        # Fallback: interactive unlock
-        echo "Run 'bw unlock' in another terminal and paste the session token:"
-        read -r -s -p "BW_SESSION: " BW_SESSION
-        echo ""
-        export BW_SESSION
-    fi
+    echo "Unlocking vault via Keychain master password (non-interactive)..."
+    SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+    UNLOCK_OUT="$(
+        ROOT="$SCRIPT_ROOT" PYTHONPATH="${SCRIPT_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+src = root / "src"
+if str(src) not in sys.path:
+    sys.path.insert(0, str(src))
+
+from asusroutercontrol.credentials import (
+    ensure_bitwarden_unlocked,
+    get_bitwarden_master_password,
+    get_last_bitwarden_unlock_error,
+)
+
+if not get_bitwarden_master_password():
+    print(
+        "No Bitwarden master password in Keychain.\n"
+        "One-time: asusrouter credentials bw-master --set",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+state = ensure_bitwarden_unlocked()
+session = os.environ.get("BW_SESSION", "").strip()
+if state != "unlocked" or not session:
+    err = get_last_bitwarden_unlock_error() or f"vault status={state}"
+    print(f"Keychain auto-unlock failed: {err}", file=sys.stderr)
+    sys.exit(1)
+print(session)
+PY
+    )" || {
+        echo "❌ Non-interactive unlock failed."
+        echo "  Store MP once: asusrouter credentials bw-master --set"
+        echo "  Then re-run this script. (Interactive bw unlock is disabled.)"
+        exit 1
+    }
+    export BW_SESSION="$UNLOCK_OUT"
 fi
 
 # Final status check

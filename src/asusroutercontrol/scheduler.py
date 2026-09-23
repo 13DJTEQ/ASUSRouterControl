@@ -74,6 +74,38 @@ MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_SCHEDULE = (60, 120, 300)  # seconds
 
 
+
+def _is_login_blocked_error(exc: BaseException) -> bool:
+    """True when router LOGIN is rejecting credentials or requiring captcha."""
+    texts: list[str] = []
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        texts.append(str(cur))
+        # asusrouter AccessError often sits in args
+        for arg in getattr(cur, "args", ()) or ():
+            texts.append(str(arg))
+            name = getattr(arg, "name", None) or getattr(arg, "value", None)
+            if name is not None:
+                texts.append(str(name))
+        cur = cur.__cause__ or cur.__context__
+    blob = " ".join(texts).lower()
+    return any(
+        token in blob
+        for token in (
+            "captcha",
+            "accesserror.captcha",
+            "credentials",
+            "accesserror.credentials",
+            "rejected login",
+            "authorization failed",
+            "temporarily locked",
+            "password reset",
+        )
+    )
+
+
 def _backoff_seconds(consecutive_failures: int) -> float:
     """Return backoff sleep duration based on failure count."""
     if consecutive_failures < MAX_CONSECUTIVE_FAILURES:
@@ -133,6 +165,23 @@ class MonitorScheduler:
         self._failures: dict[str, int] = {}
         self._runtime_profile: RuntimeProfile | None = None
         self._skipped_specs: list[_TaskSpec] = []
+        # When True, poll LOGIN is skipped (Connect in flight / Captcha cooldown).
+        self._login_paused = False
+
+    def pause_login_attempts(self, paused: bool = True) -> None:
+        """Pause or resume poll-loop LOGIN attempts (thread-safe flag)."""
+        self._login_paused = bool(paused)
+        log.info("Scheduler LOGIN pause=%s", self._login_paused)
+
+    def update_config(self, cfg: Config) -> None:
+        """Swap runtime config (e.g. after Connect persists HTTPS :8443 profile)."""
+        self._cfg = cfg
+        log.info(
+            "Scheduler config updated host=%s port=%s ssl=%s",
+            cfg.router_host,
+            cfg.router_port,
+            cfg.use_ssl,
+        )
 
     async def run(self) -> None:
         """Start all task loops as cancellable Tasks."""
@@ -198,6 +247,26 @@ class MonitorScheduler:
                 capability="degraded-no-credentials",
                 operation_mode="unknown",
             )
+
+        ssh_enabled = True
+        try:
+            from asusroutercontrol.profile import load_profiles
+
+            profile = load_profiles(
+                self._cfg.data_dir, runtime_env=self._cfg.runtime_env
+            ).active
+            if profile is not None:
+                ssh_enabled = profile.ssh_enabled
+        except Exception:
+            log.debug("Could not load router profile for SSH gating", exc_info=True)
+
+        if not ssh_enabled:
+            log.info("SSH disabled in active router profile; running degraded-no-ssh")
+            return RuntimeProfile(
+                capability="degraded-no-ssh",
+                operation_mode="unknown",
+            )
+
         ssh_ready, op_mode = await self._probe_ssh_capabilities(
             username=username,
             password=password,
@@ -693,10 +762,36 @@ class MonitorScheduler:
             return
 
         backend = create_backend(cfg, username=username, password=password)
+        login_pause_seconds = 900.0
 
         try:
-            await backend.connect()
             while self._running:
+                if self._login_paused:
+                    await asyncio.sleep(2.0)
+                    continue
+                try:
+                    await backend.connect()
+                except Exception as exc:
+                    await self._store.rollback()
+                    if _is_login_blocked_error(exc):
+                        log.error(
+                            "Poll LOGIN blocked (captcha/credentials): %s — "
+                            "pausing %.0fs. Fix Captcha/credentials, then Connect Router.",
+                            exc,
+                            login_pause_seconds,
+                        )
+                        await asyncio.sleep(login_pause_seconds)
+                        username, password = get_router_credentials()
+                        if username and password:
+                            backend = create_backend(
+                                self._cfg, username=username, password=password
+                            )
+                        continue
+                    log.exception("Poll connect error")
+                    backoff = self._record_failure("poll")
+                    await asyncio.sleep(backoff or self._cfg.poll_interval)
+                    continue
+
                 cycle_start = perf_counter()
                 try:
                     await asyncio.wait_for(
@@ -711,8 +806,25 @@ class MonitorScheduler:
                     backoff = self._record_failure("poll")
                     if backoff > 0:
                         await asyncio.sleep(backoff)
-                except Exception:
+                except Exception as exc:
                     await self._store.rollback()
+                    if _is_login_blocked_error(exc):
+                        log.error(
+                            "Poll LOGIN blocked mid-cycle: %s — pausing %.0fs",
+                            exc,
+                            login_pause_seconds,
+                        )
+                        try:
+                            await backend.disconnect()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(login_pause_seconds)
+                        username, password = get_router_credentials()
+                        if username and password:
+                            backend = create_backend(
+                                self._cfg, username=username, password=password
+                            )
+                        continue
                     log.exception("Poll task error")
                     backoff = self._record_failure("poll")
                     if backoff > 0:

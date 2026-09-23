@@ -29,7 +29,8 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Project build rule (macOS app bundles)
 - DEV builds must be generated with `make build-dev-app` and output to `testbuilds/` under the repository root.
-- Every development cycle must run a fresh `make build-dev-app` before functionality verification, and verification must use that rebuilt DEV bundle (`make verify-dev-app`).
+- **After each implementation/fix pass**, run a fresh `make build-dev-app` before functionality verification; verification must use that rebuilt DEV bundle (`make verify-dev-app` / `open "testbuilds/ASUSRouterControl DEV.app"`). Do not verify against a stale bundle.
+- Cloud/Linux agents cannot build a runnable `.app` (AppKit required). They must still require the rebuild and give the operator the Mac commands; never claim a cloud rebuild succeeded.
 - DEV app bundle is labeled `ASUSRouterControl DEV.app` with a red `DEV` icon for immediate visual separation from production.
 - Production builds must be generated with `make build-prod-dmg` as full self-contained binary `.dmg` files at `dist/ASUSRouterControl.dmg` (not launcher-only app bundles).
 - Use multi-agent workflows as the standard execution model for parallelizable development and validation tasks.
@@ -46,7 +47,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 ### Runtime layers and responsibilities
 - **Configuration & credentials**
   - `config.py` loads non-secret runtime config from env / `.env`.
-  - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with 1Password and keychain fallback migration helpers.
+  - `credentials.py` handles secure credential retrieval/storage via Bitwarden (`universal-keychain-*` naming), with macOS Keychain fallback/mirroring. 1Password remains scaffold-only and is not used in the live credential chain.
 - **Router access**
   - `backends/base.py` defines the firmware backend contract.
   - `backends/factory.py` selects backend from `ROUTER_BACKEND` (`merlin` or `freshtomato`).

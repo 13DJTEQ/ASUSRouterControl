@@ -4,13 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEV_APP="${PROJECT_ROOT}/testbuilds/ASUSRouterControl DEV.app"
+DEV_PLIST="${DEV_APP}/Contents/Info.plist"
 DEV_LAUNCHER="${DEV_APP}/Contents/MacOS/asusroutercontrol-launcher"
+DEV_MACHO="${DEV_APP}/Contents/MacOS/ASUSRouterControlDevRuntime"
 DEV_LAUNCH_LOG="${PROJECT_ROOT}/testbuilds/verify-dev-app.launch.log"
 DEV_DB_PATH="${VERIFY_DEV_APP_DB_PATH:-${HOME}/.asusroutercontrol.dev/router.db}"
 DEV_LOG_PATH="${VERIFY_DEV_APP_LOG_PATH:-${HOME}/.asusroutercontrol.dev/scheduler.log}"
 TIMEOUT_SECONDS="${VERIFY_DEV_APP_TIMEOUT_SECONDS:-120}"
 FRESHNESS_SECONDS="${VERIFY_DEV_APP_FRESHNESS_SECONDS:-180}"
 LAUNCH_TIMEOUT_SECONDS="${VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS:-12}"
+LSREGISTER_BIN="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -21,6 +24,116 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
+diagnose_dev_app() {
+  echo "[verify-dev-app] Launch diagnostics for: ${DEV_APP}" >&2
+  if [[ ! -d "${DEV_APP}" ]]; then
+    echo "  - bundle missing" >&2
+    return 0
+  fi
+  echo "  - bundle exists: yes" >&2
+  if [[ -f "${DEV_PLIST}" ]]; then
+    echo "  - Info.plist: ${DEV_PLIST}" >&2
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -lint "${DEV_PLIST}" >&2 || true
+      local cf_exec
+      cf_exec="$(plutil -extract CFBundleExecutable raw "${DEV_PLIST}" 2>/dev/null || true)"
+      echo "  - CFBundleExecutable: ${cf_exec:-<unreadable>}" >&2
+      if [[ -n "${cf_exec}" ]]; then
+        local exec_path="${DEV_APP}/Contents/MacOS/${cf_exec}"
+        if [[ -x "${exec_path}" ]]; then
+          echo "  - executable path exists+executable: ${exec_path}" >&2
+          if command -v file >/dev/null 2>&1; then
+            echo "  - file(1): $(file -b "${exec_path}" 2>/dev/null || true)" >&2
+          fi
+        else
+          echo "  - executable path MISSING or not executable: ${exec_path}" >&2
+        fi
+      fi
+      local cf_ver
+      cf_ver="$(plutil -extract CFBundleVersion raw "${DEV_PLIST}" 2>/dev/null || true)"
+      echo "  - CFBundleVersion: ${cf_ver:-<unreadable>}" >&2
+    else
+      echo "  - plutil not available" >&2
+    fi
+  else
+    echo "  - Info.plist missing" >&2
+  fi
+  if [[ -x "${DEV_LAUNCHER}" ]]; then
+    echo "  - launcher executable: ${DEV_LAUNCHER}" >&2
+  else
+    echo "  - launcher missing/non-executable: ${DEV_LAUNCHER}" >&2
+  fi
+  if [[ -e "${DEV_MACHO}" ]]; then
+    echo "  - bundled Mach-O present: ${DEV_MACHO}" >&2
+  fi
+  if command -v xattr >/dev/null 2>&1; then
+    echo "  - xattr (bundle, first 40 lines):" >&2
+    xattr -lr "${DEV_APP}" 2>/dev/null | head -n 40 >&2 || echo "  - xattr: none/unreadable" >&2
+  fi
+  if command -v codesign >/dev/null 2>&1; then
+    echo "  - codesign -dv:" >&2
+    codesign -dv --verbose=2 "${DEV_APP}" 2>&1 | head -n 30 >&2 || true
+  fi
+  echo "  - absolute path: ${DEV_APP}" >&2
+  echo "  - recovery: xattr -cr \"${DEV_APP}\" && open -n \"${DEV_APP}\"" >&2
+  echo "  - recovery fallback: nohup \"${DEV_LAUNCHER}\" >/tmp/asusroutercontrol-dev.launch.log 2>&1 &" >&2
+}
+
+wait_for_dev_runtime() {
+  local label="$1"
+  VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS="${LAUNCH_TIMEOUT_SECONDS}" \
+  VERIFY_DEV_APP_LAUNCH_LABEL="${label}" \
+  "${PYTHON_BIN}" - <<'PY'
+import os
+import subprocess
+import time
+
+timeout_seconds = int(os.environ["VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS"])
+label = os.environ.get("VERIFY_DEV_APP_LAUNCH_LABEL", "launch")
+
+
+def _dev_process_running() -> bool:
+    try:
+        out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
+    except subprocess.CalledProcessError:
+        return False
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        cmd = parts[1]
+        cmd_l = cmd.lower()
+        if (
+            ("asusroutercontrol_runtime_env=dev" in cmd_l and "asusroutercontrol" in cmd_l)
+            or "asusroutercontroldevruntime" in cmd_l
+            or "asusroutercontrol dev.app" in cmd_l
+        ):
+            return True
+    return False
+
+
+deadline = time.time() + timeout_seconds
+seen_at: float | None = None
+while time.time() < deadline:
+    now = time.time()
+    if _dev_process_running():
+        if seen_at is None:
+            seen_at = now
+        elif now - seen_at >= 2.0:
+            print(f"DEV runtime detected after {label} (stable).")
+            raise SystemExit(0)
+    else:
+        seen_at = None
+    time.sleep(0.5)
+
+print(f"No DEV runtime detected after {label} attempt.")
+raise SystemExit(1)
+PY
+}
+
 echo "[verify-dev-app 1/3] Building DEV app bundle"
 bash "${SCRIPT_DIR}/build_macos_app.sh" --mode dev
 
@@ -28,6 +141,13 @@ if [[ ! -d "${DEV_APP}" ]]; then
   echo "Expected DEV app bundle missing: ${DEV_APP}" >&2
   exit 1
 fi
+
+# Absolute path avoids Launch Services ambiguity with spaces in
+# "ASUSRouterControl DEV.app".
+DEV_APP="$(cd "$(dirname "${DEV_APP}")" && pwd)/$(basename "${DEV_APP}")"
+DEV_PLIST="${DEV_APP}/Contents/Info.plist"
+DEV_LAUNCHER="${DEV_APP}/Contents/MacOS/asusroutercontrol-launcher"
+DEV_MACHO="${DEV_APP}/Contents/MacOS/ASUSRouterControlDevRuntime"
 
 echo "[verify-dev-app 2/3] Relaunching DEV app"
 "${PYTHON_BIN}" - <<'PY'
@@ -56,7 +176,8 @@ def _dev_runtime_pids() -> list[int]:
         is_dev_env = "ASUSROUTERCONTROL_RUNTIME_ENV=dev" in cmd
         is_router_proc = "asusroutercontrol" in cmd_l
         is_dev_app_path = "ASUSRouterControl DEV.app" in cmd
-        if (is_dev_env and is_router_proc) or is_dev_app_path:
+        is_dev_macho = "ASUSRouterControlDevRuntime" in cmd
+        if (is_dev_env and is_router_proc) or is_dev_app_path or is_dev_macho:
             pids.append(pid)
     return sorted(set(pids))
 
@@ -90,67 +211,57 @@ if remaining:
             pass
 PY
 
+if command -v xattr >/dev/null 2>&1; then
+  echo "Clearing quarantine/xattrs on DEV.app"
+  xattr -cr "${DEV_APP}" 2>/dev/null || true
+fi
+if [[ -x "${LSREGISTER_BIN}" ]]; then
+  echo "Re-registering DEV.app with Launch Services"
+  "${LSREGISTER_BIN}" -u "${DEV_APP}" >/dev/null 2>&1 || true
+  "${LSREGISTER_BIN}" -f "${DEV_APP}" >/dev/null 2>&1 || true
+fi
+
+OPEN_RC=0
+echo "Launching via open -n (absolute path): ${DEV_APP}"
+# Do not abort on LS error -54; fall through to direct launcher execution.
+set +e
 open -n "${DEV_APP}"
+OPEN_RC=$?
+set -e
+if [[ "${OPEN_RC}" -ne 0 ]]; then
+  echo "open failed with exit ${OPEN_RC} (often LS error -54). Will try direct executable." >&2
+fi
 
-if ! VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS="${LAUNCH_TIMEOUT_SECONDS}" \
-"${PYTHON_BIN}" - <<'PY'
-import os
-import subprocess
-import time
-
-timeout_seconds = int(os.environ["VERIFY_DEV_APP_LAUNCH_TIMEOUT_SECONDS"])
-
-
-def _dev_process_running() -> bool:
-    try:
-        out = subprocess.check_output(["ps", "eww", "-Ao", "pid=,command="], text=True)
-    except subprocess.CalledProcessError:
-        return False
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        cmd = parts[1]
-        cmd_l = cmd.lower()
-        if (
-            "asusroutercontrol_runtime_env=dev" in cmd_l
-            and "asusroutercontrol" in cmd_l
-        ):
-            return True
-    return False
-
-
-deadline = time.time() + timeout_seconds
-seen_at: float | None = None
-while time.time() < deadline:
-    now = time.time()
-    if _dev_process_running():
-        if seen_at is None:
-            seen_at = now
-        elif now - seen_at >= 2.0:
-            print("DEV runtime detected after open launch (stable).")
-            raise SystemExit(0)
-    else:
-        seen_at = None
-    time.sleep(0.5)
-
-print("No DEV runtime detected after open launch attempt.")
-raise SystemExit(1)
-PY
-then
+LAUNCHED_VIA="open"
+if ! wait_for_dev_runtime "open launch"; then
   echo "Falling back to direct launcher execution: ${DEV_LAUNCHER}"
   if [[ ! -x "${DEV_LAUNCHER}" ]]; then
     echo "Missing or non-executable launcher: ${DEV_LAUNCHER}" >&2
+    diagnose_dev_app
     exit 1
   fi
   mkdir -p "$(dirname "${DEV_LAUNCH_LOG}")"
+  export ASUSROUTERCONTROL_RUNTIME_ENV=dev
+  export ASUSROUTERCONTROL_ENV_FILE="${HOME}/.asusroutercontrol.dev/.env"
+  export DATA_DIR="${HOME}/.asusroutercontrol.dev"
+  # KEYCHAIN_PATH intentionally unset — keyring ignores it (#623); use security -A.
+  unset KEYCHAIN_PATH || true
   nohup "${DEV_LAUNCHER}" >"${DEV_LAUNCH_LOG}" 2>&1 &
+  LAUNCHED_VIA="direct"
+  if ! wait_for_dev_runtime "direct launcher"; then
+    echo "Direct launch also failed to produce a DEV runtime process." >&2
+    echo "Launcher log (tail): ${DEV_LAUNCH_LOG}" >&2
+    if [[ -f "${DEV_LAUNCH_LOG}" ]]; then
+      tail -n 40 "${DEV_LAUNCH_LOG}" >&2 || true
+    fi
+    diagnose_dev_app
+    exit 1
+  fi
 fi
+echo "DEV app launch path: ${LAUNCHED_VIA}"
 
 echo "[verify-dev-app 3/3] Running smoke-check"
+set +e
 VERIFY_DEV_APP_TIMEOUT_SECONDS="${TIMEOUT_SECONDS}" \
 VERIFY_DEV_APP_FRESHNESS_SECONDS="${FRESHNESS_SECONDS}" \
 VERIFY_DEV_APP_DB_PATH="${DEV_DB_PATH}" \
@@ -195,8 +306,9 @@ def _dev_process_running() -> bool:
         cmd = parts[1]
         cmd_l = cmd.lower()
         if (
-            "asusroutercontrol_runtime_env=dev" in cmd_l
-            and "asusroutercontrol" in cmd_l
+            ("asusroutercontrol_runtime_env=dev" in cmd_l and "asusroutercontrol" in cmd_l)
+            or "asusroutercontroldevruntime" in cmd_l
+            or "asusroutercontrol dev.app" in cmd_l
         ):
             return True
     return False
@@ -287,5 +399,11 @@ print(f"- latest_scheduler_log_timestamp={last_log_ts}")
 print(f"- recent_scheduler_log_activity={last_log_fresh}")
 raise SystemExit(1)
 PY
+SMOKE_RC=$?
+set -e
+if [[ "${SMOKE_RC}" -ne 0 ]]; then
+  diagnose_dev_app
+  exit "${SMOKE_RC}"
+fi
 
 echo "[verify-dev-app] Completed successfully."

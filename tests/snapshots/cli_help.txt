@@ -28,7 +28,7 @@ Commands:
   scheduler                Manage the background monitoring scheduler.
   scripts                  Manage JFFS custom scripts (Merlin).
   security                 Run security posture check.
-  setup                    Store router credentials in 1Password...
+  setup                    Store router credentials in Bitwarden...
   speedtest                Run a multi-source speed test.
   ssh                      Manage SSH trust and host key pinning.
   status                   Show router system info and WAN status.
