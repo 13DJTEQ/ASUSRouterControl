@@ -1,4 +1,4 @@
-.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app
+.PHONY: setup install dev rebuild app asusroutercontrol run-menubar test lint clean unhide-site-packages build-dev-app verify-dev-app launch-dev-app mac-pull mac-test ci-local
 
 VENV_PYTHON := .venv/bin/python
 SITE_PACKAGES_PY := import site; paths=[p for p in site.getsitepackages() if p.endswith("site-packages")]; print(paths[0] if paths else "")
@@ -44,6 +44,21 @@ build-dev-app:
 verify-dev-app:
 	bash scripts/verify_dev_app.sh
 launch-dev-app: verify-dev-app
+
+# Mac Connect helpers (Darwin). BRANCH=... SKIP_UNIT=1 LOGS=1 DRY_RUN=1 supported.
+mac-pull:
+	BRANCH="$(BRANCH)" bash scripts/pull_test_branch.sh --no-next $(BRANCH)
+
+mac-test:
+	BRANCH="$(BRANCH)" bash scripts/mac_test_connect.sh \
+		$(if $(filter 1,$(SKIP_UNIT)),--skip-unit) \
+		$(if $(filter 1,$(SKIP_PULL)),--skip-pull) \
+		$(if $(filter 1,$(LOGS)),--logs) \
+		$(if $(filter 1,$(DRY_RUN)),--dry-run)
+
+# Linux-safe local CI mirror (ruff + pytest + compileall). No Mac app steps.
+ci-local:
+	bash scripts/validate.sh
 
 app: run-menubar
 

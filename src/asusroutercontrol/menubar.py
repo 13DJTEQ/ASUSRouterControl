@@ -1785,8 +1785,9 @@ class AppDelegate(NSObject):
             if not username or not password:
                 raise ConnectionError(
                     "Missing router username/password after credential resolve. "
-                    "Run: bash scripts/bw_sync_router_env.sh && "
-                    "asusrouter credentials bw-master --set"
+                    "In Terminal: bw unlock once, export BW_SESSION, then "
+                    "bash scripts/bw_sync_router_env.sh (Keychain mirror). "
+                    "Leave password blank on Connect when the mirror exists."
                 )
 
             result = asyncio.run(

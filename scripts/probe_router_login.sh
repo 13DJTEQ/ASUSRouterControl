@@ -75,6 +75,11 @@ fi
 if [[ -z "${ROUTER_PASS:-}" ]]; then
   echo "No password from Bitwarden (status=${BW_STATUS})." >&2
   echo "Run: bash scripts/bw_sync_router_env.sh" >&2
+  # Orchestrator / CI: never block on interactive password entry.
+  if [[ "${NONINTERACTIVE:-0}" == "1" ]] || [[ ! -t 0 ]]; then
+    echo "Non-interactive probe: refusing password prompt." >&2
+    exit 1
+  fi
   read -r -s -p "Router password for ${ROUTER_USER}@${HOST}: " ROUTER_PASS
   echo
   export ROUTER_PASS

@@ -2,9 +2,11 @@
 # Unlock Bitwarden (if needed) and sync the lab router login item into DEV .env
 # so the menubar app can read username / SSH port / BW_SESSION.
 #
-# Keychain master-password unlock only via ensure_bitwarden_unlocked().
-# Never prompts for the Bitwarden master password. If Keychain unlock + mirror
-# are impossible, exits with a clear error.
+# Unlock order (never prompts for the Bitwarden master password):
+#   1. Existing valid BW_SESSION in env / .env
+#   2. Community Keychain service BW_SESSION (via ensure_bitwarden_unlocked)
+#   3. Keychain master-password candidates (secondary)
+# If still locked: exit non-zero with Terminal steps (stock `bw unlock` once).
 #
 # Item: router.asus.com (13Maschine)
 #
@@ -58,7 +60,7 @@ fi
 
 _try_keychain_unlock() {
   # Prints session token on stdout when vault becomes unlocked; returns 0 on success.
-  # Exit 2 = no Keychain master password. Exit 1 = unlock attempted and failed.
+  # Exit 2 = no Keychain session/MP. Exit 1 = unlock attempted and failed.
   ROOT="$ROOT" "$PY" - <<'PY'
 import os
 import sys
@@ -71,15 +73,23 @@ if str(src) not in sys.path:
 
 from asusroutercontrol.credentials import (  # noqa: E402
     bitwarden_master_password_keychain_present,
+    discover_bw_session_from_keychain,
     ensure_bitwarden_unlocked,
     get_bitwarden_master_password,
     get_last_bitwarden_unlock_error,
 )
 
-if not get_bitwarden_master_password() and not bitwarden_master_password_keychain_present():
+kc_token, kc_path = discover_bw_session_from_keychain()
+has_mp = bool(
+    get_bitwarden_master_password() or bitwarden_master_password_keychain_present()
+)
+if not kc_token and not has_mp:
     print(
-        "No Bitwarden master password in Keychain.\n"
-        "One-time setup: asusrouter credentials bw-master --set",
+        "No Keychain BW_SESSION or master password found.\n"
+        "In Terminal (stock bw, once):\n"
+        "  bw unlock\n"
+        "  export BW_SESSION=\"<token from unlock --raw>\"\n"
+        "  bash scripts/bw_sync_router_env.sh",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -89,12 +99,34 @@ session = os.environ.get("BW_SESSION", "").strip()
 if state != "unlocked" or not session:
     err = get_last_bitwarden_unlock_error() or f"vault status={state}"
     print(f"Keychain auto-unlock failed: {err}", file=sys.stderr)
+    print(
+        "In Terminal (stock bw, once — this script does not prompt):\n"
+        "  bw unlock\n"
+        "  export BW_SESSION=\"<token>\"\n"
+        "  bash scripts/bw_sync_router_env.sh",
+        file=sys.stderr,
+    )
     sys.exit(1)
+if kc_path:
+    print(f"Unlocked via Keychain session candidate ({kc_path})", file=sys.stderr)
 print(session)
 PY
 }
 
 if echo "$status" | grep -qi 'locked' || [[ -z "${BW_SESSION:-}" ]]; then
+  # If status says locked while BW_SESSION is set, clear stale token via Python.
+  if echo "$status" | grep -qi 'locked' && [[ -n "${BW_SESSION:-}" ]]; then
+    ROOT="$ROOT" "$PY" - <<'PY' || true
+import os, sys
+from pathlib import Path
+root = Path(os.environ["ROOT"])
+sys.path.insert(0, str(root / "src"))
+from asusroutercontrol.credentials import clear_stale_bw_session
+clear_stale_bw_session(reason="bw_sync: bw status locked with BW_SESSION set")
+print("Cleared stale BW_SESSION before Keychain unlock attempt.", file=sys.stderr)
+PY
+    unset BW_SESSION || true
+  fi
   err_file="$(mktemp "${TMPDIR:-/tmp}/bw_keychain_unlock.XXXXXX")"
   set +e
   session="$(_try_keychain_unlock 2>"$err_file")"
@@ -102,21 +134,23 @@ if echo "$status" | grep -qi 'locked' || [[ -z "${BW_SESSION:-}" ]]; then
   set -e
   if [[ "$kc_rc" -eq 0 && -n "$session" ]]; then
     export BW_SESSION="$session"
-    echo "Unlocked Bitwarden via Keychain master password."
+    echo "Unlocked Bitwarden via Keychain BW_SESSION / master password."
   else
     if [[ -s "$err_file" ]]; then
       cat "$err_file" >&2 || true
     fi
     rm -f "$err_file"
     if [[ "$kc_rc" -eq 2 ]]; then
-      echo "Non-interactive sync requires a Keychain master password." >&2
-      echo "One-time setup: asusrouter credentials bw-master --set" >&2
-      echo "Then re-run: bash scripts/bw_sync_router_env.sh" >&2
+      echo "Non-interactive sync requires a Keychain BW_SESSION or prior unlock." >&2
+      echo "In Terminal (stock bw, once — no prompt in this script):" >&2
+      echo "  bw unlock" >&2
+      echo "  export BW_SESSION=\"<token>\"" >&2
+      echo "  bash scripts/bw_sync_router_env.sh" >&2
       exit 2
     fi
     echo "Keychain auto-unlock did not unlock the vault." >&2
     echo "Check: asusrouter credentials bw-master --status" >&2
-    echo "Interactive bw unlock is disabled — MP must come from Keychain." >&2
+    echo "Interactive bw unlock is disabled here — unlock once via stock bw yourself." >&2
     exit 1
   fi
   rm -f "$err_file"
@@ -224,3 +258,4 @@ PY
 
 echo
 echo "Next: quit DEV.app, then rebuild and relaunch from testbuilds."
+echo "Connect with blank password — Keychain mirror is primary when vault is locked."
