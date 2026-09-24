@@ -135,7 +135,11 @@ PY
 }
 
 echo "[verify-dev-app 1/3] Building DEV app bundle"
-bash "${SCRIPT_DIR}/build_macos_app.sh" --mode dev
+if [[ "${VERIFY_DEV_APP_SKIP_BUILD:-0}" == "1" ]]; then
+  echo "[verify-dev-app] Skipping rebuild (VERIFY_DEV_APP_SKIP_BUILD=1)"
+else
+  bash "${SCRIPT_DIR}/build_macos_app.sh" --mode dev
+fi
 
 if [[ ! -d "${DEV_APP}" ]]; then
   echo "Expected DEV app bundle missing: ${DEV_APP}" >&2
